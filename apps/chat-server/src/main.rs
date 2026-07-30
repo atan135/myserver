@@ -28,6 +28,12 @@ const DEFAULT_WS_HANDSHAKE_TIMEOUT_SECS: u64 = 5;
 const DEFAULT_WS_HANDSHAKE_MAX_BYTES: usize = 16 * 1024;
 const DEFAULT_WS_MAX_PENDING_HANDSHAKES: usize = 64;
 const DEFAULT_WS_BRIDGE_CAPACITY: usize = 8 * 1024;
+const MAX_WS_HANDSHAKE_TIMEOUT_SECS: u64 = 30;
+const MAX_WS_HANDSHAKE_MAX_BYTES: usize = 64 * 1024;
+const MAX_WS_PENDING_HANDSHAKES: usize = 4096;
+const MAX_WS_BRIDGE_CAPACITY: usize = 1024 * 1024;
+const MAX_CHAT_BODY_BYTES: usize = 16 * 1024 * 1024;
+const CHAT_PROTOCOL_VERSION: u8 = 1;
 
 struct Config {
     db_enabled: bool,
@@ -83,11 +89,20 @@ impl Config {
     fn from_env() -> Self {
         let bind_addr = bind_addr_from_env("CHAT_BIND_ADDR", "0.0.0.0:9001");
         let ws_bind_addr = bind_addr_from_env("CHAT_WS_BIND_ADDR", "0.0.0.0:9011");
-        let max_body_len = std::env::var("MAX_BODY_LEN")
-            .unwrap_or_else(|_| "4096".to_string())
-            .parse()
-            .unwrap_or(4096);
+        let max_body_len =
+            parse_positive_usize_env_strict("MAX_BODY_LEN", 4096, MAX_CHAT_BODY_BYTES);
         let default_ws_max_frame_len = protocol::HEADER_LEN.saturating_add(max_body_len);
+        let ws_max_frame_len = parse_positive_usize_env_strict(
+            "CHAT_WS_MAX_FRAME_LEN",
+            default_ws_max_frame_len,
+            default_ws_max_frame_len,
+        );
+        if ws_max_frame_len < protocol::HEADER_LEN {
+            panic!(
+                "invalid CHAT_WS_MAX_FRAME_LEN: must be at least the {}-byte protocol header",
+                protocol::HEADER_LEN
+            );
+        }
         let legacy_compatibility = resolve_mail_legacy_compatibility(
             mail_legacy_strict_policy_from_env(),
             std::env::var("CHAT_MAIL_ACCEPT_LEGACY_PAYLOAD")
@@ -109,32 +124,32 @@ impl Config {
                 .parse()
                 .unwrap_or(5),
             bind_addr: bind_addr.clone(),
-            ws_enabled: parse_bool_env("CHAT_WS_ENABLED", false),
+            ws_enabled: parse_strict_bool_env("CHAT_WS_ENABLED", false),
             ws_bind_addr,
-            ws_handshake_timeout_secs: parse_positive_u64_env(
+            ws_handshake_timeout_secs: parse_positive_u64_env_strict(
                 "CHAT_WS_HANDSHAKE_TIMEOUT_SECS",
                 DEFAULT_WS_HANDSHAKE_TIMEOUT_SECS,
+                MAX_WS_HANDSHAKE_TIMEOUT_SECS,
             ),
-            ws_handshake_max_bytes: parse_positive_usize_env(
+            ws_handshake_max_bytes: parse_positive_usize_env_strict(
                 "CHAT_WS_HANDSHAKE_MAX_BYTES",
                 DEFAULT_WS_HANDSHAKE_MAX_BYTES,
+                MAX_WS_HANDSHAKE_MAX_BYTES,
             ),
-            ws_max_pending_handshakes: parse_positive_usize_env(
+            ws_max_pending_handshakes: parse_positive_usize_env_strict(
                 "CHAT_WS_MAX_PENDING_HANDSHAKES",
                 DEFAULT_WS_MAX_PENDING_HANDSHAKES,
+                MAX_WS_PENDING_HANDSHAKES,
             ),
             ws_trusted_proxies: websocket::TrustedProxySet::parse_csv(
                 &std::env::var("CHAT_WS_TRUSTED_PROXY_CIDRS").unwrap_or_default(),
             )
             .unwrap_or_else(|error| panic!("invalid CHAT_WS_TRUSTED_PROXY_CIDRS: {error}")),
-            ws_max_frame_len: parse_positive_usize_env(
-                "CHAT_WS_MAX_FRAME_LEN",
-                default_ws_max_frame_len,
-            )
-            .min(default_ws_max_frame_len),
-            ws_bridge_capacity: parse_positive_usize_env(
+            ws_max_frame_len,
+            ws_bridge_capacity: parse_positive_usize_env_strict(
                 "CHAT_WS_BRIDGE_CAPACITY",
                 DEFAULT_WS_BRIDGE_CAPACITY,
+                MAX_WS_BRIDGE_CAPACITY,
             ),
             heartbeat_timeout_secs: std::env::var("HEARTBEAT_TIMEOUT_SECS")
                 .unwrap_or_else(|_| "30".to_string())
@@ -225,6 +240,7 @@ impl Config {
             log_dir: std::env::var("LOG_DIR").unwrap_or_else(|_| "logs".to_string()),
         };
 
+        validate_listener_config(&config);
         validate_production_config(&config);
         validate_discovery_config(&config);
 
@@ -377,6 +393,29 @@ fn validate_discovery_config(config: &Config) {
     }
 }
 
+fn validate_listener_config(config: &Config) {
+    let tcp_addr = config
+        .bind_addr
+        .parse::<SocketAddr>()
+        .unwrap_or_else(|_| panic!("invalid CHAT_BIND_ADDR: {}", config.bind_addr));
+    let ws_addr = config
+        .ws_bind_addr
+        .parse::<SocketAddr>()
+        .unwrap_or_else(|_| panic!("invalid CHAT_WS_BIND_ADDR: {}", config.ws_bind_addr));
+
+    if tcp_addr.port() == 0 {
+        panic!("invalid CHAT_BIND_ADDR: port must be in 1..=65535");
+    }
+    if ws_addr.port() == 0 {
+        panic!("invalid CHAT_WS_BIND_ADDR: port must be in 1..=65535");
+    }
+    if config.ws_enabled && tcp_addr.port() == ws_addr.port() {
+        panic!(
+            "invalid chat-server listener config: CHAT_WS_BIND_ADDR must use a different port than CHAT_BIND_ADDR"
+        );
+    }
+}
+
 fn validate_production_config(config: &Config) {
     if !is_production_env() {
         return;
@@ -404,6 +443,17 @@ fn validate_production_config(config: &Config) {
     {
         panic!(
             "invalid chat-server production config: GLOBAL_ID_WORKER_ID must be set to 0-63 in production"
+        );
+    }
+
+    if config.ws_enabled && config.ws_trusted_proxies.is_empty() {
+        panic!(
+            "invalid chat-server production config: CHAT_WS_TRUSTED_PROXY_CIDRS must identify the internal reverse proxy when WSS is enabled"
+        );
+    }
+    if config.ws_enabled && config.ws_trusted_proxies.contains_universal_network() {
+        panic!(
+            "invalid chat-server production config: CHAT_WS_TRUSTED_PROXY_CIDRS must not trust an IPv4 or IPv6 /0 network"
         );
     }
 }
@@ -453,6 +503,30 @@ fn parse_positive_usize_env(name: &str, default_value: usize) -> usize {
         .unwrap_or(default_value)
 }
 
+fn parse_positive_u64_env_strict(name: &str, default_value: u64, max_value: u64) -> u64 {
+    match std::env::var(name) {
+        Ok(raw) => raw
+            .trim()
+            .parse::<u64>()
+            .ok()
+            .filter(|value| *value > 0 && *value <= max_value)
+            .unwrap_or_else(|| panic!("invalid {name}: must be an integer in 1..={max_value}")),
+        Err(_) => default_value,
+    }
+}
+
+fn parse_positive_usize_env_strict(name: &str, default_value: usize, max_value: usize) -> usize {
+    match std::env::var(name) {
+        Ok(raw) => raw
+            .trim()
+            .parse::<usize>()
+            .ok()
+            .filter(|value| *value > 0 && *value <= max_value)
+            .unwrap_or_else(|| panic!("invalid {name}: must be an integer in 1..={max_value}")),
+        Err(_) => default_value,
+    }
+}
+
 fn parse_optional_u64_env(name: &str) -> Option<u64> {
     let raw = std::env::var(name).ok()?;
     let trimmed = raw.trim();
@@ -468,11 +542,31 @@ fn parse_bool_env(name: &str, default_value: bool) -> bool {
         .unwrap_or(default_value)
 }
 
+fn parse_strict_bool_env(name: &str, default_value: bool) -> bool {
+    match std::env::var(name) {
+        Ok(raw) => match raw.trim().to_ascii_lowercase().as_str() {
+            "true" | "1" => true,
+            "false" | "0" => false,
+            _ => panic!("invalid {name}: must be true, false, 1, or 0"),
+        },
+        Err(_) => default_value,
+    }
+}
+
 fn registry_metadata(config: &Config) -> serde_json::Value {
+    let mut transport_capabilities = vec!["tcp"];
+    if config.ws_enabled {
+        transport_capabilities.push("websocket_binary");
+    }
     serde_json::json!({
         "service_name": config.service_name,
         "service_instance_id": config.service_instance_id,
         "instance_id": config.service_instance_id,
+        "transport_capabilities": transport_capabilities,
+        "chat_protocol_version": CHAT_PROTOCOL_VERSION,
+        "max_body_bytes": config.max_body_len,
+        "max_websocket_body_bytes": websocket_max_body_bytes(config),
+        "max_websocket_frame_bytes": config.ws_max_frame_len,
         "online_route_ttl_secs": config.online_route_ttl_secs,
         "mail_notification_contract_version": 1,
         "mail_accept_legacy_payload": config.mail_notify_accept_legacy_payload,
@@ -482,27 +576,84 @@ fn registry_metadata(config: &Config) -> serde_json::Value {
     })
 }
 
-fn build_service_instance(config: &Config, port: u16) -> ServiceInstance {
+fn websocket_max_body_bytes(config: &Config) -> usize {
+    config
+        .max_body_len
+        .min(config.ws_max_frame_len.saturating_sub(protocol::HEADER_LEN))
+}
+
+fn endpoint_metadata(config: &Config, transport: &str) -> serde_json::Value {
+    let capability = if transport == "ws" {
+        "websocket_binary_message"
+    } else {
+        "binary_packet_stream"
+    };
+    let transport_name = if transport == "ws" {
+        "websocket"
+    } else {
+        transport
+    };
+    serde_json::json!({
+        "transport": transport_name,
+        "capability": capability,
+        "chat_protocol_version": CHAT_PROTOCOL_VERSION,
+        "max_body_bytes": if transport == "ws" {
+            websocket_max_body_bytes(config)
+        } else {
+            config.max_body_len
+        },
+        "max_frame_bytes": if transport == "ws" {
+            config.ws_max_frame_len
+        } else {
+            protocol::HEADER_LEN.saturating_add(config.max_body_len)
+        },
+        "build_version": config.service_build_version,
+    })
+}
+
+fn build_service_instance(
+    config: &Config,
+    tcp_port: u16,
+    websocket_port: Option<u16>,
+) -> ServiceInstance {
     let public_host = published_host(&config.public_host);
     let metadata = registry_metadata(config);
+    let mut endpoints = vec![ServiceEndpoint {
+        name: "tcp".to_string(),
+        protocol: "tcp".to_string(),
+        host: public_host.clone(),
+        port: tcp_port,
+        socket: String::new(),
+        visibility: "internal".to_string(),
+        metadata: endpoint_metadata(config, "tcp"),
+        healthy: true,
+    }];
+    let mut tags = vec!["chat".to_string(), "tcp".to_string()];
+    if config.ws_enabled {
+        let websocket_port =
+            websocket_port.expect("enabled WebSocket listener must have a bound registry port");
+        endpoints.push(ServiceEndpoint {
+            name: "ws".to_string(),
+            protocol: "ws".to_string(),
+            host: public_host.clone(),
+            port: websocket_port,
+            socket: String::new(),
+            visibility: "internal".to_string(),
+            metadata: endpoint_metadata(config, "ws"),
+            healthy: true,
+        });
+        tags.push("ws".to_string());
+    }
+
     ServiceInstance::new(
         config.service_instance_id.clone(),
         config.service_name.clone(),
         public_host.clone(),
-        port,
+        tcp_port,
     )
-    .with_endpoints(vec![ServiceEndpoint {
-        name: "tcp".to_string(),
-        protocol: "tcp".to_string(),
-        host: public_host,
-        port,
-        socket: String::new(),
-        visibility: "internal".to_string(),
-        metadata: metadata.clone(),
-        healthy: true,
-    }])
+    .with_endpoints(endpoints)
     .with_metadata(metadata)
-    .with_tags(vec!["chat".to_string(), "tcp".to_string()])
+    .with_tags(tags)
 }
 
 fn published_host(host: &str) -> String {
@@ -573,6 +724,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         registry_enabled = config.registry_enabled,
         "chat-server starting"
     );
+
+    let server_config = chat_server::Config {
+        bind_addr: config.bind_addr.clone(),
+        ws_enabled: config.ws_enabled,
+        ws_bind_addr: config.ws_bind_addr.clone(),
+        ws_handshake_timeout_secs: config.ws_handshake_timeout_secs,
+        ws_handshake_max_bytes: config.ws_handshake_max_bytes,
+        ws_max_pending_handshakes: config.ws_max_pending_handshakes,
+        ws_trusted_proxies: config.ws_trusted_proxies.clone(),
+        ws_max_frame_len: config.ws_max_frame_len,
+        ws_bridge_capacity: config.ws_bridge_capacity,
+        heartbeat_timeout_secs: config.heartbeat_timeout_secs,
+        max_body_len: config.max_body_len,
+        msg_rate_window_ms: config.msg_rate_window_ms,
+        msg_rate_max: config.msg_rate_max,
+        max_connections_per_player: config.max_connections_per_player,
+        max_connections_per_ip: config.max_connections_per_ip,
+        ticket_secret: config.ticket_secret.clone(),
+        redis_url: config.redis_url.clone(),
+        redis_key_prefix: config.redis_key_prefix.clone(),
+        service_instance_id: config.service_instance_id.clone(),
+        online_route_ttl_secs: config.online_route_ttl_secs,
+        outbound_queue_capacity: config.outbound_queue_capacity,
+    };
+    let bound_listeners = chat_server::bind_listeners(&server_config).await?;
+    let tcp_port = bound_listeners.tcp_port()?;
+    let websocket_port = bound_listeners.websocket_port()?;
 
     let redis_client = redis::Client::open(config.redis_url.clone())?;
     let mut global_id_redis = redis_client.get_multiplexed_async_connection().await?;
@@ -668,8 +846,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let client = client
                     .with_key_prefix(config.registry_key_prefix.clone())
                     .with_heartbeat_interval(config.registry_heartbeat_interval_secs);
-                let port = extract_port(&config.bind_addr)?;
-                let instance = build_service_instance(&config, port);
+                let instance = build_service_instance(&config, tcp_port, websocket_port);
 
                 if let Err(e) = client.register(&instance).await {
                     tracing::error!(error = %e, "failed to register service");
@@ -716,30 +893,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .await;
     });
 
-    let server_config = chat_server::Config {
-        bind_addr: config.bind_addr.clone(),
-        ws_enabled: config.ws_enabled,
-        ws_bind_addr: config.ws_bind_addr.clone(),
-        ws_handshake_timeout_secs: config.ws_handshake_timeout_secs,
-        ws_handshake_max_bytes: config.ws_handshake_max_bytes,
-        ws_max_pending_handshakes: config.ws_max_pending_handshakes,
-        ws_trusted_proxies: config.ws_trusted_proxies.clone(),
-        ws_max_frame_len: config.ws_max_frame_len,
-        ws_bridge_capacity: config.ws_bridge_capacity,
-        heartbeat_timeout_secs: config.heartbeat_timeout_secs,
-        max_body_len: config.max_body_len,
-        msg_rate_window_ms: config.msg_rate_window_ms,
-        msg_rate_max: config.msg_rate_max,
-        max_connections_per_player: config.max_connections_per_player,
-        max_connections_per_ip: config.max_connections_per_ip,
-        ticket_secret: config.ticket_secret.clone(),
-        redis_url: config.redis_url.clone(),
-        redis_key_prefix: config.redis_key_prefix.clone(),
-        service_instance_id: config.service_instance_id.clone(),
-        online_route_ttl_secs: config.online_route_ttl_secs,
-        outbound_queue_capacity: config.outbound_queue_capacity,
-    };
-
     // Create chat sessions map for mail notification pusher
     let chat_sessions = chat_service::new_chat_session_map();
 
@@ -781,6 +934,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let result = chat_server::run(
         server_config,
+        bound_listeners,
         chat_store.clone(),
         chat_sessions,
         lease_loss_rx,
@@ -845,11 +999,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     result
 }
 
-fn extract_port(bind_addr: &str) -> Result<u16, Box<dyn std::error::Error>> {
-    let addr: SocketAddr = bind_addr.parse()?;
-    Ok(addr.port())
-}
-
 fn registry_failure_is_fatal(config: &Config) -> bool {
     config.discovery_required
         || env_name_is("NODE_ENV", "production")
@@ -886,6 +1035,9 @@ mod tests {
         "GLOBAL_ID_WORKER_ID",
         "CHAT_MAIL_ACCEPT_LEGACY_PAYLOAD",
         "CHAT_MAIL_LEGACY_COMPAT_UNTIL_EPOCH_SECONDS",
+        "CHAT_WS_ENABLED",
+        "CHAT_WS_BIND_ADDR",
+        "CHAT_WS_TRUSTED_PROXY_CIDRS",
     ];
 
     fn env_lock() -> &'static Mutex<()> {
@@ -944,6 +1096,8 @@ mod tests {
         unsafe {
             env::set_var("GLOBAL_ID_ORIGIN_ID", "1");
             env::set_var("GLOBAL_ID_WORKER_ID", "4");
+            env::set_var("CHAT_WS_ENABLED", "false");
+            env::remove_var("CHAT_WS_TRUSTED_PROXY_CIDRS");
         }
     }
 
@@ -1168,7 +1322,7 @@ mod tests {
     }
 
     #[test]
-    fn websocket_frame_limit_cannot_exceed_protocol_packet_limit() {
+    fn websocket_frame_limit_above_protocol_packet_limit_is_rejected() {
         let _guard = env_lock().lock().unwrap();
         let _env = EnvGuard::capture(&["CHAT_WS_MAX_FRAME_LEN", "MAX_BODY_LEN"]);
 
@@ -1177,10 +1331,8 @@ mod tests {
             env::set_var("MAX_BODY_LEN", "128");
         }
 
-        let config = Config::from_env();
-
-        assert_eq!(config.max_body_len, 128);
-        assert_eq!(config.ws_max_frame_len, protocol::HEADER_LEN + 128);
+        let error = panic_message(catch_config_from_env());
+        assert!(error.contains("invalid CHAT_WS_MAX_FRAME_LEN"));
     }
 
     #[test]
@@ -1223,6 +1375,124 @@ mod tests {
 
         let error = panic_message(catch_config_from_env());
         assert!(error.contains("invalid CHAT_WS_TRUSTED_PROXY_CIDRS"));
+    }
+
+    #[test]
+    fn websocket_config_rejects_invalid_boolean_addresses_and_port_conflicts() {
+        let _guard = env_lock().lock().unwrap();
+        let _env = EnvGuard::capture(&[
+            "CHAT_BIND_ADDR",
+            "CHAT_WS_ENABLED",
+            "CHAT_WS_BIND_ADDR",
+            "SERVICE_BIND_HOST",
+        ]);
+
+        unsafe {
+            env::remove_var("SERVICE_BIND_HOST");
+            env::set_var("CHAT_WS_ENABLED", "sometimes");
+        }
+        assert!(panic_message(catch_config_from_env()).contains("invalid CHAT_WS_ENABLED"));
+
+        unsafe {
+            env::set_var("CHAT_WS_ENABLED", "false");
+            env::set_var("CHAT_WS_BIND_ADDR", "not-a-socket-address");
+        }
+        assert!(panic_message(catch_config_from_env()).contains("invalid CHAT_WS_BIND_ADDR"));
+
+        unsafe {
+            env::set_var("CHAT_WS_ENABLED", "true");
+            env::set_var("CHAT_BIND_ADDR", "127.0.0.1:9001");
+            env::set_var("CHAT_WS_BIND_ADDR", "0.0.0.0:9001");
+        }
+        assert!(
+            panic_message(catch_config_from_env())
+                .contains("must use a different port than CHAT_BIND_ADDR")
+        );
+    }
+
+    #[test]
+    fn websocket_config_rejects_invalid_or_unbounded_handshake_limits() {
+        let _guard = env_lock().lock().unwrap();
+        let _env = EnvGuard::capture(&[
+            "CHAT_WS_HANDSHAKE_TIMEOUT_SECS",
+            "CHAT_WS_HANDSHAKE_MAX_BYTES",
+            "CHAT_WS_MAX_PENDING_HANDSHAKES",
+            "CHAT_WS_BRIDGE_CAPACITY",
+            "MAX_BODY_LEN",
+        ]);
+
+        for (name, value) in [
+            ("CHAT_WS_HANDSHAKE_TIMEOUT_SECS", "0"),
+            ("CHAT_WS_HANDSHAKE_MAX_BYTES", "65537"),
+            ("CHAT_WS_MAX_PENDING_HANDSHAKES", "4097"),
+            ("CHAT_WS_BRIDGE_CAPACITY", "invalid"),
+            ("MAX_BODY_LEN", "16777217"),
+        ] {
+            unsafe {
+                for variable in [
+                    "CHAT_WS_HANDSHAKE_TIMEOUT_SECS",
+                    "CHAT_WS_HANDSHAKE_MAX_BYTES",
+                    "CHAT_WS_MAX_PENDING_HANDSHAKES",
+                    "CHAT_WS_BRIDGE_CAPACITY",
+                    "MAX_BODY_LEN",
+                ] {
+                    env::remove_var(variable);
+                }
+                env::set_var(name, value);
+            }
+            assert!(panic_message(catch_config_from_env()).contains(&format!("invalid {name}")));
+        }
+    }
+
+    #[test]
+    fn production_websocket_requires_a_bounded_trusted_proxy_network() {
+        let _guard = env_lock().lock().unwrap();
+        let _env = EnvGuard::capture(TICKET_SECRET_ENV_NAMES);
+
+        unsafe {
+            env::set_var("APP_ENV", "production");
+            env::remove_var("NODE_ENV");
+            env::set_var("REGISTRY_ENABLED", "true");
+            env::set_var("DB_ENABLED", "true");
+            env::set_var("TICKET_SECRET", "prod-chat-ticket-secret-123");
+        }
+        set_valid_production_global_id_env();
+        unsafe {
+            env::set_var("CHAT_WS_ENABLED", "true");
+        }
+        assert!(panic_message(catch_config_from_env()).contains("CHAT_WS_TRUSTED_PROXY_CIDRS"));
+
+        unsafe {
+            env::set_var("CHAT_WS_TRUSTED_PROXY_CIDRS", "0.0.0.0/0");
+        }
+        assert!(panic_message(catch_config_from_env()).contains("must not trust"));
+
+        unsafe {
+            env::set_var("CHAT_WS_TRUSTED_PROXY_CIDRS", "172.30.0.0/24");
+        }
+        let config = Config::from_env();
+        assert!(config.ws_enabled);
+        assert!(
+            config
+                .ws_trusted_proxies
+                .contains("172.30.0.10".parse().unwrap())
+        );
+        assert!(
+            !config
+                .ws_trusted_proxies
+                .contains("172.30.1.10".parse().unwrap())
+        );
+    }
+
+    #[test]
+    fn production_compose_websocket_proxy_default_matches_internal_subnet() {
+        let compose = include_str!("../../../deploy/docker/compose.production.yml");
+
+        assert!(compose.contains(
+            "CHAT_WS_TRUSTED_PROXY_CIDRS: ${CHAT_WS_TRUSTED_PROXY_CIDRS:-172.30.0.0/24}"
+        ));
+        assert!(compose.contains("- subnet: 172.30.0.0/24"));
+        assert!(!compose.contains("CHAT_WS_TRUSTED_PROXY_CIDRS:-172.16.0.0/12"));
     }
 
     #[test]
@@ -1325,12 +1595,12 @@ mod tests {
 
     #[test]
     fn service_registry_instance_and_endpoint_include_discovery_metadata() {
-        let config = Config {
+        let mut config = Config {
             db_enabled: false,
             database_url: "postgres://postgres:password@127.0.0.1:5432/myserver_chat".to_string(),
             db_pool_size: 5,
             bind_addr: "0.0.0.0:9001".to_string(),
-            ws_enabled: false,
+            ws_enabled: true,
             ws_bind_addr: "0.0.0.0:9011".to_string(),
             ws_handshake_timeout_secs: DEFAULT_WS_HANDSHAKE_TIMEOUT_SECS,
             ws_handshake_max_bytes: DEFAULT_WS_HANDSHAKE_MAX_BYTES,
@@ -1375,18 +1645,29 @@ mod tests {
             log_dir: "logs".to_string(),
         };
 
-        let instance = build_service_instance(&config, 9001);
+        let instance = build_service_instance(&config, 9001, Some(9011));
 
         assert_eq!(instance.metadata["service_name"], "chat-server");
         assert_eq!(instance.metadata["service_instance_id"], "chat-a");
         assert_eq!(instance.metadata["instance_id"], "chat-a");
+        assert_eq!(
+            instance.metadata["transport_capabilities"],
+            serde_json::json!(["tcp", "websocket_binary"])
+        );
+        assert_eq!(instance.metadata["chat_protocol_version"], 1);
+        assert_eq!(instance.metadata["max_body_bytes"], 4096);
+        assert_eq!(instance.metadata["max_websocket_body_bytes"], 4096);
+        assert_eq!(
+            instance.metadata["max_websocket_frame_bytes"],
+            protocol::HEADER_LEN + 4096
+        );
         assert_eq!(instance.metadata["online_route_ttl_secs"], 75);
         assert_eq!(instance.metadata["mail_notification_contract_version"], 1);
         assert_eq!(instance.metadata["mail_accept_legacy_payload"], true);
         assert!(instance.metadata["mail_legacy_compat_until_epoch_seconds"].is_null());
         assert_eq!(instance.metadata["build_version"], "build-42");
         assert_eq!(instance.metadata["zone"], "zone-chat");
-        assert_eq!(instance.endpoints.len(), 1);
+        assert_eq!(instance.endpoints.len(), 2);
 
         let endpoint = &instance.endpoints[0];
         assert_eq!(endpoint.name, "tcp");
@@ -1394,15 +1675,44 @@ mod tests {
         assert_eq!(endpoint.host, "10.0.0.8");
         assert_eq!(endpoint.port, 9001);
         assert_eq!(endpoint.visibility, "internal");
-        assert_eq!(endpoint.metadata["service_name"], "chat-server");
-        assert_eq!(endpoint.metadata["service_instance_id"], "chat-a");
-        assert_eq!(endpoint.metadata["instance_id"], "chat-a");
-        assert_eq!(endpoint.metadata["online_route_ttl_secs"], 75);
-        assert_eq!(endpoint.metadata["mail_notification_contract_version"], 1);
-        assert_eq!(endpoint.metadata["mail_accept_legacy_payload"], true);
-        assert!(endpoint.metadata["mail_legacy_compat_until_epoch_seconds"].is_null());
+        assert_eq!(endpoint.metadata["transport"], "tcp");
+        assert_eq!(endpoint.metadata["capability"], "binary_packet_stream");
+        assert_eq!(endpoint.metadata["chat_protocol_version"], 1);
+        assert_eq!(endpoint.metadata["max_body_bytes"], 4096);
+        assert_eq!(
+            endpoint.metadata["max_frame_bytes"],
+            protocol::HEADER_LEN + 4096
+        );
         assert_eq!(endpoint.metadata["build_version"], "build-42");
-        assert_eq!(endpoint.metadata["zone"], "zone-chat");
+
+        let websocket = &instance.endpoints[1];
+        assert_eq!(websocket.name, "ws");
+        assert_eq!(websocket.protocol, "ws");
+        assert_eq!(websocket.host, "10.0.0.8");
+        assert_eq!(websocket.port, 9011);
+        assert_eq!(websocket.visibility, "internal");
+        assert_eq!(websocket.metadata["transport"], "websocket");
+        assert_eq!(websocket.metadata["capability"], "websocket_binary_message");
+        assert_eq!(websocket.metadata["chat_protocol_version"], 1);
+        assert_eq!(websocket.metadata["max_body_bytes"], 4096);
+        assert_eq!(
+            websocket.metadata["max_frame_bytes"],
+            protocol::HEADER_LEN + 4096
+        );
+        assert_eq!(websocket.metadata["build_version"], "build-42");
+
+        let serialized = serde_json::to_string(&instance).unwrap();
+        assert!(!serialized.contains("test-secret"));
+        assert!(!serialized.contains("postgres://"));
+        assert!(!serialized.contains("redis://"));
+
+        config.ws_max_frame_len = 1000;
+        let constrained = build_service_instance(&config, 9001, Some(9011));
+        assert_eq!(constrained.metadata["max_body_bytes"], 4096);
+        assert_eq!(constrained.metadata["max_websocket_body_bytes"], 986);
+        assert_eq!(constrained.endpoints[0].metadata["max_body_bytes"], 4096);
+        assert_eq!(constrained.endpoints[1].metadata["max_body_bytes"], 986);
+        assert_eq!(constrained.endpoints[1].metadata["max_frame_bytes"], 1000);
     }
 
     #[test]
@@ -1457,13 +1767,16 @@ mod tests {
             log_dir: "logs".to_string(),
         };
 
-        let instance = build_service_instance(&config, 9001);
+        let instance = build_service_instance(&config, 9001, None);
 
         assert_eq!(instance.host, "127.0.0.1");
+        assert_eq!(instance.endpoints.len(), 1);
+        assert_eq!(instance.endpoints[0].name, "tcp");
+        assert!(!instance.tags.iter().any(|tag| tag == "ws"));
         assert_eq!(instance.endpoints[0].host, "127.0.0.1");
 
         config.public_host = "::".to_string();
-        let instance = build_service_instance(&config, 9001);
+        let instance = build_service_instance(&config, 9001, None);
 
         assert_eq!(instance.host, "127.0.0.1");
         assert_eq!(instance.endpoints[0].host, "127.0.0.1");

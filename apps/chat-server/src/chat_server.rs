@@ -14,7 +14,7 @@ use tracing::{debug, info, warn};
 
 use crate::chat_service::{self, ChatSessionMap};
 use crate::chat_store::ChatStore;
-use crate::metrics::METRICS;
+use crate::metrics::{METRICS, MetricTransport, MetricsCollector};
 use crate::online_route;
 use crate::proto::chat::{ChatAuthReq, ChatAuthRes, ErrorRes};
 use crate::protocol::{HEADER_LEN, OutboundMessage, Packet, encode_packet, parse_header};
@@ -45,6 +45,13 @@ impl Transport {
             Self::WebSocket => "websocket",
         }
     }
+
+    const fn metric(self) -> MetricTransport {
+        match self {
+            Self::Tcp => MetricTransport::Tcp,
+            Self::WebSocket => MetricTransport::WebSocket,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -60,6 +67,7 @@ enum ConnectionEnd {
     ConnectionLimitExceeded,
     SessionReplaced,
     OutboundQueueFull,
+    OutboundQueueClosed,
     IdleTimeout,
     ProtocolViolation,
     TransportError,
@@ -77,12 +85,36 @@ impl ConnectionEnd {
             Self::OutboundQueueFull => {
                 websocket::ApplicationClose::overloaded("outbound_queue_full")
             }
+            Self::OutboundQueueClosed => {
+                websocket::ApplicationClose::internal("outbound_queue_closed")
+            }
             Self::IdleTimeout => websocket::ApplicationClose::policy("idle_timeout"),
             Self::ProtocolViolation => {
                 websocket::ApplicationClose::policy("application_protocol_violation")
             }
             Self::TransportError => websocket::ApplicationClose::internal("handler_io_failed"),
         }
+    }
+
+    const fn from_outbound_queue_error(error: chat_service::OutboundQueueError) -> Self {
+        match error {
+            chat_service::OutboundQueueError::Full => Self::OutboundQueueFull,
+            chat_service::OutboundQueueError::Closed => Self::OutboundQueueClosed,
+        }
+    }
+
+    const fn is_outbound_queue_failure(self) -> bool {
+        matches!(self, Self::OutboundQueueFull | Self::OutboundQueueClosed)
+    }
+}
+
+fn record_connection_end_metrics(
+    metrics: &MetricsCollector,
+    transport: Transport,
+    connection_end: ConnectionEnd,
+) {
+    if connection_end.is_outbound_queue_failure() {
+        metrics.record_outbound_queue_failure(transport.metric());
     }
 }
 
@@ -388,18 +420,54 @@ pub struct Config {
     pub outbound_queue_capacity: usize,
 }
 
+pub struct BoundListeners {
+    tcp: TcpListener,
+    websocket: Option<TcpListener>,
+}
+
+impl BoundListeners {
+    pub fn tcp_port(&self) -> std::io::Result<u16> {
+        self.tcp.local_addr().map(|addr| addr.port())
+    }
+
+    pub fn websocket_port(&self) -> std::io::Result<Option<u16>> {
+        self.websocket
+            .as_ref()
+            .map(TcpListener::local_addr)
+            .transpose()
+            .map(|addr| addr.map(|addr| addr.port()))
+    }
+}
+
+pub async fn bind_listeners(config: &Config) -> std::io::Result<BoundListeners> {
+    bind_listener_pair(&config.bind_addr, config.ws_enabled, &config.ws_bind_addr).await
+}
+
+async fn bind_listener_pair(
+    tcp_addr: &str,
+    websocket_enabled: bool,
+    websocket_addr: &str,
+) -> std::io::Result<BoundListeners> {
+    let tcp = TcpListener::bind(tcp_addr).await?;
+    let websocket = if websocket_enabled {
+        Some(TcpListener::bind(websocket_addr).await?)
+    } else {
+        None
+    };
+    Ok(BoundListeners { tcp, websocket })
+}
+
 pub async fn run(
     config: Config,
+    listeners: BoundListeners,
     chat_store: ChatStore,
     chat_sessions: ChatSessionMap,
     mut lease_loss_rx: watch::Receiver<bool>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let listener = TcpListener::bind(&config.bind_addr).await?;
-    let ws_listener = if config.ws_enabled {
-        Some(TcpListener::bind(&config.ws_bind_addr).await?)
-    } else {
-        None
-    };
+    let BoundListeners {
+        tcp: listener,
+        websocket: ws_listener,
+    } = listeners;
 
     info!(
         addr = %config.bind_addr,
@@ -452,6 +520,7 @@ pub async fn run(
         match transport {
             Transport::Tcp => {
                 tokio::spawn(async move {
+                    let _connection_metric = METRICS.track_connection(MetricTransport::Tcp);
                     if let Err(e) = handle_connection(
                         socket,
                         ConnectionContext {
@@ -478,6 +547,7 @@ pub async fn run(
                 let handshake_permit = match Arc::clone(&ws_handshake_slots).try_acquire_owned() {
                     Ok(permit) => permit,
                     Err(_) => {
+                        METRICS.record_websocket_handshake_failure();
                         warn!(
                             peer = %peer_addr.ip(),
                             transport = Transport::WebSocket.as_str(),
@@ -846,11 +916,7 @@ where
                     )
                     .await;
                 }
-                break if error == chat_service::OutboundQueueError::Full {
-                    ConnectionEnd::OutboundQueueFull
-                } else {
-                    ConnectionEnd::TransportError
-                };
+                break ConnectionEnd::from_outbound_queue_error(error);
             }
             continue;
         }
@@ -876,11 +942,7 @@ where
                     error_category = error.category(),
                     "failed to queue unknown message type response"
                 );
-                break if error == chat_service::OutboundQueueError::Full {
-                    ConnectionEnd::OutboundQueueFull
-                } else {
-                    ConnectionEnd::TransportError
-                };
+                break ConnectionEnd::from_outbound_queue_error(error);
             }
             continue;
         };
@@ -970,15 +1032,13 @@ where
                 )
                 .await;
             }
-            break if queue_error == chat_service::OutboundQueueError::Full {
-                ConnectionEnd::OutboundQueueFull
-            } else {
-                ConnectionEnd::TransportError
-            };
+            break ConnectionEnd::from_outbound_queue_error(queue_error);
         }
         METRICS.record_request();
         METRICS.record_latency(started_at.elapsed().as_millis() as u64);
     };
+
+    record_connection_end_metrics(&METRICS, context.transport, connection_end);
 
     // 注销聊天会话
     let removed_current_session =
@@ -1410,6 +1470,50 @@ mod tests {
             ConnectionEnd::OutboundQueueFull.websocket_close(),
             websocket::ApplicationClose::overloaded("outbound_queue_full")
         );
+        assert_eq!(
+            ConnectionEnd::OutboundQueueClosed.websocket_close(),
+            websocket::ApplicationClose::internal("outbound_queue_closed")
+        );
+    }
+
+    #[test]
+    fn outbound_queue_full_and_closed_map_to_exact_transport_metrics() {
+        let metrics = MetricsCollector::new();
+
+        for error in [
+            chat_service::OutboundQueueError::Full,
+            chat_service::OutboundQueueError::Closed,
+        ] {
+            let end = ConnectionEnd::from_outbound_queue_error(error);
+            assert!(end.is_outbound_queue_failure());
+            record_connection_end_metrics(&metrics, Transport::Tcp, end);
+            record_connection_end_metrics(&metrics, Transport::WebSocket, end);
+        }
+        record_connection_end_metrics(&metrics, Transport::Tcp, ConnectionEnd::TransportError);
+        record_connection_end_metrics(
+            &metrics,
+            Transport::WebSocket,
+            ConnectionEnd::ProtocolViolation,
+        );
+
+        assert_eq!(
+            metrics.outbound_queue_failure_count(MetricTransport::Tcp),
+            2
+        );
+        assert_eq!(
+            metrics.outbound_queue_failure_count(MetricTransport::WebSocket),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn websocket_bind_failure_rejects_the_complete_listener_set() {
+        let occupied = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let occupied_addr = occupied.local_addr().unwrap().to_string();
+
+        let result = bind_listener_pair("127.0.0.1:0", true, &occupied_addr).await;
+
+        assert!(result.is_err());
     }
 
     #[tokio::test]

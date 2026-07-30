@@ -12,6 +12,23 @@ use serde_json::json;
 use tokio::time::interval;
 use tracing::{error, info};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MetricTransport {
+    Tcp,
+    WebSocket,
+}
+
+pub(crate) struct ConnectionMetricGuard<'a> {
+    collector: &'a MetricsCollector,
+    transport: MetricTransport,
+}
+
+impl Drop for ConnectionMetricGuard<'_> {
+    fn drop(&mut self) {
+        self.collector.connection_closed(self.transport);
+    }
+}
+
 /// 计算当前 bucket 时间戳（5秒对齐）
 fn current_bucket() -> u64 {
     std::time::SystemTime::now()
@@ -95,6 +112,22 @@ pub struct MetricsCollector {
     mail_notification_offline_skipped: AtomicU64,
     /// session 队列已满或关闭导致的邮件通知失败数
     mail_notification_queue_failed: AtomicU64,
+    /// 当前 TCP 连接数
+    tcp_connections_current: AtomicU64,
+    /// 当前已完成握手的 WebSocket 连接数
+    websocket_connections_current: AtomicU64,
+    /// WebSocket 握手成功数
+    websocket_handshake_success: AtomicU64,
+    /// WebSocket 握手失败数（含握手容量拒绝）
+    websocket_handshake_failure: AtomicU64,
+    /// WebSocket message/frame 契约拒绝数
+    websocket_frame_rejected: AtomicU64,
+    /// WebSocket 非正常关闭数
+    websocket_abnormal_close: AtomicU64,
+    /// TCP 出站队列失败数
+    tcp_outbound_queue_failure: AtomicU64,
+    /// WebSocket 出站队列失败数
+    websocket_outbound_queue_failure: AtomicU64,
     /// 扩展字段
     extra: Mutex<HashMap<String, String>>,
 }
@@ -115,6 +148,14 @@ impl MetricsCollector {
             mail_notification_pushed: AtomicU64::new(0),
             mail_notification_offline_skipped: AtomicU64::new(0),
             mail_notification_queue_failed: AtomicU64::new(0),
+            tcp_connections_current: AtomicU64::new(0),
+            websocket_connections_current: AtomicU64::new(0),
+            websocket_handshake_success: AtomicU64::new(0),
+            websocket_handshake_failure: AtomicU64::new(0),
+            websocket_frame_rejected: AtomicU64::new(0),
+            websocket_abnormal_close: AtomicU64::new(0),
+            tcp_outbound_queue_failure: AtomicU64::new(0),
+            websocket_outbound_queue_failure: AtomicU64::new(0),
             extra: Mutex::new(HashMap::new()),
         }
     }
@@ -173,6 +214,66 @@ impl MetricsCollector {
     pub fn record_mail_notification_queue_failed(&self) {
         self.mail_notification_queue_failed
             .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn track_connection(&self, transport: MetricTransport) -> ConnectionMetricGuard<'_> {
+        self.connection_counter(transport)
+            .fetch_add(1, Ordering::Relaxed);
+        ConnectionMetricGuard {
+            collector: self,
+            transport,
+        }
+    }
+
+    pub(crate) fn record_websocket_handshake_success(&self) {
+        self.websocket_handshake_success
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn record_websocket_handshake_failure(&self) {
+        self.websocket_handshake_failure
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn record_websocket_frame_rejected(&self) {
+        self.websocket_frame_rejected
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn record_websocket_abnormal_close(&self) {
+        self.websocket_abnormal_close
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn record_outbound_queue_failure(&self, transport: MetricTransport) {
+        match transport {
+            MetricTransport::Tcp => &self.tcp_outbound_queue_failure,
+            MetricTransport::WebSocket => &self.websocket_outbound_queue_failure,
+        }
+        .fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn outbound_queue_failure_count(&self, transport: MetricTransport) -> u64 {
+        match transport {
+            MetricTransport::Tcp => &self.tcp_outbound_queue_failure,
+            MetricTransport::WebSocket => &self.websocket_outbound_queue_failure,
+        }
+        .load(Ordering::Relaxed)
+    }
+
+    fn connection_counter(&self, transport: MetricTransport) -> &AtomicU64 {
+        match transport {
+            MetricTransport::Tcp => &self.tcp_connections_current,
+            MetricTransport::WebSocket => &self.websocket_connections_current,
+        }
+    }
+
+    fn connection_closed(&self, transport: MetricTransport) {
+        let counter = self.connection_counter(transport);
+        let _ = counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+            Some(current.saturating_sub(1))
+        });
     }
 
     /// 设置扩展字段
@@ -236,6 +337,22 @@ impl MetricsCollector {
                 let mail_notification_queue_failed = self
                     .mail_notification_queue_failed
                     .swap(0, Ordering::Relaxed);
+                let tcp_connections_current = self.tcp_connections_current.load(Ordering::Relaxed);
+                let websocket_connections_current =
+                    self.websocket_connections_current.load(Ordering::Relaxed);
+                let websocket_handshake_success =
+                    self.websocket_handshake_success.swap(0, Ordering::Relaxed);
+                let websocket_handshake_failure =
+                    self.websocket_handshake_failure.swap(0, Ordering::Relaxed);
+                let websocket_frame_rejected =
+                    self.websocket_frame_rejected.swap(0, Ordering::Relaxed);
+                let websocket_abnormal_close =
+                    self.websocket_abnormal_close.swap(0, Ordering::Relaxed);
+                let tcp_outbound_queue_failure =
+                    self.tcp_outbound_queue_failure.swap(0, Ordering::Relaxed);
+                let websocket_outbound_queue_failure = self
+                    .websocket_outbound_queue_failure
+                    .swap(0, Ordering::Relaxed);
 
                 // 计算聚合延迟
                 let latency_ms = if latency_count > 0 {
@@ -286,6 +403,38 @@ impl MetricsCollector {
                     (
                         "mail_notification_queue_failed".to_string(),
                         mail_notification_queue_failed.to_string(),
+                    ),
+                    (
+                        "tcp_connections_current".to_string(),
+                        tcp_connections_current.to_string(),
+                    ),
+                    (
+                        "websocket_connections_current".to_string(),
+                        websocket_connections_current.to_string(),
+                    ),
+                    (
+                        "websocket_handshake_success_total".to_string(),
+                        websocket_handshake_success.to_string(),
+                    ),
+                    (
+                        "websocket_handshake_failure_total".to_string(),
+                        websocket_handshake_failure.to_string(),
+                    ),
+                    (
+                        "websocket_frame_rejected_total".to_string(),
+                        websocket_frame_rejected.to_string(),
+                    ),
+                    (
+                        "websocket_abnormal_close_total".to_string(),
+                        websocket_abnormal_close.to_string(),
+                    ),
+                    (
+                        "tcp_outbound_queue_failure_total".to_string(),
+                        tcp_outbound_queue_failure.to_string(),
+                    ),
+                    (
+                        "websocket_outbound_queue_failure_total".to_string(),
+                        websocket_outbound_queue_failure.to_string(),
                     ),
                 ];
 
@@ -398,6 +547,77 @@ mod tests {
                 .mail_notification_queue_failed
                 .load(Ordering::Relaxed),
             1
+        );
+
+        {
+            let _tcp = collector.track_connection(MetricTransport::Tcp);
+            let _websocket = collector.track_connection(MetricTransport::WebSocket);
+            assert_eq!(collector.tcp_connections_current.load(Ordering::Relaxed), 1);
+            assert_eq!(
+                collector
+                    .websocket_connections_current
+                    .load(Ordering::Relaxed),
+                1
+            );
+        }
+        assert_eq!(collector.tcp_connections_current.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            collector
+                .websocket_connections_current
+                .load(Ordering::Relaxed),
+            0
+        );
+
+        collector.record_websocket_handshake_success();
+        collector.record_websocket_handshake_failure();
+        collector.record_websocket_frame_rejected();
+        collector.record_websocket_abnormal_close();
+        collector.record_outbound_queue_failure(MetricTransport::Tcp);
+        collector.record_outbound_queue_failure(MetricTransport::WebSocket);
+        assert_eq!(
+            collector
+                .websocket_handshake_success
+                .load(Ordering::Relaxed),
+            1
+        );
+        assert_eq!(
+            collector
+                .websocket_handshake_failure
+                .load(Ordering::Relaxed),
+            1
+        );
+        assert_eq!(
+            collector.websocket_frame_rejected.load(Ordering::Relaxed),
+            1
+        );
+        assert_eq!(
+            collector.websocket_abnormal_close.load(Ordering::Relaxed),
+            1
+        );
+        assert_eq!(
+            collector.tcp_outbound_queue_failure.load(Ordering::Relaxed),
+            1
+        );
+        assert_eq!(
+            collector
+                .websocket_outbound_queue_failure
+                .load(Ordering::Relaxed),
+            1
+        );
+    }
+
+    #[test]
+    fn connection_gauge_drop_is_saturating() {
+        let collector = MetricsCollector::new();
+        collector.connection_closed(MetricTransport::Tcp);
+        collector.connection_closed(MetricTransport::WebSocket);
+
+        assert_eq!(collector.tcp_connections_current.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            collector
+                .websocket_connections_current
+                .load(Ordering::Relaxed),
+            0
         );
     }
 }

@@ -17,6 +17,7 @@ use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 use tokio_tungstenite::tungstenite::protocol::{CloseFrame, Message, WebSocketConfig};
 use tokio_tungstenite::{WebSocketStream, accept_hdr_async_with_config};
 
+use crate::metrics::{METRICS, MetricTransport};
 use crate::protocol::{HEADER_LEN, parse_header};
 
 const OUTBOUND_BRIDGE_QUEUE_CAPACITY: usize = 1;
@@ -41,6 +42,19 @@ impl TrustedProxySet {
     pub(crate) fn contains(&self, ip: IpAddr) -> bool {
         let ip = normalize_ip(ip);
         self.entries.iter().any(|entry| entry.contains(ip))
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    pub(crate) fn contains_universal_network(&self) -> bool {
+        self.entries.iter().any(|entry| {
+            matches!(
+                entry,
+                IpNetwork::V4 { prefix: 0, .. } | IpNetwork::V6 { prefix: 0, .. }
+            )
+        })
     }
 }
 
@@ -267,6 +281,12 @@ enum MessageAction {
     Reject(CloseSpec),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AdapterEnd {
+    Normal,
+    Abnormal,
+}
+
 enum OutboundBridgeItem {
     Packet(Vec<u8>),
     Failed,
@@ -363,8 +383,18 @@ where
     F: FnOnce(DuplexStream, IpAddr) -> Fut + Send + 'static,
     Fut: Future<Output = ApplicationClose> + Send + 'static,
 {
-    let upgraded = upgrade(socket, config, peer_ip, trusted_proxies).await?;
+    let upgraded = match upgrade(socket, config, peer_ip, trusted_proxies).await {
+        Ok(upgraded) => {
+            METRICS.record_websocket_handshake_success();
+            upgraded
+        }
+        Err(error) => {
+            METRICS.record_websocket_handshake_failure();
+            return Err(error);
+        }
+    };
     drop(handshake_permit);
+    let _connection_metric = METRICS.track_connection(MetricTransport::WebSocket);
     let (handler_stream, adapter_stream) = tokio::io::duplex(config.bridge_capacity);
     let (handler_close_tx, mut handler_close_rx) = oneshot::channel();
     let mut handler_task = tokio::spawn(async move {
@@ -388,22 +418,37 @@ where
         config,
     )
     .await;
+    let mut abnormal_close = match &adapter_result {
+        Ok(AdapterEnd::Normal) => false,
+        Ok(AdapterEnd::Abnormal) | Err(_) => true,
+    };
 
     let _ = adapter_writer.shutdown().await;
     outbound_task.abort();
     let _ = outbound_task.await;
 
-    match timeout(config.io_timeout, &mut handler_task).await {
-        Ok(Ok(())) => {}
-        Ok(Err(_)) => return Err(AdapterError::new("handler_task_failed")),
+    let handler_error = match timeout(config.io_timeout, &mut handler_task).await {
+        Ok(Ok(())) => None,
+        Ok(Err(_)) => {
+            abnormal_close = true;
+            Some(AdapterError::new("handler_task_failed"))
+        }
         Err(_) => {
             handler_task.abort();
             let _ = handler_task.await;
-            return Err(AdapterError::new("handler_shutdown_timeout"));
+            abnormal_close = true;
+            Some(AdapterError::new("handler_shutdown_timeout"))
         }
+    };
+
+    if abnormal_close {
+        METRICS.record_websocket_abnormal_close();
     }
 
-    adapter_result
+    if let Some(error) = handler_error {
+        return Err(error);
+    }
+    adapter_result.map(|_| ())
 }
 
 struct UpgradeResult {
@@ -469,7 +514,7 @@ async fn run_adapter_loop<S>(
     outbound_rx: &mut mpsc::Receiver<OutboundBridgeItem>,
     handler_close_rx: &mut oneshot::Receiver<ApplicationClose>,
     config: AdapterConfig,
-) -> Result<(), AdapterError>
+) -> Result<AdapterEnd, AdapterError>
 where
     S: AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
@@ -477,14 +522,17 @@ where
         tokio::select! {
             incoming = websocket.next() => {
                 let Some(incoming) = incoming else {
-                    return Ok(());
+                    return Ok(AdapterEnd::Abnormal);
                 };
                 let message = match incoming {
                     Ok(message) => message,
                     Err(WebSocketError::ConnectionClosed | WebSocketError::AlreadyClosed) => {
-                        return Ok(());
+                        return Ok(AdapterEnd::Normal);
                     }
                     Err(error) => {
+                        if matches!(error, WebSocketError::Capacity(_) | WebSocketError::Protocol(_)) {
+                            METRICS.record_websocket_frame_rejected();
+                        }
                         let close = close_for_websocket_error(&error);
                         let _ = send_close(&mut websocket, close, config.io_timeout).await;
                         return Err(AdapterError::new("websocket_read_failed"));
@@ -510,11 +558,12 @@ where
                     MessageAction::Ignore => {}
                     MessageAction::PeerClose => {
                         let _ = timeout(config.io_timeout, websocket.flush()).await;
-                        return Ok(());
+                        return Ok(AdapterEnd::Normal);
                     }
                     MessageAction::Reject(close) => {
+                        METRICS.record_websocket_frame_rejected();
                         let _ = send_close(&mut websocket, close, config.io_timeout).await;
-                        return Ok(());
+                        return Ok(AdapterEnd::Abnormal);
                     }
                 }
             }
@@ -541,13 +590,18 @@ where
                             .ok()
                             .and_then(Result::ok)
                             .unwrap_or_else(|| ApplicationClose::internal("handler_exit_failed"));
+                        let end = if close.0.code == CloseCode::Normal {
+                            AdapterEnd::Normal
+                        } else {
+                            AdapterEnd::Abnormal
+                        };
                         let _ = send_close(
                             &mut websocket,
                             close.0,
                             config.io_timeout,
                         )
                         .await;
-                        return Ok(());
+                        return Ok(end);
                     }
                 }
             }
