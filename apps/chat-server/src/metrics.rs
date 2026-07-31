@@ -112,6 +112,28 @@ pub struct MetricsCollector {
     mail_notification_offline_skipped: AtomicU64,
     /// session 队列已满或关闭导致的邮件通知失败数
     mail_notification_queue_failed: AtomicU64,
+    /// Redis 查询失败导致跳过的跨实例聊天在线 push 数
+    chat_push_route_lookup_failed: AtomicU64,
+    /// 路由不存在导致跳过的跨实例聊天在线 push 数
+    chat_push_route_unavailable: AtomicU64,
+    /// 成功进入有界跨实例 publish 队列的聊天 push 数
+    chat_push_remote_queued: AtomicU64,
+    /// 跨实例 publish 队列满或关闭导致的聊天 push 数
+    chat_push_remote_queue_failed: AtomicU64,
+    /// 已由 Core NATS 接收的跨实例聊天 push 数
+    chat_push_published: AtomicU64,
+    /// Core NATS 发布失败的跨实例聊天 push 数
+    chat_push_publish_failed: AtomicU64,
+    /// 当前实例收到的跨实例聊天 push 数
+    chat_push_received: AtomicU64,
+    /// 无效或超限跨实例聊天 push payload 数
+    chat_push_payload_rejected: AtomicU64,
+    /// 陈旧路由、实例不匹配或 session 已迁移时跳过的聊天 push 数
+    chat_push_stale_skipped: AtomicU64,
+    /// 成功进入当前有效 session 队列的聊天 push 数
+    chat_push_delivered: AtomicU64,
+    /// 当前 session 队列满或关闭导致的聊天 push 数
+    chat_push_session_queue_failed: AtomicU64,
     /// 当前 TCP 连接数
     tcp_connections_current: AtomicU64,
     /// 当前已完成握手的 WebSocket 连接数
@@ -148,6 +170,17 @@ impl MetricsCollector {
             mail_notification_pushed: AtomicU64::new(0),
             mail_notification_offline_skipped: AtomicU64::new(0),
             mail_notification_queue_failed: AtomicU64::new(0),
+            chat_push_route_lookup_failed: AtomicU64::new(0),
+            chat_push_route_unavailable: AtomicU64::new(0),
+            chat_push_remote_queued: AtomicU64::new(0),
+            chat_push_remote_queue_failed: AtomicU64::new(0),
+            chat_push_published: AtomicU64::new(0),
+            chat_push_publish_failed: AtomicU64::new(0),
+            chat_push_received: AtomicU64::new(0),
+            chat_push_payload_rejected: AtomicU64::new(0),
+            chat_push_stale_skipped: AtomicU64::new(0),
+            chat_push_delivered: AtomicU64::new(0),
+            chat_push_session_queue_failed: AtomicU64::new(0),
             tcp_connections_current: AtomicU64::new(0),
             websocket_connections_current: AtomicU64::new(0),
             websocket_handshake_success: AtomicU64::new(0),
@@ -213,6 +246,56 @@ impl MetricsCollector {
 
     pub fn record_mail_notification_queue_failed(&self) {
         self.mail_notification_queue_failed
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_chat_push_route_lookup_failed(&self) {
+        self.chat_push_route_lookup_failed
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_chat_push_route_unavailable(&self) {
+        self.chat_push_route_unavailable
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_chat_push_remote_queued(&self) {
+        self.chat_push_remote_queued.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_chat_push_remote_queue_failed(&self) {
+        self.chat_push_remote_queue_failed
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_chat_push_published(&self) {
+        self.chat_push_published.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_chat_push_publish_failed(&self) {
+        self.chat_push_publish_failed
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_chat_push_received(&self) {
+        self.chat_push_received.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_chat_push_payload_rejected(&self) {
+        self.chat_push_payload_rejected
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_chat_push_stale_skipped(&self) {
+        self.chat_push_stale_skipped.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_chat_push_delivered(&self) {
+        self.chat_push_delivered.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_chat_push_session_queue_failed(&self) {
+        self.chat_push_session_queue_failed
             .fetch_add(1, Ordering::Relaxed);
     }
 
@@ -337,6 +420,28 @@ impl MetricsCollector {
                 let mail_notification_queue_failed = self
                     .mail_notification_queue_failed
                     .swap(0, Ordering::Relaxed);
+                let chat_push_route_lookup_failed = self
+                    .chat_push_route_lookup_failed
+                    .swap(0, Ordering::Relaxed);
+                let chat_push_route_unavailable =
+                    self.chat_push_route_unavailable.swap(0, Ordering::Relaxed);
+                let chat_push_remote_queued =
+                    self.chat_push_remote_queued.swap(0, Ordering::Relaxed);
+                let chat_push_remote_queue_failed = self
+                    .chat_push_remote_queue_failed
+                    .swap(0, Ordering::Relaxed);
+                let chat_push_published = self.chat_push_published.swap(0, Ordering::Relaxed);
+                let chat_push_publish_failed =
+                    self.chat_push_publish_failed.swap(0, Ordering::Relaxed);
+                let chat_push_received = self.chat_push_received.swap(0, Ordering::Relaxed);
+                let chat_push_payload_rejected =
+                    self.chat_push_payload_rejected.swap(0, Ordering::Relaxed);
+                let chat_push_stale_skipped =
+                    self.chat_push_stale_skipped.swap(0, Ordering::Relaxed);
+                let chat_push_delivered = self.chat_push_delivered.swap(0, Ordering::Relaxed);
+                let chat_push_session_queue_failed = self
+                    .chat_push_session_queue_failed
+                    .swap(0, Ordering::Relaxed);
                 let tcp_connections_current = self.tcp_connections_current.load(Ordering::Relaxed);
                 let websocket_connections_current =
                     self.websocket_connections_current.load(Ordering::Relaxed);
@@ -403,6 +508,50 @@ impl MetricsCollector {
                     (
                         "mail_notification_queue_failed".to_string(),
                         mail_notification_queue_failed.to_string(),
+                    ),
+                    (
+                        "chat_push_route_lookup_failed".to_string(),
+                        chat_push_route_lookup_failed.to_string(),
+                    ),
+                    (
+                        "chat_push_route_unavailable".to_string(),
+                        chat_push_route_unavailable.to_string(),
+                    ),
+                    (
+                        "chat_push_remote_queued".to_string(),
+                        chat_push_remote_queued.to_string(),
+                    ),
+                    (
+                        "chat_push_remote_queue_failed".to_string(),
+                        chat_push_remote_queue_failed.to_string(),
+                    ),
+                    (
+                        "chat_push_published".to_string(),
+                        chat_push_published.to_string(),
+                    ),
+                    (
+                        "chat_push_publish_failed".to_string(),
+                        chat_push_publish_failed.to_string(),
+                    ),
+                    (
+                        "chat_push_received".to_string(),
+                        chat_push_received.to_string(),
+                    ),
+                    (
+                        "chat_push_payload_rejected".to_string(),
+                        chat_push_payload_rejected.to_string(),
+                    ),
+                    (
+                        "chat_push_stale_skipped".to_string(),
+                        chat_push_stale_skipped.to_string(),
+                    ),
+                    (
+                        "chat_push_delivered".to_string(),
+                        chat_push_delivered.to_string(),
+                    ),
+                    (
+                        "chat_push_session_queue_failed".to_string(),
+                        chat_push_session_queue_failed.to_string(),
                     ),
                     (
                         "tcp_connections_current".to_string(),

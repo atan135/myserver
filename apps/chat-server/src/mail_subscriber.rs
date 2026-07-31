@@ -14,8 +14,9 @@ use tokio::sync::watch;
 use tracing::{debug, error, info, warn};
 
 use crate::chat_server::MessageType;
-use crate::chat_service::ChatSessionMap;
+use crate::chat_service::{ChatSessionMap, RoutedSessionPushOutcome, push_to_routed_session};
 use crate::metrics::METRICS;
+use crate::online_route;
 use crate::proto::chat::MailNotifyPush;
 use crate::protocol::{OutboundMessage, encode_body};
 
@@ -30,6 +31,8 @@ const EVENT_VERSION: i64 = 1;
 
 #[derive(Clone, Debug)]
 pub struct SubscriberConfig {
+    pub redis_url: String,
+    pub redis_key_prefix: String,
     pub max_payload_bytes: usize,
     pub accept_legacy_payload: bool,
     pub legacy_compat_until_epoch_seconds: Option<u64>,
@@ -42,6 +45,8 @@ pub struct SubscriberConfig {
 impl Default for SubscriberConfig {
     fn default() -> Self {
         Self {
+            redis_url: "redis://127.0.0.1:6379".to_string(),
+            redis_key_prefix: String::new(),
             max_payload_bytes: DEFAULT_MAX_PAYLOAD_BYTES,
             accept_legacy_payload: true,
             legacy_compat_until_epoch_seconds: None,
@@ -204,6 +209,9 @@ enum RunOutcome {
 enum PushOutcome {
     Pushed,
     Offline,
+    RouteUnavailable,
+    RouteLookupFailed,
+    RouteMismatch,
     QueueFull,
     QueueClosed,
 }
@@ -311,6 +319,7 @@ async fn run_subscriber(
             sessions,
             message.payload.as_ref(),
             route,
+            instance_id,
             config,
             deduplicator,
         )
@@ -357,6 +366,7 @@ async fn handle_notification(
     sessions: &ChatSessionMap,
     payload: &[u8],
     route: &'static str,
+    instance_id: &str,
     config: &SubscriberConfig,
     deduplicator: &mut EventDeduplicator,
 ) {
@@ -388,15 +398,17 @@ async fn handle_notification(
         }
     };
 
-    if let Some(event_id) = notification.event_id.as_deref()
-        && deduplicator.seen_or_insert(event_id, Instant::now())
-    {
+    if !should_attempt_delivery(
+        notification.event_id.as_deref(),
+        deduplicator,
+        Instant::now(),
+    ) {
         METRICS.record_mail_notification_deduplicated();
         debug!(route, "skipped duplicate mail notification");
         return;
     }
 
-    match push_mail_to_player(sessions, &notification.player_id, &notification).await {
+    match push_mail_to_current_route(sessions, instance_id, config, &notification).await {
         PushOutcome::Pushed => {
             METRICS.record_mail_notification_pushed();
             debug!(route, "queued mail notification for online player");
@@ -404,6 +416,30 @@ async fn handle_notification(
         PushOutcome::Offline => {
             METRICS.record_mail_notification_offline_skipped();
             debug!(route, "mail notification target is offline");
+        }
+        PushOutcome::RouteUnavailable => {
+            METRICS.record_mail_notification_offline_skipped();
+            debug!(
+                route,
+                reason = "route_unavailable",
+                "mail notification target is offline"
+            );
+        }
+        PushOutcome::RouteLookupFailed => {
+            METRICS.record_mail_notification_queue_failed();
+            warn!(
+                route,
+                reason = "route_lookup_failed",
+                "skipped mail notification push"
+            );
+        }
+        PushOutcome::RouteMismatch => {
+            METRICS.record_mail_notification_offline_skipped();
+            debug!(
+                route,
+                reason = "route_mismatch",
+                "skipped stale mail notification push"
+            );
         }
         PushOutcome::QueueFull => {
             METRICS.record_mail_notification_queue_failed();
@@ -422,6 +458,17 @@ async fn handle_notification(
             );
         }
     }
+}
+
+/// Returns whether a parsed notification may proceed to route/session
+/// verification. The same v1 event can arrive once through the legacy subject
+/// and once through its instance subject during a rolling upgrade.
+fn should_attempt_delivery(
+    event_id: Option<&str>,
+    deduplicator: &mut EventDeduplicator,
+    now: Instant,
+) -> bool {
+    event_id.is_none_or(|event_id| !deduplicator.seen_or_insert(event_id, now))
 }
 
 #[cfg(test)]
@@ -578,6 +625,7 @@ fn validate_string(
     Ok(())
 }
 
+#[cfg(test)]
 async fn push_mail_to_player(
     sessions: &ChatSessionMap,
     player_id: &str,
@@ -605,6 +653,62 @@ async fn push_mail_to_player(
         Ok(()) => PushOutcome::Pushed,
         Err(crate::chat_service::OutboundQueueError::Full) => PushOutcome::QueueFull,
         Err(crate::chat_service::OutboundQueueError::Closed) => PushOutcome::QueueClosed,
+    }
+}
+
+/// The source NATS subject is not proof that this instance still owns the
+/// player. Re-read the Redis route and compare its owner token with the local
+/// session immediately before enqueue so a late message cannot target an old
+/// connection after a handoff.
+async fn push_mail_to_current_route(
+    sessions: &ChatSessionMap,
+    instance_id: &str,
+    config: &SubscriberConfig,
+    notification: &MailNotification,
+) -> PushOutcome {
+    let current_route = match online_route::get_online_route(
+        &config.redis_url,
+        &config.redis_key_prefix,
+        &notification.player_id,
+    )
+    .await
+    {
+        Ok(Some(route)) => route,
+        Ok(None) => return PushOutcome::RouteUnavailable,
+        Err(_) => return PushOutcome::RouteLookupFailed,
+    };
+    let push = MailNotifyPush {
+        mail_id: notification.mail_id.clone(),
+        title: notification.title.clone(),
+        from_player_id: notification.from_player_id.clone(),
+        mail_type: notification.mail_type.clone(),
+        created_at: notification.created_at,
+    };
+    let message = OutboundMessage {
+        message_type: MessageType::MailNotifyPush as u16,
+        seq: 0,
+        body: encode_body(&push),
+    };
+
+    match push_to_routed_session(
+        sessions,
+        instance_id,
+        Some(&current_route),
+        instance_id,
+        &current_route.connection_token,
+        &notification.player_id,
+        message,
+    )
+    .await
+    {
+        RoutedSessionPushOutcome::Pushed => PushOutcome::Pushed,
+        RoutedSessionPushOutcome::Offline => PushOutcome::Offline,
+        RoutedSessionPushOutcome::RouteMissing => PushOutcome::RouteUnavailable,
+        RoutedSessionPushOutcome::RouteInstanceMismatch
+        | RoutedSessionPushOutcome::RouteOwnerMismatch
+        | RoutedSessionPushOutcome::SessionOwnerMismatch => PushOutcome::RouteMismatch,
+        RoutedSessionPushOutcome::QueueFull => PushOutcome::QueueFull,
+        RoutedSessionPushOutcome::QueueClosed => PushOutcome::QueueClosed,
     }
 }
 
@@ -838,11 +942,19 @@ mod tests {
         let (other_shutdown, _other_shutdown_rx) = tokio::sync::watch::channel(None);
         sessions.write().await.insert(
             "player_001".to_string(),
-            crate::chat_service::ChatSession::new(target_tx, target_shutdown),
+            crate::chat_service::ChatSession::new(
+                target_tx,
+                target_shutdown,
+                "token-target".to_string(),
+            ),
         );
         sessions.write().await.insert(
             "player_002".to_string(),
-            crate::chat_service::ChatSession::new(other_tx, other_shutdown),
+            crate::chat_service::ChatSession::new(
+                other_tx,
+                other_shutdown,
+                "token-other".to_string(),
+            ),
         );
         let notification = parse_notification(&envelope(), DEFAULT_MAX_PAYLOAD_BYTES).unwrap();
 
@@ -857,38 +969,21 @@ mod tests {
         assert!(other_rx.try_recv().is_err());
     }
 
-    #[tokio::test]
-    async fn both_subject_routes_share_event_id_deduplication() {
-        let sessions = crate::chat_service::new_chat_session_map();
-        let (sender, mut receiver) = tokio::sync::mpsc::channel(2);
-        let (shutdown, _shutdown_rx) = tokio::sync::watch::channel(None);
-        sessions.write().await.insert(
-            "player_001".to_string(),
-            crate::chat_service::ChatSession::new(sender, shutdown),
-        );
+    #[test]
+    fn both_subject_routes_share_event_id_deduplication() {
         let mut deduplicator =
             EventDeduplicator::new(DEFAULT_DEDUP_CAPACITY, Duration::from_secs(60));
-        let payload = envelope();
+        let notification = parse_notification(&envelope(), DEFAULT_MAX_PAYLOAD_BYTES).unwrap();
+        let event_id = notification.event_id.as_deref().unwrap();
+        let mut delivery_decision_count = 0;
 
-        handle_notification(
-            &sessions,
-            &payload,
-            "legacy",
-            &SubscriberConfig::default(),
-            &mut deduplicator,
-        )
-        .await;
-        handle_notification(
-            &sessions,
-            &payload,
-            "instance",
-            &SubscriberConfig::default(),
-            &mut deduplicator,
-        )
-        .await;
+        for _subject_route in ["legacy", "instance"] {
+            if should_attempt_delivery(Some(event_id), &mut deduplicator, Instant::now()) {
+                delivery_decision_count += 1;
+            }
+        }
 
-        assert!(receiver.recv().await.is_some());
-        assert!(receiver.try_recv().is_err());
+        assert_eq!(delivery_decision_count, 1);
     }
 
     #[tokio::test]
@@ -911,7 +1006,7 @@ mod tests {
         let (full_shutdown, mut full_shutdown_rx) = tokio::sync::watch::channel(None);
         sessions.write().await.insert(
             "player_001".to_string(),
-            crate::chat_service::ChatSession::new(full_tx, full_shutdown),
+            crate::chat_service::ChatSession::new(full_tx, full_shutdown, "token".to_string()),
         );
         assert_eq!(
             push_mail_to_player(&sessions, "player_001", &notification).await,
@@ -928,7 +1023,7 @@ mod tests {
         let (closed_shutdown, _closed_shutdown_rx) = tokio::sync::watch::channel(None);
         sessions.write().await.insert(
             "player_001".to_string(),
-            crate::chat_service::ChatSession::new(closed_tx, closed_shutdown),
+            crate::chat_service::ChatSession::new(closed_tx, closed_shutdown, "token".to_string()),
         );
         assert_eq!(
             push_mail_to_player(&sessions, "player_001", &notification).await,

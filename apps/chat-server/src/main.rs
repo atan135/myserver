@@ -1,3 +1,4 @@
+mod chat_push;
 mod chat_server;
 mod chat_service;
 mod chat_store;
@@ -68,6 +69,10 @@ struct Config {
     mail_notify_dedup_ttl_secs: u64,
     mail_notify_reconnect_base_ms: u64,
     mail_notify_reconnect_max_ms: u64,
+    chat_push_max_payload_bytes: usize,
+    chat_push_publish_queue_capacity: usize,
+    chat_push_reconnect_base_ms: u64,
+    chat_push_reconnect_max_ms: u64,
     registry_enabled: bool,
     discovery_required: bool,
     registry_url: String,
@@ -195,6 +200,22 @@ impl Config {
                 "CHAT_MAIL_NOTIFY_RECONNECT_MAX_MS",
                 mail_subscriber::DEFAULT_RECONNECT_MAX_MS,
             ),
+            chat_push_max_payload_bytes: parse_positive_usize_env(
+                "CHAT_PUSH_MAX_PAYLOAD_BYTES",
+                chat_push::DEFAULT_MAX_PAYLOAD_BYTES,
+            ),
+            chat_push_publish_queue_capacity: parse_positive_usize_env(
+                "CHAT_PUSH_PUBLISH_QUEUE_CAPACITY",
+                chat_push::DEFAULT_PUBLISH_QUEUE_CAPACITY,
+            ),
+            chat_push_reconnect_base_ms: parse_positive_u64_env(
+                "CHAT_PUSH_RECONNECT_BASE_MS",
+                chat_push::DEFAULT_RECONNECT_BASE_MS,
+            ),
+            chat_push_reconnect_max_ms: parse_positive_u64_env(
+                "CHAT_PUSH_RECONNECT_MAX_MS",
+                chat_push::DEFAULT_RECONNECT_MAX_MS,
+            ),
             registry_enabled: std::env::var("REGISTRY_ENABLED")
                 .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "True"))
                 .unwrap_or(false),
@@ -241,10 +262,27 @@ impl Config {
         };
 
         validate_listener_config(&config);
+        validate_chat_push_config(&config);
         validate_production_config(&config);
         validate_discovery_config(&config);
 
         config
+    }
+}
+
+fn validate_chat_push_config(config: &Config) {
+    // ChatPush repeats the message content plus bounded routing metadata and is
+    // then base64 encoded for the Core NATS JSON envelope.
+    let minimum_payload_bytes = config
+        .max_body_len
+        .saturating_add(512)
+        .saturating_mul(4)
+        .saturating_div(3)
+        .saturating_add(512);
+    if config.chat_push_max_payload_bytes < minimum_payload_bytes {
+        panic!(
+            "CHAT_PUSH_MAX_PAYLOAD_BYTES must accommodate MAX_BODY_LEN after routed chat push encoding"
+        );
     }
 }
 
@@ -896,11 +934,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create chat sessions map for mail notification pusher
     let chat_sessions = chat_service::new_chat_session_map();
 
+    let chat_push_config = chat_push::RuntimeConfig {
+        nats_url: config.nats_url.clone(),
+        redis_url: config.redis_url.clone(),
+        redis_key_prefix: config.redis_key_prefix.clone(),
+        instance_id: config.service_instance_id.clone(),
+        max_payload_bytes: config.chat_push_max_payload_bytes,
+        max_message_body_bytes: config.max_body_len,
+        reconnect_base_delay: std::time::Duration::from_millis(config.chat_push_reconnect_base_ms),
+        reconnect_max_delay: std::time::Duration::from_millis(
+            config
+                .chat_push_reconnect_max_ms
+                .max(config.chat_push_reconnect_base_ms),
+        ),
+    };
+    let (chat_push_router, chat_push_outbound) =
+        chat_push::ChatPushRouter::new(&chat_push_config, config.chat_push_publish_queue_capacity);
+    let (chat_push_shutdown_tx, chat_push_shutdown_rx) = tokio::sync::watch::channel(false);
+    let sessions_for_chat_push = chat_sessions.clone();
+    let mut chat_push_handle = tokio::spawn(chat_push::run(
+        chat_push_config,
+        sessions_for_chat_push,
+        chat_push_outbound,
+        chat_push_shutdown_rx,
+    ));
+
     // Start mail notification subscriber
     let sessions_for_mail = chat_sessions.clone();
     let nats_url_for_mail = config.nats_url.clone();
     let instance_id_for_mail = config.service_instance_id.clone();
     let mail_subscriber_config = mail_subscriber::SubscriberConfig {
+        redis_url: config.redis_url.clone(),
+        redis_key_prefix: config.redis_key_prefix.clone(),
         max_payload_bytes: config.mail_notify_max_payload_bytes,
         accept_legacy_payload: config.mail_notify_accept_legacy_payload,
         legacy_compat_until_epoch_seconds: config.mail_notify_legacy_compat_until_epoch_seconds,
@@ -937,11 +1002,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         bound_listeners,
         chat_store.clone(),
         chat_sessions,
+        chat_push_router,
         lease_loss_rx,
     )
     .await;
 
     let _ = mail_shutdown_tx.send(true);
+    let _ = chat_push_shutdown_tx.send(true);
     match tokio::time::timeout(
         std::time::Duration::from_secs(5),
         &mut mail_subscriber_handle,
@@ -956,6 +1023,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             tracing::warn!("mail subscriber did not stop in time; aborting task");
             mail_subscriber_handle.abort();
             let _ = mail_subscriber_handle.await;
+        }
+    }
+
+    match tokio::time::timeout(std::time::Duration::from_secs(5), &mut chat_push_handle).await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            tracing::error!(error = %error, "chat push task failed during shutdown");
+        }
+        Err(_) => {
+            tracing::warn!("chat push task did not stop in time; aborting task");
+            chat_push_handle.abort();
+            let _ = chat_push_handle.await;
         }
     }
 
@@ -1628,6 +1707,10 @@ mod tests {
             mail_notify_dedup_ttl_secs: mail_subscriber::DEFAULT_DEDUP_TTL_SECS,
             mail_notify_reconnect_base_ms: mail_subscriber::DEFAULT_RECONNECT_BASE_MS,
             mail_notify_reconnect_max_ms: mail_subscriber::DEFAULT_RECONNECT_MAX_MS,
+            chat_push_max_payload_bytes: chat_push::DEFAULT_MAX_PAYLOAD_BYTES,
+            chat_push_publish_queue_capacity: chat_push::DEFAULT_PUBLISH_QUEUE_CAPACITY,
+            chat_push_reconnect_base_ms: chat_push::DEFAULT_RECONNECT_BASE_MS,
+            chat_push_reconnect_max_ms: chat_push::DEFAULT_RECONNECT_MAX_MS,
             registry_enabled: true,
             discovery_required: false,
             registry_url: "redis://127.0.0.1:6379".to_string(),
@@ -1750,6 +1833,10 @@ mod tests {
             mail_notify_dedup_ttl_secs: mail_subscriber::DEFAULT_DEDUP_TTL_SECS,
             mail_notify_reconnect_base_ms: mail_subscriber::DEFAULT_RECONNECT_BASE_MS,
             mail_notify_reconnect_max_ms: mail_subscriber::DEFAULT_RECONNECT_MAX_MS,
+            chat_push_max_payload_bytes: chat_push::DEFAULT_MAX_PAYLOAD_BYTES,
+            chat_push_publish_queue_capacity: chat_push::DEFAULT_PUBLISH_QUEUE_CAPACITY,
+            chat_push_reconnect_base_ms: chat_push::DEFAULT_RECONNECT_BASE_MS,
+            chat_push_reconnect_max_ms: chat_push::DEFAULT_RECONNECT_MAX_MS,
             registry_enabled: true,
             discovery_required: false,
             registry_url: "redis://127.0.0.1:6379".to_string(),

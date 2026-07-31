@@ -12,6 +12,7 @@ use tokio::sync::{Semaphore, mpsc, watch};
 use tokio::time::timeout;
 use tracing::{debug, info, warn};
 
+use crate::chat_push::ChatPushRouter;
 use crate::chat_service::{self, ChatSessionMap};
 use crate::chat_store::ChatStore;
 use crate::metrics::{METRICS, MetricTransport, MetricsCollector};
@@ -462,6 +463,7 @@ pub async fn run(
     listeners: BoundListeners,
     chat_store: ChatStore,
     chat_sessions: ChatSessionMap,
+    chat_push_router: ChatPushRouter,
     mut lease_loss_rx: watch::Receiver<bool>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let BoundListeners {
@@ -514,6 +516,7 @@ pub async fn run(
 
         let chat_store = chat_store.clone();
         let chat_sessions = chat_sessions.clone();
+        let chat_push_router = chat_push_router.clone();
         let config = config.clone();
         let connection_limits = Arc::clone(&connection_limits);
 
@@ -529,6 +532,7 @@ pub async fn run(
                         },
                         chat_store,
                         chat_sessions,
+                        chat_push_router,
                         config,
                         connection_limits,
                     )
@@ -583,6 +587,7 @@ pub async fn run(
                                 },
                                 chat_store,
                                 chat_sessions,
+                                chat_push_router,
                                 handler_config,
                                 connection_limits,
                             )
@@ -691,6 +696,7 @@ async fn handle_connection<S>(
     context: ConnectionContext,
     chat_store: ChatStore,
     chat_sessions: ChatSessionMap,
+    chat_push_router: ChatPushRouter,
     config: Config,
     connection_limits: Arc<ConnectionLimitTracker>,
 ) -> Result<ConnectionEnd, Box<dyn std::error::Error>>
@@ -754,9 +760,11 @@ where
         player_id.clone(),
         tx.clone(),
         session_shutdown_tx,
+        connection_token.clone(),
     )
     .await;
-    if online_route::set_online_route(
+    let (route_renewal_shutdown_tx, route_renewal_shutdown_rx) = watch::channel(false);
+    let route_renewal_handle = if online_route::set_online_route(
         &config.redis_url,
         &config.redis_key_prefix,
         &player_id,
@@ -765,15 +773,27 @@ where
         config.online_route_ttl_secs,
     )
     .await
-    .is_err()
+    .is_ok()
     {
+        Some(tokio::spawn(
+            online_route::renew_online_route_until_shutdown(
+                config.redis_url.clone(),
+                config.redis_key_prefix.clone(),
+                player_id.clone(),
+                connection_token.clone(),
+                config.online_route_ttl_secs,
+                route_renewal_shutdown_rx,
+            ),
+        ))
+    } else {
         warn!(
             peer = %context.client_ip,
             transport = context.transport.as_str(),
             error_category = "online_route_set_failed",
             "failed to set chat online route"
         );
-    }
+        None
+    };
 
     // 写线程：处理所有出站消息
     let mut writer_task = tokio::spawn(async move {
@@ -961,6 +981,7 @@ where
                     chat_service::handle_chat_private(
                         &chat_store,
                         &chat_sessions,
+                        &chat_push_router,
                         &player_id,
                         &packet,
                         &tx,
@@ -971,6 +992,7 @@ where
                     chat_service::handle_chat_group(
                         &chat_store,
                         &chat_sessions,
+                        &chat_push_router,
                         &player_id,
                         &packet,
                         &tx,
@@ -1039,6 +1061,11 @@ where
     };
 
     record_connection_end_metrics(&METRICS, context.transport, connection_end);
+
+    let _ = route_renewal_shutdown_tx.send(true);
+    if let Some(route_renewal_handle) = route_renewal_handle {
+        let _ = route_renewal_handle.await;
+    }
 
     // 注销聊天会话
     let removed_current_session =

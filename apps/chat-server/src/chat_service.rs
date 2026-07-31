@@ -5,9 +5,11 @@ use std::sync::OnceLock;
 use global_id::{GlobalIdError, GlobalIdGenerator};
 use tokio::sync::{RwLock, mpsc, watch};
 
+use crate::chat_push::ChatPushRouter;
 use crate::chat_server::MessageType;
 use crate::chat_store::{ChatGroup, ChatMessage};
 use crate::metrics::METRICS;
+use crate::online_route::{self, LocalDeliveryDecision, OnlineRoute};
 use crate::proto::chat::{
     ChatGroupReq, ChatGroupRes, ChatHistoryReq, ChatHistoryRes, ChatPrivateReq, ChatPrivateRes,
     ChatPush, ErrorRes, GroupCreateReq, GroupCreateRes, GroupDismissReq, GroupDismissRes,
@@ -67,14 +69,20 @@ impl std::error::Error for OutboundQueueError {}
 pub struct ChatSession {
     sender: ChatOutboundSender,
     shutdown: watch::Sender<Option<SessionCloseReason>>,
+    connection_token: String,
 }
 
 impl ChatSession {
     pub fn new(
         sender: ChatOutboundSender,
         shutdown: watch::Sender<Option<SessionCloseReason>>,
+        connection_token: String,
     ) -> Self {
-        Self { sender, shutdown }
+        Self {
+            sender,
+            shutdown,
+            connection_token,
+        }
     }
 
     pub fn try_send(&self, message: OutboundMessage) -> Result<(), OutboundQueueError> {
@@ -94,6 +102,10 @@ impl ChatSession {
 
     fn same_channel(&self, sender: &ChatOutboundSender) -> bool {
         self.sender.same_channel(sender)
+    }
+
+    fn connection_token(&self) -> &str {
+        &self.connection_token
     }
 }
 
@@ -162,6 +174,7 @@ fn build_chat_push(msg: &ChatMessage, sender_name: &str) -> OutboundMessage {
 pub async fn handle_chat_private(
     chat_store: &crate::chat_store::ChatStore,
     sessions: &ChatSessionMap,
+    push_router: &ChatPushRouter,
     player_id: &str,
     packet: &Packet,
     tx: &ChatOutboundSender,
@@ -218,6 +231,13 @@ pub async fn handle_chat_private(
             error_category = "chat_store_save_failed",
             "failed to save private message"
         );
+        queue_error(
+            tx,
+            packet.header.seq,
+            "CHAT_SAVE_FAILED",
+            "chat message was not saved",
+        )?;
+        return Ok(());
     }
 
     // 发送响应给发送者
@@ -233,17 +253,15 @@ pub async fn handle_chat_private(
         &res,
     )?;
 
-    // 如果目标玩家在线，推送消息
-    if let Some(sender) = sessions.read().await.get(&request.target_id) {
-        let push = build_chat_push(&msg, player_id);
-        if let Err(error) = sender.try_send(push) {
-            tracing::warn!(
-                message_type = MessageType::ChatPush as u16,
-                error_category = error.category(),
-                "failed to queue private chat push"
-            );
-        }
-    }
+    // Online delivery is best effort. The persisted message remains available
+    // through history even if Redis, NATS, or the target session is unavailable.
+    push_router
+        .deliver(
+            sessions,
+            &request.target_id,
+            build_chat_push(&msg, player_id),
+        )
+        .await;
 
     Ok(())
 }
@@ -255,6 +273,7 @@ pub async fn handle_chat_private(
 pub async fn handle_chat_group(
     chat_store: &crate::chat_store::ChatStore,
     sessions: &ChatSessionMap,
+    push_router: &ChatPushRouter,
     player_id: &str,
     packet: &Packet,
     tx: &ChatOutboundSender,
@@ -309,6 +328,13 @@ pub async fn handle_chat_group(
             error_category = "chat_store_save_failed",
             "failed to save group message"
         );
+        queue_error(
+            tx,
+            packet.header.seq,
+            "CHAT_SAVE_FAILED",
+            "chat message was not saved",
+        )?;
+        return Ok(());
     }
 
     // 发送响应给发送者
@@ -329,16 +355,9 @@ pub async fn handle_chat_group(
 
     for member_id in members {
         if member_id != player_id {
-            if let Some(sender) = sessions.read().await.get(&member_id) {
-                let push = build_chat_push(&msg, player_id);
-                if let Err(error) = sender.try_send(push) {
-                    tracing::warn!(
-                        message_type = MessageType::ChatPush as u16,
-                        error_category = error.category(),
-                        "failed to queue group chat push"
-                    );
-                }
-            }
+            push_router
+                .deliver(sessions, &member_id, build_chat_push(&msg, player_id))
+                .await;
         }
     }
 
@@ -800,16 +819,89 @@ pub async fn register_session(
     player_id: String,
     sender: ChatOutboundSender,
     shutdown: watch::Sender<Option<SessionCloseReason>>,
+    connection_token: String,
 ) {
     let (online_players, replaced) = {
         let mut guard = sessions.write().await;
-        let replaced = guard.insert(player_id, ChatSession::new(sender, shutdown));
+        let replaced = guard.insert(
+            player_id,
+            ChatSession::new(sender, shutdown, connection_token),
+        );
         (guard.len() as u64, replaced)
     };
     if let Some(replaced) = replaced {
         replaced.request_shutdown(SessionCloseReason::Replaced);
     }
     METRICS.set_online_players(online_players);
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RoutedSessionPushOutcome {
+    Pushed,
+    RouteMissing,
+    RouteInstanceMismatch,
+    RouteOwnerMismatch,
+    Offline,
+    SessionOwnerMismatch,
+    QueueFull,
+    QueueClosed,
+}
+
+impl RoutedSessionPushOutcome {
+    pub fn category(self) -> &'static str {
+        match self {
+            Self::Pushed => "pushed",
+            Self::RouteMissing => "route_missing",
+            Self::RouteInstanceMismatch => "route_instance_mismatch",
+            Self::RouteOwnerMismatch => "route_owner_mismatch",
+            Self::Offline => "session_unavailable",
+            Self::SessionOwnerMismatch => "session_owner_mismatch",
+            Self::QueueFull => "outbound_queue_full",
+            Self::QueueClosed => "outbound_queue_closed",
+        }
+    }
+}
+
+/// Queues a message only when the Redis route and the local session both still
+/// name the expected connection. The map read lock makes session replacement
+/// and channel enqueue atomic from this process's perspective.
+pub async fn push_to_routed_session(
+    sessions: &ChatSessionMap,
+    local_instance_id: &str,
+    current_route: Option<&OnlineRoute>,
+    expected_instance_id: &str,
+    expected_connection_token: &str,
+    player_id: &str,
+    message: OutboundMessage,
+) -> RoutedSessionPushOutcome {
+    let sessions = sessions.read().await;
+    let session = sessions.get(player_id);
+    let decision = online_route::evaluate_local_delivery(
+        current_route,
+        expected_instance_id,
+        expected_connection_token,
+        local_instance_id,
+        session.map(ChatSession::connection_token),
+    );
+    match decision {
+        LocalDeliveryDecision::Deliver => match session
+            .expect("delivery policy only allows a present session")
+            .try_send(message)
+        {
+            Ok(()) => RoutedSessionPushOutcome::Pushed,
+            Err(OutboundQueueError::Full) => RoutedSessionPushOutcome::QueueFull,
+            Err(OutboundQueueError::Closed) => RoutedSessionPushOutcome::QueueClosed,
+        },
+        LocalDeliveryDecision::RouteMissing => RoutedSessionPushOutcome::RouteMissing,
+        LocalDeliveryDecision::RouteInstanceMismatch => {
+            RoutedSessionPushOutcome::RouteInstanceMismatch
+        }
+        LocalDeliveryDecision::RouteOwnerMismatch => RoutedSessionPushOutcome::RouteOwnerMismatch,
+        LocalDeliveryDecision::SessionUnavailable => RoutedSessionPushOutcome::Offline,
+        LocalDeliveryDecision::SessionOwnerMismatch => {
+            RoutedSessionPushOutcome::SessionOwnerMismatch
+        }
+    }
 }
 
 pub async fn unregister_session(
@@ -898,6 +990,7 @@ mod tests {
             "player_001".to_string(),
             old_sender.clone(),
             old_shutdown,
+            "token-old".to_string(),
         )
         .await;
         register_session(
@@ -905,6 +998,7 @@ mod tests {
             "player_001".to_string(),
             current_sender.clone(),
             current_shutdown,
+            "token-current".to_string(),
         )
         .await;
         old_shutdown_rx.changed().await.unwrap();
@@ -931,7 +1025,7 @@ mod tests {
     async fn full_session_queue_requests_connection_shutdown() {
         let (sender, _receiver) = mpsc::channel(1);
         let (shutdown, mut shutdown_rx) = watch::channel(None);
-        let session = ChatSession::new(sender, shutdown);
+        let session = ChatSession::new(sender, shutdown, "token".to_string());
         let message = OutboundMessage {
             message_type: MessageType::ChatPush as u16,
             seq: 0,
@@ -945,5 +1039,92 @@ mod tests {
             *shutdown_rx.borrow(),
             Some(SessionCloseReason::OutboundQueueFull)
         );
+    }
+
+    #[tokio::test]
+    async fn routed_push_rejects_a_stale_session_owner() {
+        let sessions = new_chat_session_map();
+        let (sender, mut receiver) = mpsc::channel(1);
+        let (shutdown, _shutdown_rx) = watch::channel(None);
+        sessions.write().await.insert(
+            "player_001".to_string(),
+            ChatSession::new(sender, shutdown, "token-new".to_string()),
+        );
+        let route = OnlineRoute {
+            instance_id: "chat-a".to_string(),
+            connection_token: "token-new".to_string(),
+        };
+
+        let result = push_to_routed_session(
+            &sessions,
+            "chat-a",
+            Some(&route),
+            "chat-a",
+            "token-old",
+            "player_001",
+            OutboundMessage {
+                message_type: MessageType::ChatPush as u16,
+                seq: 0,
+                body: vec![],
+            },
+        )
+        .await;
+
+        assert_eq!(result, RoutedSessionPushOutcome::RouteOwnerMismatch);
+        assert!(receiver.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn routed_push_delivers_only_to_the_current_route_owner_session() {
+        let sessions = new_chat_session_map();
+        let (sender, mut receiver) = mpsc::channel(2);
+        let (shutdown, _shutdown_rx) = watch::channel(None);
+        sessions.write().await.insert(
+            "player_001".to_string(),
+            ChatSession::new(sender, shutdown, "token-current".to_string()),
+        );
+        let route = OnlineRoute {
+            instance_id: "chat-b".to_string(),
+            connection_token: "token-current".to_string(),
+        };
+        let message = OutboundMessage {
+            message_type: MessageType::ChatPush as u16,
+            seq: 0,
+            body: vec![7, 8, 9],
+        };
+
+        assert_eq!(
+            push_to_routed_session(
+                &sessions,
+                "chat-b",
+                Some(&route),
+                "chat-b",
+                "token-current",
+                "player_001",
+                message,
+            )
+            .await,
+            RoutedSessionPushOutcome::Pushed
+        );
+        assert_eq!(receiver.recv().await.unwrap().body, vec![7, 8, 9]);
+
+        assert_eq!(
+            push_to_routed_session(
+                &sessions,
+                "chat-a",
+                Some(&route),
+                "chat-b",
+                "token-current",
+                "player_001",
+                OutboundMessage {
+                    message_type: MessageType::ChatPush as u16,
+                    seq: 0,
+                    body: vec![],
+                },
+            )
+            .await,
+            RoutedSessionPushOutcome::RouteInstanceMismatch
+        );
+        assert!(receiver.try_recv().is_err());
     }
 }
