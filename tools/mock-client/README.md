@@ -2,7 +2,7 @@
 
 ## 概述
 
-Mock Client 是一个用于测试 MyServer 游戏后端框架的联调工具。默认模拟玩家客户端只接触 `auth-http` 和 `game-proxy` 玩家入口；聊天场景默认保持本地 `9001/TCP` 内部联调方式，也可显式使用本地 `ws://127.0.0.1:9011/` 或从登录响应 `services.chat` 读取正式 `wss://chat.game.zergzerg.cn/`。`mail-service`、`announce-service` 场景仍是内部联调路径，必须显式传入对应内部地址。
+Mock Client 是一个用于测试 MyServer 游戏后端框架的联调工具。默认模拟玩家客户端只接触 `auth-http` 和 `game-proxy` 玩家入口；聊天场景默认保持本地 `9001/TCP` 内部联调方式，也可显式使用本地 `ws://127.0.0.1:9011/` 或从登录响应 `services.chat` 读取正式 `wss://chat.game.zergzerg.cn/`。玩家邮件场景从登录、选角或补签票响应的 `services.mail` 读取正式 HTTPS 地址；`mail-send` 和 `mail-send-and-notify` 是 service-token-only 的内部发信场景，必须显式传入本地内部地址。公告场景仍是内部联调路径。
 
 ## 项目结构
 
@@ -88,8 +88,10 @@ Protobuf 风格的编解码工具：
 
 ### scenarios/mail.js
 邮件辅助场景：
-- 通过 HTTP 调用 `mail-service` 的邮件 CRUD / claim 接口
-- 支持带附件的系统邮件发送
+- 玩家列表、详情、已读和领取使用当前 character-bound game ticket 的 `X-Game-Ticket` header，身份不从 query 或 body 传入
+- 优先从 `services.mail` 读取 `https://api.game.zergzerg.cn/api/v1/mails`；只有 descriptor 缺失或 `--no-service-discovery` 时，玩家场景才使用显式 `--mail-base-url` 本地调试地址
+- 系统发信仅允许 `mail-send` / `mail-send-and-notify` 携带显式 `--service-token` 直连内部地址，不能经 Caddy 玩家入口
+- 领取收到 `202` 结果未知时只查询同一邮件状态，不重发 claim
 - 支持联调 `chat-server` 的 `MAIL_NOTIFY_PUSH`
 
 ### scenarios/announce.js
@@ -177,8 +179,8 @@ Protobuf 风格的编解码工具：
 ### 邮件场景 (mail.js)
 | 场景 | 说明 |
 |------|------|
-| `mail-send` | 发送邮件到指定玩家或当前登录玩家 |
-| `mail-list` | 获取指定玩家的邮件列表 |
+| `mail-send` | 通过内部 service token 发送邮件到指定玩家或当前登录玩家 |
+| `mail-list` | 获取当前 ticket 绑定玩家的邮件列表 |
 | `mail-get` | 获取邮件详情 |
 | `mail-read` | 标记邮件已读 |
 | `mail-claim` | 领取邮件附件（重复领取会返回幂等结果） |
@@ -481,17 +483,24 @@ node tools/mock-client/src/index.js --scenario chat-private \
   --http-base-url https://api.game.zergzerg.cn \
   --chat-transport wss --target-id <plr_...> --content "Hello over WSS!"
 
-# 邮件测试（9003 是本地内部联调地址示例）
+# 系统发信（9003 仅为本地内部联调地址，不能使用 api.game.zergzerg.cn）
 node tools/mock-client/src/index.js --scenario mail-send \
   --http-base-url http://127.0.0.1:3000 \
   --mail-base-url http://127.0.0.1:9003 \
+  --service-token <MAIL_SERVICE_TOKEN> \
   --login-name test001 --password Passw0rd! \
   --mail-title "系统奖励" --mail-content "请查收附件"
 
-# 邮件通知联调（9003/9001 是本地内部联调地址示例）
+# 正式玩家读取（services.mail 自动提供 https://api.game.zergzerg.cn）
+node tools/mock-client/src/index.js --scenario mail-list \
+  --http-base-url https://api.game.zergzerg.cn \
+  --login-name test001 --password Passw0rd! --mail-status unread --limit 10
+
+# 邮件通知联调（9003/9001 是本地内部联调地址，系统发信需要独立 service token）
 node tools/mock-client/src/index.js --scenario mail-send-and-notify \
   --http-base-url http://127.0.0.1:3000 \
   --mail-base-url http://127.0.0.1:9003 \
+  --service-token <MAIL_SERVICE_TOKEN> \
   --host 127.0.0.1 --chat-port 9001 \
   --login-name test001 --password Passw0rd! \
   --mail-title "通知测试" --mail-content "测试聊天服邮件通知"
@@ -527,7 +536,7 @@ node tools/mock-client/src/index.js --scenario password-ticket-revoke \
 | `--admin-token` | admin-api Bearer token，默认读取 `MYSERVER_ADMIN_TOKEN` 或 `ADMIN_API_TOKEN`，不内置真实 token | 空 |
 | `--admin-log-limit` | admin-api 角色 profile / titles 只读查询日志条数 | `20` |
 | `--announce-base-url` | 公告服务地址，内部联调场景必须显式传入 | 空 |
-| `--mail-base-url` | 邮件服务地址，内部联调场景必须显式传入 | 空 |
+| `--mail-base-url` | 本地 `9003` 内部联调地址；玩家场景优先使用 `services.mail`，系统发信必须显式传入 | 空 |
 | `--host` | 玩家入口地址 | `127.0.0.1` |
 | `--game-host` | 游戏 TCP 服务器地址；未传时使用 `--host` | 空 |
 | `--port` | 玩家 TCP 入口端口，默认走 `game-proxy` TCP fallback | `14000` |
@@ -578,8 +587,8 @@ node tools/mock-client/src/index.js --scenario password-ticket-revoke \
 | `--combat-skill-id` | `combat-dual-client` 使用的技能 ID，默认 `2`(fireball) | `2` |
 | `--content` | 聊天消息内容 | `Hello from mock-client!` |
 | `--mail-id` | 邮件 ID（mail-get / mail-read / mail-claim），格式为 `mail_<base32>` | 空 |
-| `--mail-player-id` | 邮件所属玩家 ID（mail-list / mail-read / mail-claim） | 空 |
-| `--mail-to-player-id` | 邮件接收方玩家 ID（mail-send） | 空 |
+| `--mail-player-id` | 已废弃；玩家身份只能来自 `X-Game-Ticket`，传入会被拒绝 | 空 |
+| `--mail-to-player-id` | 邮件接收方玩家 ID（仅内部 `mail-send`） | 空 |
 | `--mail-status` | 邮件状态筛选，如 `unread` / `read` | 空 |
 | `--mail-offset` | 邮件列表偏移量 | `0` |
 | `--mail-title` | 邮件标题 | `Mock mail from mock-client` |
@@ -621,10 +630,11 @@ node tools/mock-client/src/index.js --scenario password-ticket-revoke \
 ### 邮件测试示例
 
 ```bash
-# 发给当前登录玩家
+# 内部系统发信：必须显式提供内部地址和 service token，不能走 Caddy 玩家 HTTPS 地址
 node tools/mock-client/src/index.js --scenario mail-send \
   --http-base-url http://127.0.0.1:3000 \
   --mail-base-url http://127.0.0.1:9003 \
+  --service-token <MAIL_SERVICE_TOKEN> \
   --login-name test001 --password Passw0rd! \
   --mail-title "欢迎礼包" --mail-content "请查收测试奖励"
 
@@ -632,19 +642,20 @@ node tools/mock-client/src/index.js --scenario mail-send \
 node tools/mock-client/src/index.js --scenario mail-send \
   --http-base-url http://127.0.0.1:3000 \
   --mail-base-url http://127.0.0.1:9003 \
+  --service-token <MAIL_SERVICE_TOKEN> \
   --login-name test001 --password Passw0rd! \
   --attachments-json '[{"type":"item","id":1001,"count":1}]'
 
-# 查看未读邮件
+# 正式玩家读取：从 auth 响应 services.mail 取得 Caddy HTTPS 地址，自动附加当前 game ticket
 node tools/mock-client/src/index.js --scenario mail-list \
-  --http-base-url http://127.0.0.1:3000 \
-  --mail-base-url http://127.0.0.1:9003 \
+  --http-base-url https://api.game.zergzerg.cn \
   --login-name test001 --password Passw0rd! \
   --mail-status unread --limit 10
 
-# 标记已读
+# 本地玩家邮件调试：仅 descriptor 缺失或加 --no-service-discovery 时显式使用 9003；仍使用 game ticket
 node tools/mock-client/src/index.js --scenario mail-read \
   --http-base-url http://127.0.0.1:3000 \
+  --no-service-discovery \
   --mail-base-url http://127.0.0.1:9003 \
   --login-name test001 --password Passw0rd! \
   --mail-id <mail_...>

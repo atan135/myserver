@@ -8,7 +8,7 @@
 # --admin-token <token>      admin-api Bearer token；默认读取 MYSERVER_ADMIN_TOKEN 或 ADMIN_API_TOKEN，不内置真实 token
 # --admin-log-limit <n>      admin-api 角色只读查询日志条数 (默认 20)
 # --announce-base-url <url>  公告服务地址；内部联调场景必须显式传入
-# --mail-base-url <url>      邮件服务地址；内部联调场景必须显式传入
+# --mail-base-url <url>      本地邮件内部联调地址；玩家流程优先从 services.mail 读取 HTTPS，系统发信必须显式传入
 # --host <ip>                玩家入口地址 (默认 127.0.0.1)
 # --port <port>              玩家 TCP 入口端口 (默认 14000，即 game-proxy TCP fallback)
 # --chat-port <port>         聊天服务器端口；内部联调场景必须显式传入
@@ -53,8 +53,8 @@
 # ========== 邮件参数 ==========
 
 # --mail-id <id>                 邮件ID（mail-get / mail-read / mail-claim 必填）
-# --mail-player-id <plr_...>     收件人玩家ID（mail-list / mail-read / mail-claim）
-# --mail-to-player-id <plr_...>  邮件接收方玩家ID（mail-send）
+# --mail-player-id <plr_...>     已废弃；玩家身份只能来自 X-Game-Ticket，传入会被拒绝
+# --mail-to-player-id <plr_...>  邮件接收方玩家ID（仅内部 mail-send）
 # --mail-status <status>         邮件状态筛选，例如 unread / read
 # --mail-offset <n>              邮件列表偏移量（默认 0）
 # --mail-title <text>            邮件标题
@@ -351,30 +351,32 @@ node tools/mock-client/src/index.js --scenario chat-private-two-client --http-ba
 # 开启两个客户端，通过命令行互相发送消息
 node tools/mock-client/src/index.js --scenario chat-interactive --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --chat-port 9001 --room-id test-room
 
-# ========== 邮件系统测试 (内部联调地址；本地示例通过 --mail-base-url 9003) ==========
+# ========== 邮件系统测试 ==========
+# 玩家读/详情/已读/领取：从 auth 的 services.mail 读取正式 Caddy HTTPS 地址，并自动带当前 character-bound X-Game-Ticket。
+# 9003 仅是显式本地内部联调地址；系统发信不能走 api.game.zergzerg.cn，且必须独立提供 --service-token。
 
 # 发送系统邮件 (MAIL_SEND)
 # 默认会发给当前登录玩家；也可以通过 --mail-to-player-id 指定其他玩家
-node tools/mock-client/src/index.js --scenario mail-send --http-base-url http://127.0.0.1:3000 --mail-base-url http://127.0.0.1:9003 --login-name test001 --password Passw0rd! --mail-title "系统奖励" --mail-content "请查收附件"
+node tools/mock-client/src/index.js --scenario mail-send --http-base-url http://127.0.0.1:3000 --mail-base-url http://127.0.0.1:9003 --service-token <MAIL_SERVICE_TOKEN> --login-name test001 --password Passw0rd! --mail-title "系统奖励" --mail-content "请查收附件"
 
 # 发送带附件的系统邮件
-node tools/mock-client/src/index.js --scenario mail-send --http-base-url http://127.0.0.1:3000 --mail-base-url http://127.0.0.1:9003 --login-name test001 --password Passw0rd! --mail-title "附件测试" --mail-content "包含一个物品奖励" --attachments-json '[{"type":"item","id":1001,"count":1}]'
+node tools/mock-client/src/index.js --scenario mail-send --http-base-url http://127.0.0.1:3000 --mail-base-url http://127.0.0.1:9003 --service-token <MAIL_SERVICE_TOKEN> --login-name test001 --password Passw0rd! --mail-title "附件测试" --mail-content "包含一个物品奖励" --attachments-json '[{"type":"item","id":1001,"count":1}]'
 
 # 获取当前登录玩家的邮件列表 (MAIL_LIST)
-node tools/mock-client/src/index.js --scenario mail-list --http-base-url http://127.0.0.1:3000 --mail-base-url http://127.0.0.1:9003 --login-name test001 --password Passw0rd! --mail-status unread --limit 10
+node tools/mock-client/src/index.js --scenario mail-list --http-base-url https://api.game.zergzerg.cn --login-name test001 --password Passw0rd! --mail-status unread --limit 10
 
 # 查询邮件详情 (MAIL_GET)
-node tools/mock-client/src/index.js --scenario mail-get --mail-base-url http://127.0.0.1:9003 --mail-id <mail_...>
+node tools/mock-client/src/index.js --scenario mail-get --http-base-url https://api.game.zergzerg.cn --login-name test001 --password Passw0rd! --mail-id <mail_...>
 
 # 标记邮件已读 (MAIL_READ)
-node tools/mock-client/src/index.js --scenario mail-read --http-base-url http://127.0.0.1:3000 --mail-base-url http://127.0.0.1:9003 --login-name test001 --password Passw0rd! --mail-id <mail_...>
+node tools/mock-client/src/index.js --scenario mail-read --http-base-url https://api.game.zergzerg.cn --login-name test001 --password Passw0rd! --mail-id <mail_...>
 
 # 领取邮件附件 (MAIL_CLAIM)
 # 若同一封邮件重复领取，服务端会返回幂等结果
-node tools/mock-client/src/index.js --scenario mail-claim --http-base-url http://127.0.0.1:3000 --mail-base-url http://127.0.0.1:9003 --login-name test001 --password Passw0rd! --mail-id <mail_...>
+node tools/mock-client/src/index.js --scenario mail-claim --http-base-url https://api.game.zergzerg.cn --login-name test001 --password Passw0rd! --mail-id <mail_...>
 
 # 发送邮件并等待聊天服推送 MAIL_NOTIFY_PUSH (MAIL_SEND_AND_NOTIFY)
-node tools/mock-client/src/index.js --scenario mail-send-and-notify --http-base-url http://127.0.0.1:3000 --mail-base-url http://127.0.0.1:9003 --host 127.0.0.1 --chat-port 9001 --login-name test001 --password Passw0rd! --mail-title "通知测试" --mail-content "测试聊天服邮件通知"
+node tools/mock-client/src/index.js --scenario mail-send-and-notify --http-base-url http://127.0.0.1:3000 --mail-base-url http://127.0.0.1:9003 --service-token <MAIL_SERVICE_TOKEN> --host 127.0.0.1 --chat-port 9001 --login-name test001 --password Passw0rd! --mail-title "通知测试" --mail-content "测试聊天服邮件通知"
 
 # ========== 公告系统测试 (内部联调地址；本地示例通过 --announce-base-url 9004) ==========
 
@@ -504,12 +506,12 @@ node tools/mock-client/src/index.js --scenario two-client-room --http-base-url h
 # chat-two-client          | 双客户端群聊
 # chat-private-two-client  | 双客户端私聊
 # chat-interactive         | 交互式聊天
-# mail-send                | 发送邮件（HTTP）
-# mail-list                | 获取邮件列表（HTTP）
-# mail-get                 | 获取邮件详情（HTTP）
-# mail-read                | 标记邮件已读（HTTP）
-# mail-claim               | 领取邮件附件（HTTP）
-# mail-send-and-notify     | 发邮件并等待 MAIL_NOTIFY_PUSH
+# mail-send                | 内部 service-token 发信（HTTP 内网地址）
+# mail-list                | 获取当前 ticket 玩家邮件（Caddy HTTPS）
+# mail-get                 | 获取当前 ticket 玩家邮件详情（Caddy HTTPS）
+# mail-read                | 标记当前 ticket 玩家邮件已读（Caddy HTTPS）
+# mail-claim               | 领取当前 ticket 玩家邮件附件（Caddy HTTPS）
+# mail-send-and-notify     | 内部发信并等待 MAIL_NOTIFY_PUSH
 # announce-list            | 获取公告列表（HTTP）
 # announce-get             | 获取公告详情（HTTP）
 # announce-create          | 创建公告（HTTP）

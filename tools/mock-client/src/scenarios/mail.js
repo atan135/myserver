@@ -1,6 +1,8 @@
 import { MESSAGE_TYPE } from "../constants.js";
-import { fetchTicket, formatLoginSummary } from "../auth.js";
+import { fetchTicket, formatLoginSummary, httpBaseUrlFromDescriptor } from "../auth.js";
 import { authenticateChatClient, connectToChatServer } from "./chat.js";
+
+const MAIL_API_PATH = "/api/v1/mails";
 
 function shouldAutoGuestLogin(options) {
   return !options.ticket && !options.guestId && !options.loginName && !options.password;
@@ -15,9 +17,58 @@ async function fetchMailLogin(options, suffix) {
   return login;
 }
 
-function buildMailUrl(baseUrl, pathname, query = {}) {
+function requireMailTicket(login) {
+  if (!login?.ticket) {
+    throw new Error("player mail scenarios require a character-bound game ticket");
+  }
+  return login.ticket;
+}
+
+function assertPlayerMailCredentials(options) {
+  if (options.mailPlayerId) {
+    throw new Error("--mail-player-id is not accepted by player mail scenarios; identity comes from X-Game-Ticket");
+  }
+  if (options.serviceToken) {
+    throw new Error("--service-token is only valid for internal mail-send scenarios, not player mail scenarios");
+  }
+}
+
+async function resolvePlayerMailLogin(options, suffix) {
+  assertPlayerMailCredentials(options);
+  const login = await fetchMailLogin(options, suffix);
+  requireMailTicket(login);
+  return login;
+}
+
+export function resolvePlayerMailBaseUrl(options, login) {
+  return (
+    httpBaseUrlFromDescriptor(login?.services?.mail) ||
+    options.discoveredMailBaseUrl ||
+    options.mailBaseUrl ||
+    ""
+  );
+}
+
+function requireInternalMailBaseUrl(options) {
+  if (!options.mailBaseUrlOverride) {
+    throw new Error("system mail scenarios require an explicit internal --mail-base-url; player HTTPS descriptors cannot send mail");
+  }
+
+  let url;
+  try {
+    url = new URL(options.mailBaseUrlOverride);
+  } catch {
+    throw new Error("system mail scenarios require a valid internal --mail-base-url");
+  }
+  if (url.protocol !== "http:") {
+    throw new Error("system mail scenarios only allow an HTTP internal --mail-base-url, never the player HTTPS Caddy endpoint");
+  }
+  return url.origin;
+}
+
+export function buildMailUrl(baseUrl, pathname, query = {}) {
   if (!baseUrl) {
-    throw new Error("mail scenarios are internal integration flows; pass --mail-base-url or enable non-production auth internal endpoint exposure");
+    throw new Error("player mail scenarios require services.mail from auth or an explicit local --mail-base-url");
   }
 
   const url = new URL(pathname, baseUrl);
@@ -70,7 +121,7 @@ function printMailResponse(label, response) {
   }, null, 2));
 }
 
-function assertMailOk(label, response) {
+export function assertMailOk(label, response) {
   if (!response.ok) {
     const message = response.payload?.message || response.payload?.error || "mail request failed";
     throw new Error(`${label} failed (${response.status}): ${message}`);
@@ -92,7 +143,7 @@ function parseAttachmentsJson(options) {
       .replace(/\\:/g, ":")
       .replace(/\\,/g, ",")
       .replace(/\\(?=[A-Za-z_])/g, "")
-      .replace(/\\(?=[[\]{}])/g, "")
+      .replace(/\\(?=[\[\]{}])/g, "")
       .replace(/([{,]\s*)([A-Za-z_][\w-]*)(\s*:)/g, '$1"$2"$3')
       .replace(/(:\s*)([A-Za-z_][\w-]*)(\s*[,}\]])/g, (match, prefix, value, suffix) => {
         if (value === "true" || value === "false" || value === "null") {
@@ -129,15 +180,6 @@ function requireMailId(options) {
   return options.mailId;
 }
 
-async function resolveMailPlayerId(options, suffix) {
-  if (options.mailPlayerId) {
-    return { playerId: options.mailPlayerId, login: null };
-  }
-
-  const login = await fetchMailLogin(options, suffix);
-  return { playerId: login.playerId, login };
-}
-
 async function resolveMailRecipientId(options, suffix) {
   if (options.mailToPlayerId) {
     return { playerId: options.mailToPlayerId, login: null };
@@ -169,16 +211,40 @@ function buildMailSendBody(options, toPlayerId) {
   return body;
 }
 
+function requireServiceToken(options) {
+  if (!options.serviceToken) {
+    throw new Error("system mail scenarios require an explicit --service-token; player game tickets cannot send mail");
+  }
+  return options.serviceToken;
+}
+
 function buildServiceHeaders(options) {
-  return options.serviceToken ? { "x-service-token": options.serviceToken } : {};
+  return { "x-service-token": requireServiceToken(options) };
+}
+
+function buildPlayerHeaders(login) {
+  return { "X-Game-Ticket": requireMailTicket(login) };
+}
+
+function playerMailUrl(options, login, pathname, query) {
+  return buildMailUrl(resolvePlayerMailBaseUrl(options, login), pathname, query);
+}
+
+async function getMailDetail(options, login, mailId) {
+  const mailUrl = playerMailUrl(options, login, `${MAIL_API_PATH}/${mailId}`);
+  const response = await requestMailJson(mailUrl, options, { headers: buildPlayerHeaders(login) });
+  printMailResponse("mail.get", response);
+  return assertMailOk("mail.get", response);
 }
 
 export async function runMailSend(options) {
+  const internalBaseUrl = requireInternalMailBaseUrl(options);
+  requireServiceToken(options);
   const { playerId, login } = await resolveMailRecipientId(options, "mail-send");
-  const mailUrl = buildMailUrl(options.mailBaseUrl, "/api/v1/mails");
+  const mailUrl = buildMailUrl(internalBaseUrl, MAIL_API_PATH);
   const body = buildMailSendBody(options, playerId);
 
-  console.log(`mail-base-url: ${options.mailBaseUrl}`);
+  console.log(`mail-base-url: ${internalBaseUrl}`);
   console.log(`to_player_id: ${playerId}`);
   if (login) {
     console.log(`recipient login playerId: ${login.playerId}`);
@@ -195,21 +261,16 @@ export async function runMailSend(options) {
 }
 
 export async function runMailList(options) {
-  const { playerId, login } = await resolveMailPlayerId(options, "mail-list");
-  const mailUrl = buildMailUrl(options.mailBaseUrl, "/api/v1/mails", {
-    player_id: playerId,
+  const login = await resolvePlayerMailLogin(options, "mail-list");
+  const mailUrl = playerMailUrl(options, login, MAIL_API_PATH, {
     status: options.mailStatus,
     limit: options.limit,
     offset: options.mailOffset
   });
 
-  console.log(`mail-base-url: ${options.mailBaseUrl}`);
-  console.log(`player_id: ${playerId}`);
-  if (login) {
-    console.log(`login playerId: ${login.playerId}`);
-  }
+  console.log(`mail-base-url: ${resolvePlayerMailBaseUrl(options, login)}`);
 
-  const response = await requestMailJson(mailUrl, options);
+  const response = await requestMailJson(mailUrl, options, { headers: buildPlayerHeaders(login) });
   printMailResponse("mail.list", response);
   const payload = assertMailOk("mail.list", response);
 
@@ -218,31 +279,23 @@ export async function runMailList(options) {
 
 export async function runMailGet(options) {
   const mailId = requireMailId(options);
-  const mailUrl = buildMailUrl(options.mailBaseUrl, `/api/v1/mails/${mailId}`);
-
-  console.log(`mail-base-url: ${options.mailBaseUrl}`);
+  const login = await resolvePlayerMailLogin(options, "mail-get");
+  console.log(`mail-base-url: ${resolvePlayerMailBaseUrl(options, login)}`);
   console.log(`mail_id: ${mailId}`);
-
-  const response = await requestMailJson(mailUrl, options);
-  printMailResponse("mail.get", response);
-  assertMailOk("mail.get", response);
+  await getMailDetail(options, login, mailId);
 }
 
 export async function runMailRead(options) {
   const mailId = requireMailId(options);
-  const { playerId, login } = await resolveMailPlayerId(options, "mail-read");
-  const mailUrl = buildMailUrl(options.mailBaseUrl, `/api/v1/mails/${mailId}/read`);
+  const login = await resolvePlayerMailLogin(options, "mail-read");
+  const mailUrl = playerMailUrl(options, login, `${MAIL_API_PATH}/${mailId}/read`);
 
-  console.log(`mail-base-url: ${options.mailBaseUrl}`);
+  console.log(`mail-base-url: ${resolvePlayerMailBaseUrl(options, login)}`);
   console.log(`mail_id: ${mailId}`);
-  console.log(`player_id: ${playerId}`);
-  if (login) {
-    console.log(`login playerId: ${login.playerId}`);
-  }
 
   const response = await requestMailJson(mailUrl, options, {
     method: "PUT",
-    body: JSON.stringify({ player_id: playerId })
+    headers: buildPlayerHeaders(login)
   });
 
   printMailResponse("mail.read", response);
@@ -252,29 +305,33 @@ export async function runMailRead(options) {
 
 export async function runMailClaim(options) {
   const mailId = requireMailId(options);
-  const { playerId, login } = await resolveMailPlayerId(options, "mail-claim");
-  const mailUrl = buildMailUrl(options.mailBaseUrl, `/api/v1/mails/${mailId}/claim`);
+  const login = await resolvePlayerMailLogin(options, "mail-claim");
+  const mailUrl = playerMailUrl(options, login, `${MAIL_API_PATH}/${mailId}/claim`);
 
-  console.log(`mail-base-url: ${options.mailBaseUrl}`);
+  console.log(`mail-base-url: ${resolvePlayerMailBaseUrl(options, login)}`);
   console.log(`mail_id: ${mailId}`);
-  console.log(`player_id: ${playerId}`);
-  if (login) {
-    console.log(`login playerId: ${login.playerId}`);
-  }
 
   const response = await requestMailJson(mailUrl, options, {
     method: "POST",
-    body: JSON.stringify({ player_id: playerId })
+    headers: buildPlayerHeaders(login)
   });
 
   printMailResponse("mail.claim", response);
+  if (response.status === 202) {
+    console.log("mail.claim result is unknown; querying the same mail instead of retrying claim");
+    await getMailDetail(options, login, mailId);
+    return;
+  }
+
   const payload = assertMailOk("mail.claim", response);
   console.log(`claimed: ${payload.claimed}, already_claimed: ${payload.already_claimed}, status: ${payload.status}`);
 }
 
 export async function runMailSendAndNotify(options) {
+  const internalBaseUrl = requireInternalMailBaseUrl(options);
+  requireServiceToken(options);
   const login = await fetchMailLogin(options, "mail-notify");
-  const mailUrl = buildMailUrl(options.mailBaseUrl, "/api/v1/mails");
+  const mailUrl = buildMailUrl(internalBaseUrl, MAIL_API_PATH);
   const chatClient = await connectToChatServer(options, login);
 
   try {

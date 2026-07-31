@@ -225,13 +225,35 @@ function applyChatService(options, service) {
   applyTcpService(options, service, "chatHost", "chatPort");
 }
 
-function applyHttpService(options, service, baseUrlKey) {
-  if (!service?.host || !service?.port) {
+export function httpBaseUrlFromDescriptor(service) {
+  const protocol = String(service?.protocol || "").toLowerCase();
+  const host = String(service?.host || "").trim();
+  const port = Number(service?.port);
+  if (!host || /[\s/?#@]/.test(host) || !["http", "https"].includes(protocol) ||
+      !Number.isInteger(port) || port < 1 || port > 65535) {
+    return "";
+  }
+
+  const authority = host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;
+  const defaultPort = protocol === "https" ? 443 : 80;
+  return `${protocol}://${authority}${port === defaultPort ? "" : `:${port}`}`;
+}
+
+function applyHttpService(options, service, baseUrlKey, discoveredBaseUrlKey = "") {
+  const baseUrl = httpBaseUrlFromDescriptor(service);
+  if (!baseUrl) {
     return;
   }
 
-  const protocol = service.protocol === "https" ? "https" : "http";
-  options[baseUrlKey] = `${protocol}://${service.host}:${service.port}`;
+  if (discoveredBaseUrlKey) {
+    options[discoveredBaseUrlKey] = baseUrl;
+    if (!options.mailBaseUrlOverride) {
+      options[baseUrlKey] = baseUrl;
+    }
+    return;
+  }
+
+  options[baseUrlKey] = baseUrl;
 }
 
 export function applyDiscoveredServices(options, login) {
@@ -241,7 +263,7 @@ export function applyDiscoveredServices(options, login) {
 
   applyTcpService(options, login.services.game, "gameHost", "port");
   applyChatService(options, login.services.chat);
-  applyHttpService(options, login.services.mail, "mailBaseUrl");
+  applyHttpService(options, login.services.mail, "mailBaseUrl", "discoveredMailBaseUrl");
   applyHttpService(options, login.services.announce, "announceBaseUrl");
 }
 

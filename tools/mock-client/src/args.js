@@ -49,6 +49,9 @@ const DEFAULT_OPTIONS = {
   adminLogLimit: 20,
   announceBaseUrl: "",
   mailBaseUrl: "",
+  // Kept separately because service discovery must not turn a player HTTPS
+  // descriptor into an internal system-mail send target.
+  mailBaseUrlOverride: "",
   roomId: "room-default",
   guestId: "",
   loginName: "",
@@ -222,6 +225,7 @@ export function parseArgs(argv) {
         break;
       case "--mail-base-url":
         ({ value: result.mailBaseUrl, nextIndex: index } = collectOptionValue(argv, index));
+        result.mailBaseUrlOverride = result.mailBaseUrl;
         break;
       case "--room-id":
         ({ value: result.roomId, nextIndex: index } = collectOptionValue(argv, index));
