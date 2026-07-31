@@ -80,6 +80,7 @@ function createConfig(overrides = {}) {
     localDiscoveryFallbackEnabled: true,
     authExposeInternalServiceEndpoints: false,
     publicChatDescriptor: null,
+    publicMailDescriptor: null,
     ...overrides
   };
 }
@@ -332,7 +333,7 @@ test("ServiceDiscovery can expose named internal service endpoints only when exp
   });
 });
 
-test("ServiceDiscovery keeps an explicit public WSS chat descriptor over internal discovery", async () => {
+test("ServiceDiscovery keeps explicit public chat and mail descriptors over internal discovery", async () => {
   const redis = createRedis({
     "game-proxy": [
       {
@@ -373,6 +374,26 @@ test("ServiceDiscovery keeps an explicit public WSS chat descriptor over interna
           }
         ]
       }
+    ],
+    "mail-service": [
+      {
+        id: "mail-a",
+        name: "mail-service",
+        host: "10.0.0.3",
+        port: 9003,
+        endpoints: [
+          {
+            name: "http",
+            protocol: "http",
+            host: "mail-service",
+            port: 9003,
+            socket: "",
+            visibility: "internal",
+            metadata: {},
+            healthy: true
+          }
+        ]
+      }
     ]
   });
   const discovery = new ServiceDiscovery(
@@ -384,6 +405,11 @@ test("ServiceDiscovery keeps an explicit public WSS chat descriptor over interna
         host: "chat.game.example",
         port: 443,
         protocol: "wss"
+      },
+      publicMailDescriptor: {
+        host: "api.game.zergzerg.cn",
+        port: 443,
+        protocol: "https"
       }
     })
   );
@@ -395,7 +421,34 @@ test("ServiceDiscovery keeps an explicit public WSS chat descriptor over interna
     port: 443,
     protocol: "wss"
   });
-  assert.equal(redis.stats.indexLookupCount, 3);
+  assert.deepEqual(services.mail, {
+    host: "api.game.zergzerg.cn",
+    port: 443,
+    protocol: "https"
+  });
+  assert.equal(redis.stats.indexLookupCount, 2);
+});
+
+test("ServiceDiscovery returns a configured public mail descriptor without registry discovery", async () => {
+  const discovery = new ServiceDiscovery(
+    createRedis({}),
+    createConfig({
+      registryDiscoveryEnabled: false,
+      publicMailDescriptor: {
+        host: "api.game.zergzerg.cn",
+        port: 443,
+        protocol: "https"
+      }
+    })
+  );
+
+  const services = await discovery.discoverClientServices();
+
+  assert.deepEqual(services.mail, {
+    host: "api.game.zergzerg.cn",
+    port: 443,
+    protocol: "https"
+  });
 });
 
 test("ServiceDiscovery uses registry key prefix for scans and heartbeats", async () => {

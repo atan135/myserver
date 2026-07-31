@@ -11,6 +11,8 @@ const CONFIG_ENV_KEYS = [
   "AUTH_EXPOSE_INTERNAL_SERVICE_ENDPOINTS",
   "AUTH_PUBLIC_CHAT_HOST",
   "AUTH_PUBLIC_CHAT_PORT",
+  "AUTH_PUBLIC_MAIL_HOST",
+  "AUTH_PUBLIC_MAIL_PORT",
   "AUTH_REGISTER_REQUIRE_REVIEW",
   "DISCOVERY_REQUIRED",
   "DISALLOW_LEGACY_DIRECT_CONFIG",
@@ -204,6 +206,23 @@ test("auth-http builds a stable public WSS chat descriptor from deployment confi
   });
 });
 
+test("auth-http builds a stable public HTTPS mail descriptor from deployment config", async () => {
+  await withEnv({
+    NODE_ENV: "production",
+    REGISTRY_ENABLED: "true",
+    TICKET_SECRET: "prod-ticket-secret-with-enough-entropy",
+    GAME_ADMIN_TOKEN: "prod-game-admin-token-with-enough-entropy",
+    INTERNAL_API_TOKEN: "prod-internal-api-token-with-enough-entropy",
+    AUTH_PUBLIC_MAIL_HOST: "api.game.zergzerg.cn"
+  }, (config) => {
+    assert.deepEqual(config.publicMailDescriptor, {
+      host: "api.game.zergzerg.cn",
+      port: 443,
+      protocol: "https"
+    });
+  });
+});
+
 test("auth-http leaves the public chat descriptor unset when deployment config is absent", async () => {
   await withEnv({ NODE_ENV: "development" }, (config) => {
     assert.equal(config.publicChatDescriptor, null);
@@ -219,6 +238,18 @@ test("auth-http leaves the public chat descriptor unset in production when deplo
     INTERNAL_API_TOKEN: "prod-internal-api-token-with-enough-entropy"
   }, (config) => {
     assert.equal(config.publicChatDescriptor, null);
+  });
+});
+
+test("auth-http leaves the public mail descriptor unset in production when deployment config is absent", async () => {
+  await withEnv({
+    NODE_ENV: "production",
+    REGISTRY_ENABLED: "true",
+    TICKET_SECRET: "prod-ticket-secret-with-enough-entropy",
+    GAME_ADMIN_TOKEN: "prod-game-admin-token-with-enough-entropy",
+    INTERNAL_API_TOKEN: "prod-internal-api-token-with-enough-entropy"
+  }, (config) => {
+    assert.equal(config.publicMailDescriptor, null);
   });
 });
 
@@ -238,6 +269,14 @@ test("auth-http rejects malformed public chat deployment config", async () => {
   await assert.rejects(
     () => withEnv({ AUTH_PUBLIC_CHAT_HOST: "chat.game.example", AUTH_PUBLIC_CHAT_PORT: "443oops" }, () => {}),
     /AUTH_PUBLIC_CHAT_PORT must be an integer/
+  );
+  await assert.rejects(
+    () => withEnv({ AUTH_PUBLIC_MAIL_HOST: "https://api.game.example" }, () => {}),
+    /AUTH_PUBLIC_MAIL_HOST must be a hostname/
+  );
+  await assert.rejects(
+    () => withEnv({ AUTH_PUBLIC_MAIL_HOST: "api.game.example", AUTH_PUBLIC_MAIL_PORT: "443oops" }, () => {}),
+    /AUTH_PUBLIC_MAIL_PORT must be an integer/
   );
 });
 

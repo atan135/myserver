@@ -18,7 +18,11 @@ const CLIENT_SERVICES = {
     port: 443,
     protocol: "wss"
   },
-  mail: null,
+  mail: {
+    host: "api.game.zergzerg.cn",
+    port: 443,
+    protocol: "https"
+  },
   announce: null
 };
 
@@ -56,7 +60,7 @@ function publicServiceAuth() {
   };
 }
 
-test("login response returns the configured public WSS chat descriptor", async () => {
+test("login response returns configured public chat and mail descriptors", async () => {
   const authService = new AuthService(
     { localDiscoveryFallbackEnabled: false },
     {},
@@ -73,9 +77,10 @@ test("login response returns the configured public WSS chat descriptor", async (
 
   assert.deepEqual(result.services, CLIENT_SERVICES);
   assert.deepEqual(result.services.chat, CLIENT_SERVICES.chat);
+  assert.deepEqual(result.services.mail, CLIENT_SERVICES.mail);
 });
 
-test("character selection response keeps the public WSS chat descriptor", async () => {
+test("character selection response keeps configured public chat and mail descriptors", async () => {
   const authStore = {
     async getSessionByAccessToken() {
       return { playerId: CHARACTER.accountPlayerId };
@@ -103,9 +108,10 @@ test("character selection response keeps the public WSS chat descriptor", async 
 
   assert.deepEqual(result.services, CLIENT_SERVICES);
   assert.deepEqual(result.services.chat, CLIENT_SERVICES.chat);
+  assert.deepEqual(result.services.mail, CLIENT_SERVICES.mail);
 });
 
-test("game-ticket issue response keeps the public WSS chat descriptor", async () => {
+test("game-ticket issue response keeps configured public chat and mail descriptors", async () => {
   const authStore = {
     async getSessionByAccessToken() {
       return { playerId: CHARACTER.accountPlayerId };
@@ -131,4 +137,5 @@ test("game-ticket issue response keeps the public WSS chat descriptor", async ()
 
   assert.deepEqual(result.services, CLIENT_SERVICES);
   assert.deepEqual(result.services.chat, CLIENT_SERVICES.chat);
+  assert.deepEqual(result.services.mail, CLIENT_SERVICES.mail);
 });

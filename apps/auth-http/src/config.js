@@ -74,23 +74,45 @@ function normalizeAdvertisedHost(host) {
     : host;
 }
 
-function parsePublicChatDescriptor() {
-  const configuredHost = process.env.AUTH_PUBLIC_CHAT_HOST;
+function parsePublicServiceDescriptor({ hostEnvName, portEnvName, protocol, serviceName }) {
+  const configuredHost = process.env[hostEnvName];
   if (configuredHost === undefined || configuredHost.trim() === "") {
     return null;
   }
 
   if (configuredHost !== configuredHost.trim() || /[\s/:?#@\[\]\\]/.test(configuredHost)) {
-    throw new Error("Invalid auth-http public chat config: AUTH_PUBLIC_CHAT_HOST must be a hostname without a scheme, port, path, query, or fragment");
+    throw new Error(
+      `Invalid auth-http public ${serviceName} config: ${hostEnvName} must be a hostname without a scheme, port, path, query, or fragment`
+    );
   }
 
-  const portValue = process.env.AUTH_PUBLIC_CHAT_PORT || "443";
+  const portValue = process.env[portEnvName] || "443";
   const port = Number.parseInt(portValue, 10);
   if (!/^\d+$/.test(portValue) || !Number.isSafeInteger(port) || port < 1 || port > 65535) {
-    throw new Error("Invalid auth-http public chat config: AUTH_PUBLIC_CHAT_PORT must be an integer between 1 and 65535");
+    throw new Error(
+      `Invalid auth-http public ${serviceName} config: ${portEnvName} must be an integer between 1 and 65535`
+    );
   }
 
-  return { host: configuredHost, port, protocol: "wss" };
+  return { host: configuredHost, port, protocol };
+}
+
+function parsePublicChatDescriptor() {
+  return parsePublicServiceDescriptor({
+    hostEnvName: "AUTH_PUBLIC_CHAT_HOST",
+    portEnvName: "AUTH_PUBLIC_CHAT_PORT",
+    protocol: "wss",
+    serviceName: "chat"
+  });
+}
+
+function parsePublicMailDescriptor() {
+  return parsePublicServiceDescriptor({
+    hostEnvName: "AUTH_PUBLIC_MAIL_HOST",
+    portEnvName: "AUTH_PUBLIC_MAIL_PORT",
+    protocol: "https",
+    serviceName: "mail"
+  });
 }
 
 const DEFAULT_TICKET_SECRETS = new Set([
@@ -411,6 +433,7 @@ export function getConfig() {
       !isProductionEnv() &&
       parseBoolean(process.env.AUTH_EXPOSE_INTERNAL_SERVICE_ENDPOINTS, false),
     publicChatDescriptor: parsePublicChatDescriptor(),
+    publicMailDescriptor: parsePublicMailDescriptor(),
     authRequireTls: parseBoolean(process.env.AUTH_REQUIRE_TLS, isProductionEnv()),
     trustProxy: parseBoolean(process.env.TRUST_PROXY, false),
     trustedProxies: parseCsv(process.env.TRUSTED_PROXIES),

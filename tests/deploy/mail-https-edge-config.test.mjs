@@ -80,9 +80,11 @@ test("mail Caddy access logs remove request URI and credentials, and production 
     read("deploy/docker/compose.production.yml")
   ]);
   const site = authSite(caddyfile);
+  const authHttp = compose.match(/\r?\n  auth-http:\r?\n([\s\S]*?)\r?\n  admin-api:/)?.[1];
   const mailService = compose.match(/\r?\n  mail-service:\r?\n([\s\S]*?)\r?\n  announce-service:/)?.[1];
   const caddyService = compose.match(/\r?\n  caddy:\r?\n([\s\S]*?)\r?\n  migration-runner:/)?.[1];
 
+  assert.ok(authHttp, "auth-http service must exist");
   assert.ok(mailService, "mail-service service must exist");
   assert.ok(caddyService, "caddy service must exist");
   for (const header of [
@@ -97,6 +99,8 @@ test("mail Caddy access logs remove request URI and credentials, and production 
     assert.match(site, new RegExp(`request>headers>${header} delete`));
   }
   assert.match(site, /request>uri delete/);
+  assert.match(authHttp, /AUTH_PUBLIC_MAIL_HOST: \$\{CADDY_AUTH_HOST:\?set CADDY_AUTH_HOST\}/);
+  assert.match(authHttp, /AUTH_PUBLIC_MAIL_PORT: "443"/);
   assert.match(caddyService, /mail-service:\s*\n\s+condition: service_started/);
   assert.doesNotMatch(mailService, /\n\s+ports:/);
   assert.doesNotMatch(compose, /["']?9003:9003(?:\/tcp)?["']?/);

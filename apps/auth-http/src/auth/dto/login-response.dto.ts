@@ -25,7 +25,7 @@ export class LoginServicesDto {
   @ApiProperty({
     type: ClientServiceDto,
     nullable: true,
-    description: "Internal capability service endpoint. Production defaults to null unless explicitly exposed through registry discovery."
+    description: "Configured public HTTPS mail endpoint when deployed; clients append /api/v1/mails. Otherwise null unless non-production internal discovery is explicitly enabled."
   })
   mail: ClientServiceDto | null;
 
