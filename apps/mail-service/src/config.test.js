@@ -26,6 +26,17 @@ const CONFIG_ENV_NAMES = [
   "REGISTRY_KEY_PREFIX",
   "REDIS_KEY_PREFIX",
   "MAIL_PLAYER_AUTH_REQUIRED",
+  "MAIL_TRUST_PROXY",
+  "MAIL_TRUSTED_PROXY_CIDRS",
+  "MAIL_PUBLIC_RATE_LIMIT_ENABLED",
+  "MAIL_PUBLIC_RATE_LIMIT_WINDOW_MS",
+  "MAIL_READ_RATE_LIMIT_PER_PLAYER",
+  "MAIL_READ_RATE_LIMIT_PER_IP",
+  "MAIL_LIST_SCAN_RATE_LIMIT_PER_PLAYER",
+  "MAIL_CLAIM_RATE_LIMIT_PER_PLAYER",
+  "MAIL_CLAIM_RATE_LIMIT_PER_IP",
+  "MAIL_CLAIM_CONCURRENT_PER_PLAYER",
+  "MAIL_CLAIM_CONCURRENCY_LEASE_MS",
   "MAIL_SERVICE_TOKEN",
   "MAIL_OPERATIONS_TOKEN",
   "MAIL_HIGH_RISK_TOKEN",
@@ -511,7 +522,9 @@ test("mail-service production environment ignores DISCOVERY_REQUIRED=false overr
       MAIL_SERVICE_TOKEN: "prod-mail-service-token-with-enough-entropy",
       MAIL_OPERATIONS_TOKEN: "prod-mail-operations-token-with-enough-entropy",
       MAIL_HIGH_RISK_TOKEN: "prod-mail-high-risk-token-with-enough-entropy",
-      MAIL_GRANT_ASSERTION_PRIVATE_KEY: TEST_MAIL_GRANT_PRIVATE_KEY
+      MAIL_GRANT_ASSERTION_PRIVATE_KEY: TEST_MAIL_GRANT_PRIVATE_KEY,
+      MAIL_TRUST_PROXY: "true",
+      MAIL_TRUSTED_PROXY_CIDRS: "172.30.0.0/24"
     }, (getConfig) => getConfig()),
     /DISCOVERY_REQUIRED=true requires REGISTRY_ENABLED=true/
   );
@@ -546,7 +559,9 @@ test("mail-service production requires distinct operations and high-risk credent
     MAIL_SERVICE_TOKEN: "prod-mail-service-token-with-enough-entropy",
     MAIL_OPERATIONS_TOKEN: "prod-mail-operations-token-with-enough-entropy",
     MAIL_HIGH_RISK_TOKEN: "prod-mail-high-risk-token-with-enough-entropy",
-    MAIL_GRANT_ASSERTION_PRIVATE_KEY: TEST_MAIL_GRANT_PRIVATE_KEY
+    MAIL_GRANT_ASSERTION_PRIVATE_KEY: TEST_MAIL_GRANT_PRIVATE_KEY,
+    MAIL_TRUST_PROXY: "true",
+    MAIL_TRUSTED_PROXY_CIDRS: "172.30.0.0/24"
   };
   await withEnv(base, (getConfig) => assert.equal(getConfig().mailOperationsToken, base.MAIL_OPERATIONS_TOKEN));
   await assert.rejects(
@@ -563,6 +578,38 @@ test("mail-service production requires distinct operations and high-risk credent
   );
 });
 
+test("mail-service production requires player authentication, trusted Caddy CIDRs, and public rate limiting", async () => {
+  const base = {
+    NODE_ENV: "production",
+    REGISTRY_ENABLED: "true",
+    TICKET_SECRET: "prod-ticket-secret-with-enough-entropy",
+    MAIL_SERVICE_TOKEN: "prod-mail-service-token-with-enough-entropy",
+    MAIL_OPERATIONS_TOKEN: "prod-mail-operations-token-with-enough-entropy",
+    MAIL_HIGH_RISK_TOKEN: "prod-mail-high-risk-token-with-enough-entropy",
+    MAIL_GRANT_ASSERTION_PRIVATE_KEY: TEST_MAIL_GRANT_PRIVATE_KEY,
+    MAIL_TRUST_PROXY: "true",
+    MAIL_TRUSTED_PROXY_CIDRS: "172.30.0.0/24",
+    MAIL_PUBLIC_RATE_LIMIT_ENABLED: "true"
+  };
+
+  await assert.rejects(
+    () => withEnv({ ...base, MAIL_PLAYER_AUTH_REQUIRED: "false" }, (getConfig) => getConfig()),
+    /MAIL_PLAYER_AUTH_REQUIRED must be true in production/
+  );
+  await assert.rejects(
+    () => withEnv({ ...base, MAIL_TRUST_PROXY: "false" }, (getConfig) => getConfig()),
+    /MAIL_TRUST_PROXY=true with MAIL_TRUSTED_PROXY_CIDRS is required in production/
+  );
+  await assert.rejects(
+    () => withEnv({ ...base, MAIL_PUBLIC_RATE_LIMIT_ENABLED: "false" }, (getConfig) => getConfig()),
+    /MAIL_PUBLIC_RATE_LIMIT_ENABLED must be true in production/
+  );
+  await assert.rejects(
+    () => withEnv({ ...base, MAIL_TRUSTED_PROXY_CIDRS: "invalid" }, (getConfig) => getConfig()),
+    /MAIL_TRUSTED_PROXY_CIDRS must contain valid IPv4 addresses or CIDRs/
+  );
+});
+
 test("mail-service accepts a one-line base64 PKCS8 assertion key", async () => {
   const encoded = Buffer.from(TEST_MAIL_GRANT_PRIVATE_KEY).toString("base64");
   await withEnv({
@@ -572,7 +619,9 @@ test("mail-service accepts a one-line base64 PKCS8 assertion key", async () => {
     MAIL_SERVICE_TOKEN: "prod-mail-service-token-with-enough-entropy",
     MAIL_OPERATIONS_TOKEN: "prod-mail-operations-token-with-enough-entropy",
     MAIL_HIGH_RISK_TOKEN: "prod-mail-high-risk-token-with-enough-entropy",
-    MAIL_GRANT_ASSERTION_PRIVATE_KEY_BASE64: encoded
+    MAIL_GRANT_ASSERTION_PRIVATE_KEY_BASE64: encoded,
+    MAIL_TRUST_PROXY: "true",
+    MAIL_TRUSTED_PROXY_CIDRS: "172.30.0.0/24"
   }, (getConfig) => {
     assert.equal(getConfig().mailGrantAssertionPrivateKey.trim(), TEST_MAIL_GRANT_PRIVATE_KEY.trim());
   });

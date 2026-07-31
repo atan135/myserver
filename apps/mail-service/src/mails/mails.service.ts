@@ -1,7 +1,7 @@
 import { Inject, Injectable, OnModuleDestroy, OnModuleInit } from "@nestjs/common";
 import { createHash, randomBytes } from "node:crypto";
 
-import { badRequest, conflict, forbidden, gone, notFound, serviceUnavailable } from "../common/http-exception.js";
+import { badRequest, conflict, gone, notFound, serviceUnavailable } from "../common/http-exception.js";
 import { computeGrantRequestFingerprint, normalizeGrantItems } from "../game-admin-client.js";
 import { generateMailId } from "../global-id.js";
 import { log } from "../logger.js";
@@ -52,6 +52,67 @@ function hasAttachments(attachments: any) {
   return true;
 }
 
+function publicTimestamp(value: any) {
+  if (!value) return null;
+  const timestamp = value instanceof Date ? value : new Date(value);
+  return Number.isNaN(timestamp.getTime()) ? null : timestamp.toISOString();
+}
+
+function publicAttachments(attachments: any) {
+  if (!Array.isArray(attachments)) return [];
+  return attachments
+    .filter((attachment) => attachment && typeof attachment === "object")
+    .map((attachment) => ({
+      type: typeof attachment.type === "string" ? attachment.type : "item",
+      id: attachment.id ?? attachment.item_id ?? null,
+      count: Number.isInteger(attachment.count) ? attachment.count : Number.parseInt(String(attachment.count), 10) || 0,
+      binded: attachment.binded === true
+    }));
+}
+
+function publicMailSummary(mail: any) {
+  return {
+    mail_id: mail.mail_id,
+    sender: {
+      type: mail.sender_type,
+      id: mail.sender_id,
+      name: mail.sender_name
+    },
+    title: mail.title,
+    mail_type: mail.mail_type,
+    status: mail.status,
+    has_attachments: hasAttachments(mail.attachments),
+    created_at: publicTimestamp(mail.created_at),
+    read_at: publicTimestamp(mail.read_at),
+    claimed_at: publicTimestamp(mail.claimed_at),
+    expires_at: publicTimestamp(mail.expires_at)
+  };
+}
+
+function publicClaimSummary(workflow: any, mail: any) {
+  const claimStatus = workflow?.status || (mail?.status === "claimed" ? "claimed" : "");
+  const error = publicClaimError(claimStatus, workflow?.last_error_code, workflow?.last_error_category);
+  return {
+    claim_status: claimStatus || null,
+    already_claimed: claimStatus === "claimed",
+    processing: claimStatus === "processing",
+    retryable: workflow?.last_error_retryable === true || claimStatus === "retryable_failure",
+    player_retryable: claimStatus === "blocked_capacity",
+    attempts: Number(workflow?.attempts) || 0,
+    result_state: workflow?.last_result_state || (claimStatus === "claimed" ? "applied" : null),
+    error: error || null
+  };
+}
+
+function publicMailDetail(mail: any, workflow: any) {
+  return {
+    ...publicMailSummary(mail),
+    content: typeof mail.content === "string" ? mail.content : "",
+    attachments: publicAttachments(mail.attachments),
+    claim: publicClaimSummary(workflow, mail)
+  };
+}
+
 function isExpired(expiresAt: any) {
   if (!expiresAt) {
     return false;
@@ -72,25 +133,6 @@ function assertAuthenticatedCharacter(characterId: any) {
     throw badRequest("MISSING_CHARACTER_ID", "character_id is required");
   }
   return characterId.trim();
-}
-
-function assertPlayerIdMatches(authenticatedPlayerId: string, requestedPlayerId: any) {
-  if (
-    requestedPlayerId !== undefined &&
-    requestedPlayerId !== null &&
-    requestedPlayerId !== "" &&
-    requestedPlayerId !== authenticatedPlayerId
-  ) {
-    throw forbidden("PLAYER_ID_MISMATCH", "player_id does not match authenticated player");
-  }
-}
-
-function normalizeTargetInstanceId(value: any) {
-  if (value === undefined || value === null || value === "") {
-    return "";
-  }
-
-  return String(value).trim();
 }
 
 function normalizeMailAttachmentItems(attachments: any) {
@@ -306,7 +348,7 @@ function publicClaimMessage(claimStatus: string, publicErrorCode: any) {
 function claimResponse(workflow: any, mail: any, options: any = {}) {
   const claimStatus = options.claimStatus || workflow?.status || (mail?.status === "claimed" ? "claimed" : "processing");
   const isClaimed = claimStatus === "claimed";
-  const attachments = workflow?.attachments_snapshot ?? mail?.attachments ?? null;
+  const attachments = publicAttachments(workflow?.attachments_snapshot ?? mail?.attachments);
   const errorCategory = options.errorCategory || workflow?.last_error_category || undefined;
   const internalErrorCode = options.errorCode || workflow?.last_error_code || undefined;
   const publicErrorCode = publicClaimError(claimStatus, internalErrorCode, errorCategory);
@@ -321,11 +363,8 @@ function claimResponse(workflow: any, mail: any, options: any = {}) {
     retryable: options.retryable ?? workflow?.last_error_retryable ?? false,
     player_retryable: options.playerRetryable ?? claimStatus === "blocked_capacity",
     request_id: workflow?.claim_request_id,
-    character_id: workflow?.character_id,
-    attachments_fingerprint: workflow?.attachments_fingerprint,
     attempts: workflow?.attempts || 0,
     error: publicErrorCode,
-    error_category: errorCategory,
     result_state: options.resultState || workflow?.last_result_state || (isClaimed ? "applied" : undefined),
     message: publicClaimMessage(claimStatus, publicErrorCode),
     status: isClaimed ? "claimed" : (mail?.status || "claiming"),
@@ -509,22 +548,28 @@ export class MailsService implements OnModuleInit, OnModuleDestroy {
 
   async list(authenticatedPlayerId: string, query: any = {}) {
     try {
-      const { player_id, status, limit, offset } = query;
+      const { status, limit = 50, offset = 0 } = query;
       assertAuthenticatedPlayer(authenticatedPlayerId);
-      assertPlayerIdMatches(authenticatedPlayerId, player_id);
 
       const mails = await this.mailStore.getMailsByPlayerId(authenticatedPlayerId, {
         status,
-        limit: limit ? parseInt(limit, 10) : 50,
-        offset: offset ? parseInt(offset, 10) : 0
+        limit,
+        offset
       });
 
       const unreadCount = await this.mailStore.countUnread(authenticatedPlayerId);
 
       return {
         ok: true,
-        mails,
-        unread_count: unreadCount
+        mails: mails.map((mail: any) => publicMailSummary(mail)),
+        unread_count: unreadCount,
+        pagination: {
+          limit,
+          offset,
+          next_offset: mails.length === limit && offset + mails.length <= 10_000
+            ? offset + mails.length
+            : null
+        }
       };
     } catch (error: any) {
       if (error?.getStatus?.()) {
@@ -538,7 +583,6 @@ export class MailsService implements OnModuleInit, OnModuleDestroy {
   async get(mailId: string, authenticatedPlayerId?: string, query: any = {}) {
     try {
       assertAuthenticatedPlayer(authenticatedPlayerId);
-      assertPlayerIdMatches(authenticatedPlayerId as string, query?.player_id);
 
       const mail = await this.mailStore.getMailById(mailId);
 
@@ -547,12 +591,14 @@ export class MailsService implements OnModuleInit, OnModuleDestroy {
       }
 
       if (mail.to_player_id !== authenticatedPlayerId) {
-        throw forbidden("FORBIDDEN", "You can only read your own mail");
+        throw notFound("MAIL_NOT_FOUND", "Mail not found");
       }
+
+      const workflow = await this.mailStore.getMailClaimWorkflow(mailId);
 
       return {
         ok: true,
-        mail
+        mail: publicMailDetail(mail, workflow)
       };
     } catch (error: any) {
       if (error?.getStatus?.()) {
@@ -684,9 +730,7 @@ export class MailsService implements OnModuleInit, OnModuleDestroy {
 
   async markRead(mailId: string, authenticatedPlayerId: string, body: any = {}) {
     try {
-      const { player_id } = body || {};
       assertAuthenticatedPlayer(authenticatedPlayerId);
-      assertPlayerIdMatches(authenticatedPlayerId, player_id);
 
       const mail = await this.mailStore.getMailById(mailId);
       if (!mail) {
@@ -694,14 +738,18 @@ export class MailsService implements OnModuleInit, OnModuleDestroy {
       }
 
       if (mail.to_player_id !== authenticatedPlayerId) {
-        throw forbidden("FORBIDDEN", "You can only read your own mail");
+        throw notFound("MAIL_NOT_FOUND", "Mail not found");
       }
 
       const updated = await this.mailStore.markAsRead(mailId);
+      const currentMail = updated ? await this.mailStore.getMailById(mailId) : mail;
 
       return {
         ok: true,
-        updated
+        mail_id: mailId,
+        status: "read",
+        read_at: publicTimestamp(currentMail?.read_at),
+        already_read: !updated
       };
     } catch (error: any) {
       if (error?.getStatus?.()) {
@@ -714,20 +762,8 @@ export class MailsService implements OnModuleInit, OnModuleDestroy {
 
   async claim(mailId: string, authenticatedPlayerId: string, authenticatedCharacterId: string, body: any = {}) {
     try {
-      const { player_id } = body || {};
-      const targetInstanceId = normalizeTargetInstanceId(body?.targetInstanceId ?? body?.target_instance_id);
       assertAuthenticatedPlayer(authenticatedPlayerId);
       const characterId = assertAuthenticatedCharacter(authenticatedCharacterId);
-      assertPlayerIdMatches(authenticatedPlayerId, player_id);
-      if (
-        targetInstanceId &&
-        (!this.config.localDiscoveryFallbackEnabled || this.config.registryDiscoveryRequired)
-      ) {
-        throw forbidden(
-          "CLIENT_TARGET_INSTANCE_FORBIDDEN",
-          "targetInstanceId is only available for local development diagnostics"
-        );
-      }
 
       let mail = null;
       let existingWorkflow = await this.mailStore.getMailClaimWorkflow(mailId);
@@ -742,7 +778,7 @@ export class MailsService implements OnModuleInit, OnModuleDestroy {
             throw notFound("MAIL_NOT_FOUND", "Mail not found");
           }
           if (mail.to_player_id !== authenticatedPlayerId) {
-            throw forbidden("FORBIDDEN", "You can only claim attachments from your own mail");
+            throw notFound("MAIL_NOT_FOUND", "Mail not found");
           }
           if (mail.status === "claimed" || mail.claimed_at) {
             return claimResponse(null, mail, { claimStatus: "claimed", alreadyClaimed: true });
@@ -753,7 +789,7 @@ export class MailsService implements OnModuleInit, OnModuleDestroy {
           );
         }
         if (existingWorkflow.player_id !== authenticatedPlayerId) {
-          throw forbidden("FORBIDDEN", "You can only claim attachments from your own mail");
+          throw notFound("MAIL_NOT_FOUND", "Mail not found");
         }
         mail = await this.mailStore.getMailById(mailId);
         if (existingWorkflow.character_id !== characterId) {
@@ -782,7 +818,7 @@ export class MailsService implements OnModuleInit, OnModuleDestroy {
           throw notFound("MAIL_NOT_FOUND", "Mail not found");
         }
         if (mail.to_player_id !== authenticatedPlayerId) {
-          throw forbidden("FORBIDDEN", "You can only claim attachments from your own mail");
+          throw notFound("MAIL_NOT_FOUND", "Mail not found");
         }
         if (mail.status === "claimed" || mail.claimed_at) {
           return claimResponse(null, mail, { claimStatus: "claimed", alreadyClaimed: true });
@@ -822,7 +858,7 @@ export class MailsService implements OnModuleInit, OnModuleDestroy {
         throw notFound("MAIL_NOT_FOUND", "Mail not found");
       }
       if (claimBegin.ownerMismatch) {
-        throw forbidden("FORBIDDEN", "You can only claim attachments from your own mail");
+        throw notFound("MAIL_NOT_FOUND", "Mail not found");
       }
       if (claimBegin.expired) {
         throw gone("MAIL_EXPIRED", "Mail has expired");
@@ -879,7 +915,6 @@ export class MailsService implements OnModuleInit, OnModuleDestroy {
           existingWorkflow.attachments_snapshot,
           `claim mail ${mailId}`,
           {
-            targetInstanceId,
             traceId,
             requestFingerprint: existingWorkflow.attachments_fingerprint,
             contractVersion: existingWorkflow.grant_contract_version || 1
@@ -918,10 +953,6 @@ export class MailsService implements OnModuleInit, OnModuleDestroy {
           this.metrics?.recordMailClaimPermanentFailure?.();
         }
         log("error", isRouteFailure ? "mail.claim_route_unavailable" : "mail.claim_grant_failed", {
-          mailId,
-          instanceId: error?.instanceId || "",
-          requestId: error?.requestId || existingWorkflow.claim_request_id,
-          traceId: error?.traceId || traceId,
           errorCode: error?.code || "GAME_SERVER_GRANT_FAILED",
           claimStatus: currentWorkflow?.status,
           persisted: failureResult.updated
@@ -965,10 +996,6 @@ export class MailsService implements OnModuleInit, OnModuleDestroy {
       this.metrics?.recordMailClaimSucceeded?.();
 
       log("info", "mail.claimed", {
-        mailId,
-        playerId: authenticatedPlayerId,
-        characterId: existingWorkflow.character_id,
-        requestId: existingWorkflow.claim_request_id,
         attachmentCount: existingWorkflow.attachments_snapshot.length
       });
 

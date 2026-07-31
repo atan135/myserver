@@ -7,6 +7,7 @@ import { GameAdminClient } from "./game-admin-client.js";
 import { initializeGlobalIdLease, releaseGlobalIdLease } from "./global-id.js";
 import { HealthController } from "./health.controller.js";
 import { MailPlayerAuthService } from "./mail-auth.js";
+import { MailPlayerRateLimiter } from "./mails/mail-player-rate-limiter.js";
 import { MailsController } from "./mails/mails.controller.js";
 import { MailsService } from "./mails/mails.service.js";
 import { MailOperationsController } from "./mail-operations/mail-operations.controller.js";
@@ -26,6 +27,7 @@ import {
   MAIL_METRICS,
   MAIL_NATS,
   MAIL_PLAYER_AUTH,
+  MAIL_PLAYER_RATE_LIMITER,
   MAIL_PUBSUB_CLIENT,
   MAIL_REDIS,
   MAIL_REGISTRY,
@@ -100,6 +102,11 @@ import {
       provide: MAIL_PLAYER_AUTH,
       inject: [MAIL_CONFIG, MAIL_REDIS],
       useFactory: (config: any, redis: any) => new MailPlayerAuthService(config, redis)
+    },
+    {
+      provide: MAIL_PLAYER_RATE_LIMITER,
+      inject: [MAIL_CONFIG, MAIL_REDIS],
+      useFactory: (config: any, redis: any) => new MailPlayerRateLimiter(redis, config)
     },
     {
       provide: MAIL_METRICS,

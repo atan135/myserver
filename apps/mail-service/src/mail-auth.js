@@ -34,8 +34,7 @@ export function extractBearerToken(headers = {}) {
 }
 
 export function extractGameTicket(headers = {}) {
-  return extractBearerToken(headers) ||
-    headers["x-game-ticket"] ||
+  return headers["x-game-ticket"] ||
     headers["X-Game-Ticket"] ||
     null;
 }

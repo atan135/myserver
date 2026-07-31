@@ -59,6 +59,30 @@ function parseNumberInRange(name, value, fallback, min, max) {
   return parsed;
 }
 
+function parseTrustedProxyCidrs(value) {
+  if (value === undefined || value === "") return [];
+  const entries = String(value)
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+  if (entries.length === 0 || entries.some((entry) => !isValidTrustedProxyCidr(entry))) {
+    throw new Error("Invalid mail-service config: MAIL_TRUSTED_PROXY_CIDRS must contain valid IPv4 addresses or CIDRs");
+  }
+  return entries;
+}
+
+function isValidTrustedProxyCidr(value) {
+  const parts = String(value).split("/");
+  if (parts.length > 2 || !isValidIpv4(parts[0])) return false;
+  if (parts.length === 1) return true;
+  return /^\d+$/.test(parts[1]) && Number(parts[1]) >= 0 && Number(parts[1]) <= 32;
+}
+
+function isValidIpv4(value) {
+  const parts = String(value).split(".");
+  return parts.length === 4 && parts.every((part) => /^\d+$/.test(part) && Number(part) >= 0 && Number(part) <= 255);
+}
+
 function firstNonEmptyEnv(names) {
   for (const name of names) {
     const value = process.env[name];
@@ -175,6 +199,12 @@ function validateProductionConfig(config) {
 
   if (!config.mailPlayerAuthRequired) {
     errors.push("MAIL_PLAYER_AUTH_REQUIRED must be true in production");
+  }
+  if (!config.mailTrustProxy || config.mailTrustedProxyCidrs.length === 0) {
+    errors.push("MAIL_TRUST_PROXY=true with MAIL_TRUSTED_PROXY_CIDRS is required in production");
+  }
+  if (!config.mailPublicRateLimitEnabled) {
+    errors.push("MAIL_PUBLIC_RATE_LIMIT_ENABLED must be true in production");
   }
 
   if (!ticketSecret || DEFAULT_TICKET_SECRETS.has(ticketSecret) || isWeakSecret(ticketSecret)) {
@@ -349,6 +379,69 @@ export function getConfig() {
     gameAdminMaxResponseBytes: parsePositiveIntegerWithFallback(process.env.GAME_ADMIN_MAX_RESPONSE_BYTES, 1048576),
     ticketSecret: process.env.TICKET_SECRET || "dev-only-change-this-ticket-secret",
     mailPlayerAuthRequired: parseBoolean(process.env.MAIL_PLAYER_AUTH_REQUIRED, true),
+    mailTrustProxy: parseStrictBoolean("MAIL_TRUST_PROXY", process.env.MAIL_TRUST_PROXY, false),
+    mailTrustedProxyCidrs: parseTrustedProxyCidrs(process.env.MAIL_TRUSTED_PROXY_CIDRS),
+    mailPublicRateLimitEnabled: parseStrictBoolean(
+      "MAIL_PUBLIC_RATE_LIMIT_ENABLED",
+      process.env.MAIL_PUBLIC_RATE_LIMIT_ENABLED,
+      true
+    ),
+    mailPublicRateLimitWindowMs: parseIntegerInRange(
+      "MAIL_PUBLIC_RATE_LIMIT_WINDOW_MS",
+      process.env.MAIL_PUBLIC_RATE_LIMIT_WINDOW_MS,
+      60_000,
+      1_000,
+      3_600_000
+    ),
+    mailReadRateLimitPerPlayer: parseIntegerInRange(
+      "MAIL_READ_RATE_LIMIT_PER_PLAYER",
+      process.env.MAIL_READ_RATE_LIMIT_PER_PLAYER,
+      120,
+      1,
+      10_000
+    ),
+    mailReadRateLimitPerIp: parseIntegerInRange(
+      "MAIL_READ_RATE_LIMIT_PER_IP",
+      process.env.MAIL_READ_RATE_LIMIT_PER_IP,
+      240,
+      1,
+      20_000
+    ),
+    mailListScanRateLimitPerPlayer: parseIntegerInRange(
+      "MAIL_LIST_SCAN_RATE_LIMIT_PER_PLAYER",
+      process.env.MAIL_LIST_SCAN_RATE_LIMIT_PER_PLAYER,
+      30,
+      1,
+      10_000
+    ),
+    mailClaimRateLimitPerPlayer: parseIntegerInRange(
+      "MAIL_CLAIM_RATE_LIMIT_PER_PLAYER",
+      process.env.MAIL_CLAIM_RATE_LIMIT_PER_PLAYER,
+      12,
+      1,
+      10_000
+    ),
+    mailClaimRateLimitPerIp: parseIntegerInRange(
+      "MAIL_CLAIM_RATE_LIMIT_PER_IP",
+      process.env.MAIL_CLAIM_RATE_LIMIT_PER_IP,
+      30,
+      1,
+      20_000
+    ),
+    mailClaimConcurrentPerPlayer: parseIntegerInRange(
+      "MAIL_CLAIM_CONCURRENT_PER_PLAYER",
+      process.env.MAIL_CLAIM_CONCURRENT_PER_PLAYER,
+      2,
+      1,
+      100
+    ),
+    mailClaimConcurrencyLeaseMs: parseIntegerInRange(
+      "MAIL_CLAIM_CONCURRENCY_LEASE_MS",
+      process.env.MAIL_CLAIM_CONCURRENCY_LEASE_MS,
+      15_000,
+      1_000,
+      300_000
+    ),
     mailServiceToken: process.env.MAIL_SERVICE_TOKEN || "dev-only-change-this-mail-service-token",
     mailOperationsToken: process.env.MAIL_OPERATIONS_TOKEN || "dev-only-change-this-mail-operations-token",
     mailHighRiskToken: process.env.MAIL_HIGH_RISK_TOKEN || "dev-only-change-this-mail-high-risk-token",

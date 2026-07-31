@@ -61,6 +61,18 @@ export class MetricsCollector {
     this.mailClaimBlockedCapacityBacklog = 0;
     this.rewardMailCreated = 0;
     this.rewardMailIdempotentReplay = 0;
+    this.mailPublicRequests = 0;
+    this.mailPublicLatencySum = 0;
+    this.mailPublicLatencyCount = 0;
+    this.mailPublicListRequests = 0;
+    this.mailPublicDetailRequests = 0;
+    this.mailPublicReadRequests = 0;
+    this.mailPublicClaimRequests = 0;
+    this.mailPublicClientErrors = 0;
+    this.mailPublicUnavailable = 0;
+    this.mailPublicAccepted = 0;
+    this.mailPublicRateLimited = 0;
+    this.mailPublicClaimConcurrencyLimited = 0;
 
     this.flushTimer = null;
   }
@@ -136,6 +148,26 @@ export class MetricsCollector {
 
   recordMailClaimSucceeded() {
     this.mailClaimSucceeded += 1;
+  }
+
+  recordMailPublicRequest(operation, status, latencyMs = 0) {
+    this.mailPublicRequests += 1;
+    this.mailPublicLatencySum += Math.max(0, Number(latencyMs) || 0);
+    this.mailPublicLatencyCount += 1;
+    if (operation === "list") this.mailPublicListRequests += 1;
+    else if (operation === "detail") this.mailPublicDetailRequests += 1;
+    else if (operation === "read") this.mailPublicReadRequests += 1;
+    else if (operation === "claim") this.mailPublicClaimRequests += 1;
+
+    const normalizedStatus = Number(status) || 500;
+    if (normalizedStatus === 202) this.mailPublicAccepted += 1;
+    else if (normalizedStatus === 429) this.mailPublicRateLimited += 1;
+    else if (normalizedStatus >= 400 && normalizedStatus < 500) this.mailPublicClientErrors += 1;
+    else if (normalizedStatus >= 500) this.mailPublicUnavailable += 1;
+  }
+
+  recordMailPublicRateLimited(dimension) {
+    if (dimension === "claim_concurrency") this.mailPublicClaimConcurrencyLimited += 1;
   }
 
   recordRewardMailCreated() {
@@ -230,6 +262,19 @@ export class MetricsCollector {
       : 0;
     const rewardMailCreated = this.rewardMailCreated;
     const rewardMailIdempotentReplay = this.rewardMailIdempotentReplay;
+    const mailPublicRequests = this.mailPublicRequests;
+    const mailPublicLatencyMs = this.mailPublicLatencyCount > 0
+      ? Math.round(this.mailPublicLatencySum / this.mailPublicLatencyCount)
+      : 0;
+    const mailPublicListRequests = this.mailPublicListRequests;
+    const mailPublicDetailRequests = this.mailPublicDetailRequests;
+    const mailPublicReadRequests = this.mailPublicReadRequests;
+    const mailPublicClaimRequests = this.mailPublicClaimRequests;
+    const mailPublicClientErrors = this.mailPublicClientErrors;
+    const mailPublicUnavailable = this.mailPublicUnavailable;
+    const mailPublicAccepted = this.mailPublicAccepted;
+    const mailPublicRateLimited = this.mailPublicRateLimited;
+    const mailPublicClaimConcurrencyLimited = this.mailPublicClaimConcurrencyLimited;
 
     // Reset counters
     this.qps = 0;
@@ -262,6 +307,18 @@ export class MetricsCollector {
     this.mailClaimRecoveryDurationCount = 0;
     this.rewardMailCreated = 0;
     this.rewardMailIdempotentReplay = 0;
+    this.mailPublicRequests = 0;
+    this.mailPublicLatencySum = 0;
+    this.mailPublicLatencyCount = 0;
+    this.mailPublicListRequests = 0;
+    this.mailPublicDetailRequests = 0;
+    this.mailPublicReadRequests = 0;
+    this.mailPublicClaimRequests = 0;
+    this.mailPublicClientErrors = 0;
+    this.mailPublicUnavailable = 0;
+    this.mailPublicAccepted = 0;
+    this.mailPublicRateLimited = 0;
+    this.mailPublicClaimConcurrencyLimited = 0;
 
     try {
       const discoveryMetrics = collectDiscoveryMetricFields({ reset: true });
@@ -309,6 +366,17 @@ export class MetricsCollector {
             mail_claim_recovery_duration_ms: mailClaimRecoveryDurationMs,
             reward_mail_created: rewardMailCreated,
             reward_mail_idempotent_replay: rewardMailIdempotentReplay,
+            mail_public_requests: mailPublicRequests,
+            mail_public_latency_ms: mailPublicLatencyMs,
+            mail_public_list_requests: mailPublicListRequests,
+            mail_public_detail_requests: mailPublicDetailRequests,
+            mail_public_read_requests: mailPublicReadRequests,
+            mail_public_claim_requests: mailPublicClaimRequests,
+            mail_public_client_errors: mailPublicClientErrors,
+            mail_public_unavailable: mailPublicUnavailable,
+            mail_public_accepted: mailPublicAccepted,
+            mail_public_rate_limited: mailPublicRateLimited,
+            mail_public_claim_concurrency_limited: mailPublicClaimConcurrencyLimited,
             ...discoveryMetrics,
             ...capacityMetrics,
             ...lifecycleMetrics

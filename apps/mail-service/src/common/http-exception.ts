@@ -26,6 +26,10 @@ export function conflict(error: string, message?: string): ApiHttpException {
   return new ApiHttpException(409, { ok: false, error, message: message || error });
 }
 
+export function rateLimited(error: string, message?: string): ApiHttpException {
+  return new ApiHttpException(429, { ok: false, error, message: message || error });
+}
+
 export function gone(error: string, message?: string): ApiHttpException {
   return new ApiHttpException(410, { ok: false, error, message: message || error });
 }

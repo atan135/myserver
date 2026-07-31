@@ -65,7 +65,9 @@ export class RegistryClient {
       metadata: {
         service_name: this.serviceName,
         service_instance_id: this.instanceId,
-        player_auth_required: this.config.mailPlayerAuthRequired === true,
+        // Player routes are ticket-authenticated even for local compatibility
+        // configs that still carry the legacy flag.
+        player_auth_required: true,
         service_token_enabled: String(this.config.mailServiceToken || "").trim().length > 0,
         mail_notification_contract_version: 1,
         claim_new_requests_enabled: this.config.claimNewRequestsEnabled !== false,

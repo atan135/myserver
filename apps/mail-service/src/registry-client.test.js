@@ -124,7 +124,7 @@ test("RegistryClient never publishes wildcard advertised host", async () => {
   }
 });
 
-test("RegistryClient metadata marks missing service token as disabled", async () => {
+test("RegistryClient keeps player authentication metadata enabled when a legacy local flag is disabled", async () => {
   const redis = createRedisCapture();
   const client = new RegistryClient(
     redis,
@@ -138,7 +138,7 @@ test("RegistryClient metadata marks missing service token as disabled", async ()
   await client.register();
 
   const payload = JSON.parse(redis.hashes.get("service:mail-service:instances:mail-test-001:data"));
-  assert.equal(payload.metadata.player_auth_required, false);
+  assert.equal(payload.metadata.player_auth_required, true);
   assert.equal(payload.metadata.service_token_enabled, false);
   assert.equal(payload.metadata.build_version, "dev");
   assert.equal(payload.metadata.zone, "zone-mail");

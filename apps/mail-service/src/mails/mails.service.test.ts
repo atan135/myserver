@@ -69,6 +69,45 @@ test("mail database insert casts operator JSON without casting expires_at", asyn
   assert.equal(queries[0].params[20], expiresAt);
 });
 
+test("player mail reads project public DTOs and hide ownership and delivery internals", async () => {
+  const { service, mailStore } = createService({
+    mail: createMail({
+      id: 99,
+      content: "private mail content",
+      delivery_request_id: "reward_mail:99",
+      delivery_character_id: "chr_internal",
+      delivery_fingerprint: "sha256:internal",
+      origin_type: "gm",
+      origin_id: "operation-99",
+      operator_json: { token: "internal-only" },
+      attachments: [{ type: "item", id: 1001, count: 2, binded: true, internal_note: "hidden" }]
+    })
+  });
+  await reserveWorkflow(mailStore, { mailId: "mail-1" });
+
+  const list = await service.list("player-1", { limit: 50, offset: 0 });
+  const detail = await service.get("mail-1", "player-1");
+
+  assert.deepEqual(Object.keys(list.mails[0]).sort(), [
+    "claimed_at", "created_at", "expires_at", "has_attachments", "mail_id", "mail_type",
+    "read_at", "sender", "status", "title"
+  ]);
+  assert.equal(list.pagination.limit, 50);
+  assert.equal(list.pagination.offset, 0);
+  assert.equal(detail.mail.content, "private mail content");
+  assert.deepEqual(detail.mail.attachments, [{ type: "item", id: 1001, count: 2, binded: true }]);
+  for (const forbiddenField of [
+    "id", "to_player_id", "from_player_id", "created_by_id", "delivery_request_id",
+    "delivery_character_id", "delivery_fingerprint", "origin_id", "operator_json"
+  ]) {
+    assert.equal(Object.hasOwn(detail.mail, forbiddenField), false);
+  }
+  await assert.rejects(
+    () => service.get("mail-1", "player-attacker"),
+    (error: any) => error?.getStatus?.() === 404 && error?.getResponse?.()?.error === "MAIL_NOT_FOUND"
+  );
+});
+
 function createClaimMetrics() {
   const counts = { route: 0, grant: 0, unknown: 0, retryable: 0, permanent: 0 };
   return {
@@ -275,7 +314,7 @@ test("claim freezes canonical request identity and completes the workflow", asyn
     [{ itemId: 1001, count: 2, binded: true }],
     "claim mail mail-1"
   ]);
-  assert.equal(calls[0][4].targetInstanceId, "");
+  assert.equal(calls[0][4].targetInstanceId, undefined);
   assert.match(calls[0][4].traceId, /^[0-9a-f]{32}$/);
   assert.match(calls[0][4].requestFingerprint, /^sha256:[0-9a-f]{64}$/);
   assert.equal(result.claim_status, "claimed");
@@ -301,31 +340,28 @@ test("claim ignores client attachment, request id, source, and fingerprint overr
   assert.match(calls[0][4].requestFingerprint, /^sha256:[0-9a-f]{64}$/);
 });
 
-test("claim passes explicit local target and rejects it in strict discovery", async () => {
+test("claim service never forwards client target instance overrides", async () => {
   const local = createService({
     config: { localDiscoveryFallbackEnabled: true, registryDiscoveryRequired: false }
   });
   await local.service.claim("mail-1", "player-1", "chr_1", { target_instance_id: "game-server-c" });
-  assert.equal(local.calls[0][4].targetInstanceId, "game-server-c");
+  assert.equal(local.calls[0][4].targetInstanceId, undefined);
 
   const strict = createService({
     config: { localDiscoveryFallbackEnabled: false, registryDiscoveryRequired: true }
   });
-  await assert.rejects(
-    () => strict.service.claim("mail-1", "player-1", "chr_1", { targetInstanceId: "game-server-b" }),
-    (error: any) => error?.getResponse?.()?.error === "CLIENT_TARGET_INSTANCE_FORBIDDEN"
-  );
-  assert.equal(strict.calls.length, 0);
+  await strict.service.claim("mail-1", "player-1", "chr_1", { targetInstanceId: "game-server-b" });
+  assert.equal(strict.calls[0][4].targetInstanceId, undefined);
 });
 
-test("claim accepts camelCase local targetInstanceId", async () => {
+test("claim service keeps the ticket character when body tries camelCase character override", async () => {
   const { service, calls } = createService({
     config: { localDiscoveryFallbackEnabled: true, registryDiscoveryRequired: false }
   });
 
-  await service.claim("mail-1", "player-1", "chr_1", { targetInstanceId: "game-server-b" });
+  await service.claim("mail-1", "player-1", "chr_1", { characterId: "chr_attacker" });
 
-  assert.equal(calls[0][4].targetInstanceId, "game-server-b");
+  assert.equal(calls[0][0], "chr_1");
 });
 
 test("explicit not_applied route failure persists retryable state and reuses request identity", async () => {
@@ -680,8 +716,8 @@ test("claim controller applies workflow HTTP status without leaking internal met
         return { _http_status: 202, ok: true, claim_status: "reconciliation_pending" };
       }
     } as any,
-    { mailPlayerAuthRequired: false },
-    null
+    { mailPlayerAuthRequired: false, mailTrustProxy: false },
+    { async authenticateTicket() { return { playerId: "player-1", characterId: "chr_1" }; } }
   );
   const response = {
     statusCode: 0,
@@ -690,8 +726,8 @@ test("claim controller applies workflow HTTP status without leaking internal met
 
   const result = await controller.claim(
     "mail-1",
+    { "x-game-ticket": "payload.signature" },
     {},
-    { player_id: "player-1", character_id: "chr_1" },
     response
   );
 
@@ -720,8 +756,8 @@ test("claim responses never expose persisted endpoint, Redis, or token diagnosti
   const workflow = await mailStore.getMailClaimWorkflow("mail-1");
   const controller = new MailsController(
     service,
-    { mailPlayerAuthRequired: false },
-    null
+    { mailPlayerAuthRequired: false, mailTrustProxy: false },
+    { async authenticateTicket() { return { playerId: "player-1", characterId: "chr_1" }; } }
   );
   const response = {
     statusCode: 0,
@@ -729,8 +765,8 @@ test("claim responses never expose persisted endpoint, Redis, or token diagnosti
   };
   const second = await controller.claim(
     "mail-1",
+    { "x-game-ticket": "payload.signature" },
     {},
-    { player_id: "player-1", character_id: "chr_1" },
     response
   );
 
