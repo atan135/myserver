@@ -149,6 +149,7 @@ services:
       CHAT_WS_TRUSTED_PROXY_CIDRS: ${CHAT_WS_TRUSTED_PROXY_CIDRS:-172.30.0.0/24}
       CHAT_WS_MAX_FRAME_LEN: "4110"
       CHAT_WS_BRIDGE_CAPACITY: "8192"
+      HEARTBEAT_TIMEOUT_SECS: "30"
       MAX_BODY_LEN: "4096"
       SERVICE_BIND_HOST: 0.0.0.0
       SERVICE_PUBLIC_HOST: chat-server
@@ -364,6 +365,7 @@ services:
     environment:
       CADDY_AUTH_HOST: ${CADDY_AUTH_HOST:?set CADDY_AUTH_HOST}
       CADDY_ADMIN_HOST: ${CADDY_ADMIN_HOST:?set CADDY_ADMIN_HOST}
+      CADDY_CHAT_HOST: ${CADDY_CHAT_HOST:?set CADDY_CHAT_HOST}
       CADDY_EMAIL: ${CADDY_EMAIL:?set CADDY_EMAIL}
     networks:
       - edge
@@ -379,6 +381,8 @@ services:
         condition: service_healthy
       admin-api:
         condition: service_healthy
+      chat-server:
+        condition: service_started
     stop_grace_period: 30s
     mem_limit: 64m
 

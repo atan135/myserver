@@ -1,5 +1,12 @@
 {
     email {$CADDY_EMAIL}
+    servers {
+        timeouts {
+            read_header 5s
+            idle 2m
+        }
+        max_header_size 16KB
+    }
 }
 
 {$CADDY_AUTH_HOST} {
@@ -33,5 +40,57 @@
         root * /srv/admin-web
         try_files {path} /index.html
         file_server
+    }
+}
+
+{$CADDY_CHAT_HOST} {
+    header {
+        -Server
+        X-Content-Type-Options nosniff
+        Referrer-Policy no-referrer
+    }
+
+    # The URI is removed as a whole so query credentials can never reach the
+    # access log, even if a client violates the no-query-token contract.
+    log {
+        output stdout
+        format filter {
+            wrap json
+            fields {
+                request>uri delete
+                request>headers>Authorization delete
+                request>headers>Cookie delete
+                request>headers>Sec-Websocket-Protocol delete
+            }
+        }
+    }
+
+    log_append request_id {http.request.uuid}
+
+    @chat_websocket {
+        method GET
+        path /
+        header Connection *Upgrade*
+        header Upgrade websocket
+    }
+
+    handle @chat_websocket {
+        log_append route chat_websocket
+        reverse_proxy chat-server:9011 {
+            # Caddy replaces X-Forwarded-* using the direct peer by default.
+            # Always replace caller-provided request IDs at the public edge.
+            header_up X-Request-ID {http.request.uuid}
+            header_up X-Real-IP {http.request.remote.host}
+            transport http {
+                dial_timeout 3s
+                response_header_timeout 5s
+            }
+        }
+    }
+
+    handle {
+        log_append route rejected_non_websocket
+        header Upgrade websocket
+        respond 426
     }
 }

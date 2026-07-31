@@ -20,13 +20,13 @@
 
 ## 2. 生产公网暴露边界
 
-当前已实现的生产玩家主链路只暴露 `auth-http` 和 `game-proxy`；公网聊天目标态会在同一公网边缘增加一个专用 Caddy WSS 域名入口。这里的“增加入口”只表示复用 Caddy `443/TCP` 的域名路由，不表示公开 `chat-server` 原始端口：
+当前生产玩家主链路暴露 `auth-http` 和 `game-proxy`；仓库生产配置已为公网聊天准备同一公网边缘上的专用 Caddy WSS 域名入口，但 DNS、证书和真实 WSS 链路仍须在部署环境验收。这里的“增加入口”只表示复用 Caddy `443/TCP` 的域名路由，不表示公开 `chat-server` 原始端口：
 
 | 入口 | 协议 | 生产职责 |
 |------|------|----------|
 | `auth-http` | HTTP/HTTPS | 登录、session、access token、game ticket、入口服务地址下发 |
 | `game-proxy` | KCP/TCP fallback 或后续网关协议 | 客户端游戏长连接入口、ticket 接入鉴权、路由到内部 `game-server` |
-| `chat.game.zergzerg.cn`（目标态） | WSS over `443/TCP` | Caddy 终止 TLS 并把 WebSocket 转发到 internal `chat-server:9011`；不解析聊天包或 Protobuf |
+| `chat.game.zergzerg.cn` | WSS over `443/TCP` | Caddy 终止 TLS 并把 WebSocket 转发到 internal `chat-server:9011`；不解析聊天包或 Protobuf |
 
 其它服务默认内网化：
 
@@ -36,13 +36,23 @@
 | `game-server admin` | 内网控制面；只允许 `auth-http`、`admin-api` 或控制面访问 |
 | `game-proxy admin` | 内网控制面；已有 token 鉴权、生产默认 token 拒绝和写操作日志审计，生产仍需网络隔离、RBAC 和持久审计 |
 | `admin-api` / `admin-web` | 运营控制面，需独立鉴权、网络隔离和权限收口；不属于玩家公网主入口 |
-| `chat-server` | `9001/TCP` 与规划 `9011/WS` 均为内网原始 listener，不直接公开；正式客户端只使用 Caddy 提供的专用 WSS 边缘入口 |
+| `chat-server` | `9001/TCP` 与 `9011/WS` 均为内网原始 listener，不直接公开；正式客户端只使用 Caddy 提供的专用 WSS 边缘入口 |
 | `match-service` | 内网能力服务；生产不作为客户端直连 gRPC 默认值 |
 | `announce-service` | 内网能力服务；生产不作为客户端直连 HTTP 默认值 |
 | `mail-service` | 内网能力服务；生产不作为客户端直连 HTTP 默认值 |
 | Redis / NATS / PostgreSQL | 只允许内网服务访问 |
 
 仅本地开发或手工调试可以临时直连 `game-server:7000`、`chat-server:9001`、`match-service:9002`、`announce-service:9004`、`mail-service:9003` 来定位协议或服务问题。测试、预发和线上的正式客户端必须使用部署提供的公网入口；内部消费者才通过 registry endpoint 或 instance id 解析目标。固定内部 host/port 不进入正式客户端依赖，公网聊天也不得绕过 Caddy 直连 `9001/9011`。
+
+### 2.1 公网聊天 DNS、边缘和连接生命周期
+
+- `chat.game.zergzerg.cn` 的 `A` 记录必须指向现有 Caddy 入口服务器的公网 IPv4。只有该服务器已配置可达的公网 IPv6、云安全组和主机防火墙同时允许 `80/443 TCP`、并确认 Caddy 监听 IPv6 时才发布 `AAAA`；不得发布不可达或仅内网可达的 IPv6。初次切换可使用 `300` 秒 TTL，稳定后按运维策略提高。解析目标、IPv4/IPv6 可达性和证书签发必须在实际环境查询确认，仓库静态配置不能替代该验证。
+- `CADDY_CHAT_HOST` 独立站点只接受 `GET /` 的合法 WebSocket Upgrade。其它 HTTP 方法、普通 HTTP、错误路径或缺少 Upgrade 的请求固定返回 `426`，不得进入 `chat-server:9011`。
+- Caddy 直接从公网接入时使用直连 peer 生成 `X-Forwarded-For`，并覆盖 `X-Request-ID`、设置 `X-Real-IP` 后才转发。`chat-server` 只在 TCP peer 属于生产 internal 子网 `172.30.0.0/24` 时解析代理头，不信任公网客户端自报地址。
+- Caddy 握手入口使用 `5s` header 读取超时、`16KB` header 上限和 `2m` HTTP keep-alive 空闲超时；到上游使用 `3s` 建连、`5s` 响应头超时。升级后的聊天连接仍由 `chat-server` 的 `HEARTBEAT_TIMEOUT_SECS=30` 限制应用层空闲时间。
+- 聊天站点访问日志删除完整 URI 及 Authorization、Cookie、Sec-WebSocket-Protocol 字段，只保留边缘生成的 request ID、固定路由分类和常规状态信息。ticket 只能位于首个 `ChatAuthReq` binary message，不能放入 URL、query、cookie、subprotocol 或握手头。
+- Compose 中 Caddy 同时连接 `edge` 和 `internal`，`chat-server` 只连接 `internal`；`9001/9011` 均不映射到宿主机。云安全组和主机防火墙对公网只开放 `80/TCP`、`443/TCP`、`4000/UDP`；`22/TCP` 只允许固定运维来源，所有 TCP fallback 和 `9001/9011` 必须拒绝公网入站。
+- Caddy reload、容器替换、证书维护或上游替换不承诺保持已有 WebSocket 连接。客户端必须按带随机抖动的指数退避重连，并在 ticket 失效时重新签票；这些操作只影响 Caddy `443/TCP` 的聊天连接，不改动或重启 `game-proxy` 的 `4000/UDP` KCP 链路。
 
 ## 3. 客户端生产接入模型
 
