@@ -397,6 +397,8 @@ services:
         condition: service_healthy
       chat-server:
         condition: service_started
+      mail-service:
+        condition: service_started
     stop_grace_period: 30s
     mem_limit: 64m
 
