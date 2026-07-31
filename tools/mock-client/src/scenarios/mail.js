@@ -275,7 +275,7 @@ export async function runMailClaim(options) {
 export async function runMailSendAndNotify(options) {
   const login = await fetchMailLogin(options, "mail-notify");
   const mailUrl = buildMailUrl(options.mailBaseUrl, "/api/v1/mails");
-  const chatClient = await connectToChatServer(options);
+  const chatClient = await connectToChatServer(options, login);
 
   try {
     await authenticateChatClient(chatClient, options, login, 1);

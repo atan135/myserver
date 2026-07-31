@@ -9,8 +9,9 @@ import {
   encodeGroupListReq,
   encodeChatHistoryReq
 } from "../messages.js";
-import { fetchTicket } from "../auth.js";
+import { chatWebSocketUrlFromDescriptor, fetchTicket } from "../auth.js";
 import { TcpProtocolClient } from "../client.js";
+import { WebSocketProtocolClient } from "../websocket-client.js";
 import { authenticateClient, printResponse } from "./room.js";
 
 export async function authenticateChatClient(client, options, login, seq = 1) {
@@ -29,7 +30,45 @@ export async function authenticateChatClient(client, options, login, seq = 1) {
 /**
  * Connect to chat server
  */
-export async function connectToChatServer(options) {
+export function resolveChatWebSocketUrl(options, login) {
+  const explicitUrl = options.chatWsUrl?.trim();
+  const discoveredUrl = login?.services?.chat
+    ? chatWebSocketUrlFromDescriptor(login.services.chat)
+    : options.discoveredChatWsUrl;
+  const url = explicitUrl || discoveredUrl;
+  if (!url) {
+    throw new Error("chat WebSocket scenarios require --chat-ws-url or auth services.chat with protocol ws/wss");
+  }
+
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch {
+    throw new Error("chat WebSocket URL must be a valid ws:// or wss:// root URL");
+  }
+  if (!["ws:", "wss:"].includes(parsed.protocol) || parsed.username || parsed.password || parsed.search || parsed.hash || parsed.pathname !== "/") {
+    throw new Error("chat WebSocket URL must be a credential-free ws:// or wss:// root URL");
+  }
+  return parsed.toString();
+}
+
+export async function connectToChatServer(options, login = null) {
+  const transport = String(options.chatTransport || "tcp").toLowerCase();
+  if (transport === "ws" || transport === "wss") {
+    const url = resolveChatWebSocketUrl(options, login);
+    if (new URL(url).protocol !== `${transport}:`) {
+      throw new Error(`--chat-transport ${transport} requires a ${transport}:// URL`);
+    }
+    const client = new WebSocketProtocolClient({
+      ...options,
+      url
+    }, "chat");
+    await client.connect();
+    return client;
+  }
+  if (transport !== "tcp") {
+    throw new Error("--chat-transport must be tcp, ws, or wss");
+  }
   if (!Number.isInteger(options.chatPort) || options.chatPort <= 0) {
     throw new Error("chat scenarios are internal integration flows; pass --chat-port or enable non-production auth internal endpoint exposure");
   }
@@ -51,7 +90,7 @@ export async function runChatPrivate(options) {
   const login = await fetchTicket(options);
   console.log("login:", JSON.stringify({ playerId: login.playerId }, null, 2));
 
-  const client = await connectToChatServer(options);
+  const client = await connectToChatServer(options, login);
   await authenticateChatClient(client, options, login, 1);
 
   if (!options.targetId) {
@@ -75,7 +114,7 @@ export async function runChatGroup(options) {
   const login = await fetchTicket(options);
   console.log("login:", JSON.stringify({ playerId: login.playerId }, null, 2));
 
-  const client = await connectToChatServer(options);
+  const client = await connectToChatServer(options, login);
   await authenticateChatClient(client, options, login, 1);
 
   if (!options.groupId) {
@@ -99,7 +138,7 @@ export async function runGroupCreate(options) {
   const login = await fetchTicket(options);
   console.log("login:", JSON.stringify({ playerId: login.playerId }, null, 2));
 
-  const client = await connectToChatServer(options);
+  const client = await connectToChatServer(options, login);
   await authenticateChatClient(client, options, login, 1);
 
   const groupName = options.groupName || "Test Group";
@@ -121,7 +160,7 @@ export async function runGroupJoin(options, groupId) {
   const login = await fetchTicket(options, { guestId: "joiner-" + options.roomId });
   console.log("login:", JSON.stringify({ playerId: login.playerId }, null, 2));
 
-  const client = await connectToChatServer(options);
+  const client = await connectToChatServer(options, login);
   await authenticateChatClient(client, options, login, 1);
 
   await client.send(MESSAGE_TYPE.GROUP_JOIN_REQ, 2, encodeGroupJoinReq(groupId));
@@ -141,7 +180,7 @@ export async function runGroupLeave(options, groupId) {
   const login = await fetchTicket(options);
   console.log("login:", JSON.stringify({ playerId: login.playerId }, null, 2));
 
-  const client = await connectToChatServer(options);
+  const client = await connectToChatServer(options, login);
   await authenticateChatClient(client, options, login, 1);
 
   await client.send(MESSAGE_TYPE.GROUP_LEAVE_REQ, 2, encodeGroupLeaveReq(groupId));
@@ -161,7 +200,7 @@ export async function runGroupDismiss(options, groupId) {
   const login = await fetchTicket(options);
   console.log("login:", JSON.stringify({ playerId: login.playerId }, null, 2));
 
-  const client = await connectToChatServer(options);
+  const client = await connectToChatServer(options, login);
   await authenticateChatClient(client, options, login, 1);
 
   await client.send(MESSAGE_TYPE.GROUP_DISMISS_REQ, 2, encodeGroupDismissReq(groupId));
@@ -181,7 +220,7 @@ export async function runGroupList(options) {
   const login = await fetchTicket(options);
   console.log("login:", JSON.stringify({ playerId: login.playerId }, null, 2));
 
-  const client = await connectToChatServer(options);
+  const client = await connectToChatServer(options, login);
   await authenticateChatClient(client, options, login, 1);
 
   await client.send(MESSAGE_TYPE.GROUP_LIST_REQ, 2, encodeGroupListReq());
@@ -198,7 +237,7 @@ export async function runChatHistory(options) {
   const login = await fetchTicket(options);
   console.log("login:", JSON.stringify({ playerId: login.playerId }, null, 2));
 
-  const client = await connectToChatServer(options);
+  const client = await connectToChatServer(options, login);
   await authenticateChatClient(client, options, login, 1);
 
   const chatType = 1; // private
@@ -224,7 +263,7 @@ export async function runChatTwoClient(options) {
   console.log("clientB.login:", JSON.stringify({ playerId: loginB.playerId }, null, 2));
 
   // Create a group first
-  const clientA = await connectToChatServer(options);
+  const clientA = await connectToChatServer(options, loginA);
   await authenticateChatClient(clientA, options, loginA, 1);
 
   const groupName = options.groupName || "Test Group";
@@ -237,7 +276,7 @@ export async function runChatTwoClient(options) {
   console.log("group created:", groupId);
 
   // Client B joins
-  const clientB = await connectToChatServer(options);
+  const clientB = await connectToChatServer(options, loginB);
   await authenticateChatClient(clientB, options, loginB, 1);
 
   await clientB.send(MESSAGE_TYPE.GROUP_JOIN_REQ, 3, encodeGroupJoinReq(groupId));
@@ -278,12 +317,12 @@ export async function runChatPrivateTwoClient(options) {
   console.log("clientB.login:", JSON.stringify({ playerId: loginB.playerId }, null, 2));
 
   // Client A connects and waits for messages
-  const clientA = await connectToChatServer(options);
+  const clientA = await connectToChatServer(options, loginA);
   await authenticateChatClient(clientA, options, loginA, 1);
   console.log("clientA connected, waiting for private message...");
 
   // Client B connects and sends private message to A
-  const clientB = await connectToChatServer(options);
+  const clientB = await connectToChatServer(options, loginB);
   await authenticateChatClient(clientB, options, loginB, 1);
 
   await clientB.send(MESSAGE_TYPE.CHAT_PRIVATE_REQ, 2, encodeChatPrivateReq(loginA.playerId, options.content));

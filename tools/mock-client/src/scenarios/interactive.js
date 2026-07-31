@@ -24,12 +24,12 @@ export async function runChatInteractive(options) {
   console.log("");
 
   // Client A connects - this is "us"
-  const clientA = await connectToChatServer(options);
+  const clientA = await connectToChatServer(options, loginA);
   await authenticateChatClient(clientA, options, loginA, 1);
   console.log("[connected as clientA, waiting for messages...]");
 
   // Client B connects - this is "other player"
-  const clientB = await connectToChatServer(options);
+  const clientB = await connectToChatServer(options, loginB);
   await authenticateChatClient(clientB, options, loginB, 1);
   console.log("[clientB connected]");
 

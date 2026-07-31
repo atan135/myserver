@@ -41,6 +41,8 @@ const DEFAULT_OPTIONS = {
   port: 14000,
   chatHost: "",
   chatPort: 0,
+  chatTransport: "tcp",
+  chatWsUrl: "",
   httpBaseUrl: "http://127.0.0.1:3000",
   adminBaseUrl: "http://127.0.0.1:3001",
   adminToken: process.env.MYSERVER_ADMIN_TOKEN || process.env.ADMIN_API_TOKEN || "",
@@ -195,6 +197,12 @@ export function parseArgs(argv) {
       case "--chat-port":
         result.chatPort = Number.parseInt(collectOptionValue(argv, index).value, 10);
         index = collectOptionValue(argv, index).nextIndex;
+        break;
+      case "--chat-transport":
+        ({ value: result.chatTransport, nextIndex: index } = collectOptionValue(argv, index));
+        break;
+      case "--chat-ws-url":
+        ({ value: result.chatWsUrl, nextIndex: index } = collectOptionValue(argv, index));
         break;
       case "--http-base-url":
         ({ value: result.httpBaseUrl, nextIndex: index } = collectOptionValue(argv, index));

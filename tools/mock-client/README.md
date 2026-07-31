@@ -2,7 +2,7 @@
 
 ## 概述
 
-Mock Client 是一个用于测试 MyServer 游戏后端框架的联调工具。默认模拟玩家客户端只接触 `auth-http` 和 `game-proxy` 玩家入口；`chat-server`、`mail-service`、`announce-service` 场景是内部联调路径，必须显式传入对应内部地址。
+Mock Client 是一个用于测试 MyServer 游戏后端框架的联调工具。默认模拟玩家客户端只接触 `auth-http` 和 `game-proxy` 玩家入口；聊天场景默认保持本地 `9001/TCP` 内部联调方式，也可显式使用本地 `ws://127.0.0.1:9011/` 或从登录响应 `services.chat` 读取正式 `wss://chat.game.zergzerg.cn/`。`mail-service`、`announce-service` 场景仍是内部联调路径，必须显式传入对应内部地址。
 
 ## 项目结构
 
@@ -16,6 +16,7 @@ tools/mock-client/
 │   ├── messages.js      # 消息编码/解码函数
 │   ├── packet.js        # 数据包封包/解包
 │   ├── client.js        # TCP 协议客户端类
+│   ├── websocket-client.js # WebSocket/WSS 协议客户端类
 │   ├── auth.js          # 认证相关函数
 │   └── scenarios/       # 场景测试模块
 │       ├── index.js     # 场景统一导出
@@ -148,6 +149,17 @@ Protobuf 风格的编解码工具：
 | `robot-sync-room` | 双客户端 `robot_sync_room` 联调：验证 `robot_move` 帧转发和非法输入拒绝 |
 
 ### 聊天场景 (chat.js, interactive.js)
+
+聊天传输通过 `--chat-transport` 选择，默认 `tcp` 不改变既有流程：
+
+| transport | 使用场景 | 地址来源 |
+|-----------|----------|----------|
+| `tcp` | 本地内部联调 | 显式 `--chat-port 9001`，可选 `--chat-host` |
+| `ws` | 本地可选 WebSocket listener | 显式 `--chat-ws-url ws://127.0.0.1:9011/` |
+| `wss` | 正式公网入口 | 优先读取登录/签票响应 `services.chat`；测试可显式传入 `--chat-ws-url wss://.../` |
+
+每个 `ws`/`wss` logical binary message 承载且只承载一个既有 14 字节聊天协议包。传输层复用现有包头与 Protobuf 编解码，不接受文本消息、半包或多包拼接。
+
 | 场景 | 说明 |
 |------|------|
 | `chat-private` | 私聊消息 |
@@ -453,10 +465,21 @@ node tools/mock-client/src/index.js --scenario robot-sync-room \
   --host 127.0.0.1 --port 14000 \
   --room-id robot-sync-room --policy-id robot_sync_room
 
-# 聊天测试（9001 是本地内部联调地址示例）
+# 聊天 TCP 测试（9001 是本地内部联调地址示例）
 node tools/mock-client/src/index.js --scenario chat-private \
   --http-base-url http://127.0.0.1:3000 \
   --chat-port 9001 --target-id <plr_...> --content "Hello!"
+
+# 聊天本地 WebSocket 测试（chat-server 显式开启 CHAT_WS_ENABLED 后才可用）
+node tools/mock-client/src/index.js --scenario chat-private \
+  --http-base-url http://127.0.0.1:3000 \
+  --chat-transport ws --chat-ws-url ws://127.0.0.1:9011/ \
+  --target-id <plr_...> --content "Hello over WS!"
+
+# 聊天正式 WSS 测试（auth 的 services.chat 下发 wss://chat.game.zergzerg.cn/）
+node tools/mock-client/src/index.js --scenario chat-private \
+  --http-base-url https://api.game.zergzerg.cn \
+  --chat-transport wss --target-id <plr_...> --content "Hello over WSS!"
 
 # 邮件测试（9003 是本地内部联调地址示例）
 node tools/mock-client/src/index.js --scenario mail-send \
@@ -510,6 +533,8 @@ node tools/mock-client/src/index.js --scenario password-ticket-revoke \
 | `--port` | 玩家 TCP 入口端口，默认走 `game-proxy` TCP fallback | `14000` |
 | `--chat-host` | 聊天 TCP 服务器地址；未传时使用 `--host` | 空 |
 | `--chat-port` | 聊天服务器端口，内部联调场景必须显式传入 | `0` |
+| `--chat-transport` | 聊天传输：`tcp`、`ws` 或 `wss`；默认保持 TCP | `tcp` |
+| `--chat-ws-url` | WebSocket 根 URL；`ws`/`wss` 测试显式覆盖登录响应 `services.chat` | 空 |
 | `--room-id` | 房间ID | `room-default` |
 | `--login-name` | 登录用户名 | - |
 | `--password` | 登录密码 | - |

@@ -196,6 +196,35 @@ function applyTcpService(options, service, hostKey, portKey) {
   options[portKey] = Number(service.port);
 }
 
+export function chatWebSocketUrlFromDescriptor(service) {
+  const protocol = String(service?.protocol || "").toLowerCase();
+  if (!service?.host || !service?.port || !["ws", "wss"].includes(protocol)) {
+    return "";
+  }
+
+  const host = String(service.host).trim();
+  const port = Number(service.port);
+  if (!host || /[\s/?#@]/.test(host) || !Number.isInteger(port) || port < 1 || port > 65535) {
+    return "";
+  }
+
+  const authority = host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;
+  const defaultPort = protocol === "wss" ? 443 : 80;
+  return `${protocol}://${authority}${port === defaultPort ? "" : `:${port}`}/`;
+}
+
+function applyChatService(options, service) {
+  if (["ws", "wss"].includes(String(service?.protocol || "").toLowerCase())) {
+    const url = chatWebSocketUrlFromDescriptor(service);
+    if (url) {
+      options.discoveredChatWsUrl = url;
+    }
+    return;
+  }
+
+  applyTcpService(options, service, "chatHost", "chatPort");
+}
+
 function applyHttpService(options, service, baseUrlKey) {
   if (!service?.host || !service?.port) {
     return;
@@ -211,7 +240,7 @@ export function applyDiscoveredServices(options, login) {
   }
 
   applyTcpService(options, login.services.game, "gameHost", "port");
-  applyTcpService(options, login.services.chat, "chatHost", "chatPort");
+  applyChatService(options, login.services.chat);
   applyHttpService(options, login.services.mail, "mailBaseUrl");
   applyHttpService(options, login.services.announce, "announceBaseUrl");
 }

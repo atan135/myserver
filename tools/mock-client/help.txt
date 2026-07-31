@@ -12,6 +12,8 @@
 # --host <ip>                玩家入口地址 (默认 127.0.0.1)
 # --port <port>              玩家 TCP 入口端口 (默认 14000，即 game-proxy TCP fallback)
 # --chat-port <port>         聊天服务器端口；内部联调场景必须显式传入
+# --chat-transport <name>    聊天传输：tcp、ws 或 wss (默认 tcp，保持本地 9001/TCP 流程)
+# --chat-ws-url <url>        WebSocket 根 URL；ws/wss 测试可显式传入，wss 否则读取 services.chat
 # --room-id <id>             房间ID (默认 room-default)
 # --login-name <name>        登录用户名
 # --password <pwd>           登录密码
@@ -299,10 +301,22 @@ node tools/mock-client/src/index.js --scenario create-matched-room --http-base-u
 #   --mode         匹配模式 (可选，默认 1v1)
 node tools/mock-client/src/index.js --scenario create-matched-room-and-join --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --login-name test001 --password Passw0rd! --mode 3v3
 
-# ========== 聊天系统测试 (内部联调地址；本地示例通过 --chat-port 9001) ==========
+# ========== 聊天系统测试 (TCP 内部联调地址；本地示例通过 --chat-port 9001) ==========
+
+# 传输说明：
+# - tcp（默认）：本地 9001/TCP，保持现有聊天场景行为。
+# - ws：本地可选 WebSocket listener，例如 ws://127.0.0.1:9011/；需显式开启 CHAT_WS_ENABLED。
+# - wss：正式入口 wss://chat.game.zergzerg.cn/，优先从登录响应 services.chat 读取。
+# 每个 WebSocket binary message 必须是一个完整的 14 字节聊天协议包；不支持文本帧或包拼接。
 
 # 13. 私聊消息 (CHAT_PRIVATE)
 node tools/mock-client/src/index.js --scenario chat-private --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --chat-port 9001 --login-name test001 --password Passw0rd! --target-id <plr_...> --content "Hello!"
+
+# 本地 WebSocket 私聊（9011 是可选 listener，不是公网端口）
+node tools/mock-client/src/index.js --scenario chat-private --http-base-url http://127.0.0.1:3000 --chat-transport ws --chat-ws-url ws://127.0.0.1:9011/ --login-name test001 --password Passw0rd! --target-id <plr_...> --content "Hello over WS!"
+
+# 正式 WSS 私聊（services.chat 自动提供 wss://chat.game.zergzerg.cn/）
+node tools/mock-client/src/index.js --scenario chat-private --http-base-url https://api.game.zergzerg.cn --chat-transport wss --login-name test001 --password Passw0rd! --target-id <plr_...> --content "Hello over WSS!"
 
 # 14. 群聊消息 (CHAT_GROUP)
 node tools/mock-client/src/index.js --scenario chat-group --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --chat-port 9001 --login-name test001 --password Passw0rd! --group-id <grp_...> --content "Hello group!"
