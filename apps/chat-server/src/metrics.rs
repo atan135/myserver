@@ -29,6 +29,19 @@ impl Drop for ConnectionMetricGuard<'_> {
     }
 }
 
+/// Tracks every accepted transport connection, including a WebSocket while it
+/// is still completing its HTTP Upgrade. This is the per-instance capacity
+/// gauge rather than the post-upgrade WebSocket session gauge.
+pub(crate) struct ConnectionCapacityMetricGuard<'a> {
+    collector: &'a MetricsCollector,
+}
+
+impl Drop for ConnectionCapacityMetricGuard<'_> {
+    fn drop(&mut self) {
+        self.collector.connection_capacity_closed();
+    }
+}
+
 /// 计算当前 bucket 时间戳（5秒对齐）
 fn current_bucket() -> u64 {
     std::time::SystemTime::now()
@@ -96,6 +109,10 @@ pub struct MetricsCollector {
     latency_count: AtomicU64,
     /// 在线玩家数
     online_players: AtomicU64,
+    /// 当前实例已接受、尚未释放的 TCP/WSS 连接数
+    connection_capacity_current: AtomicU64,
+    /// 因当前实例总连接数达到容量上限而拒绝的连接数
+    connection_capacity_rejected: AtomicU64,
     /// 收到的邮件通知数
     mail_notification_received: AtomicU64,
     /// 邮件通知解析或契约校验失败数
@@ -142,6 +159,8 @@ pub struct MetricsCollector {
     websocket_handshake_success: AtomicU64,
     /// WebSocket 握手失败数（含握手容量拒绝）
     websocket_handshake_failure: AtomicU64,
+    /// 超过 WebSocket 全实例握手速率窗口而拒绝的连接数
+    websocket_handshake_rate_limited: AtomicU64,
     /// WebSocket message/frame 契约拒绝数
     websocket_frame_rejected: AtomicU64,
     /// WebSocket 非正常关闭数
@@ -162,6 +181,8 @@ impl MetricsCollector {
             latency_sum: AtomicU64::new(0),
             latency_count: AtomicU64::new(0),
             online_players: AtomicU64::new(0),
+            connection_capacity_current: AtomicU64::new(0),
+            connection_capacity_rejected: AtomicU64::new(0),
             mail_notification_received: AtomicU64::new(0),
             mail_notification_parse_failed: AtomicU64::new(0),
             mail_notification_version_rejected: AtomicU64::new(0),
@@ -185,6 +206,7 @@ impl MetricsCollector {
             websocket_connections_current: AtomicU64::new(0),
             websocket_handshake_success: AtomicU64::new(0),
             websocket_handshake_failure: AtomicU64::new(0),
+            websocket_handshake_rate_limited: AtomicU64::new(0),
             websocket_frame_rejected: AtomicU64::new(0),
             websocket_abnormal_close: AtomicU64::new(0),
             tcp_outbound_queue_failure: AtomicU64::new(0),
@@ -207,6 +229,17 @@ impl MetricsCollector {
     /// 设置在线玩家数
     pub fn set_online_players(&self, val: u64) {
         self.online_players.store(val, Ordering::Relaxed);
+    }
+
+    pub(crate) fn track_connection_capacity(&self) -> ConnectionCapacityMetricGuard<'_> {
+        self.connection_capacity_current
+            .fetch_add(1, Ordering::Relaxed);
+        ConnectionCapacityMetricGuard { collector: self }
+    }
+
+    pub(crate) fn record_connection_capacity_rejected(&self) {
+        self.connection_capacity_rejected
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn record_mail_notification_received(&self) {
@@ -318,6 +351,11 @@ impl MetricsCollector {
             .fetch_add(1, Ordering::Relaxed);
     }
 
+    pub(crate) fn record_websocket_handshake_rate_limited(&self) {
+        self.websocket_handshake_rate_limited
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
     pub(crate) fn record_websocket_frame_rejected(&self) {
         self.websocket_frame_rejected
             .fetch_add(1, Ordering::Relaxed);
@@ -359,6 +397,14 @@ impl MetricsCollector {
         });
     }
 
+    fn connection_capacity_closed(&self) {
+        let _ = self.connection_capacity_current.fetch_update(
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+            |current| Some(current.saturating_sub(1)),
+        );
+    }
+
     /// 设置扩展字段
     pub fn set_extra(&self, key: impl Into<String>, value: impl Into<String>) {
         let mut extra = self.extra.lock().unwrap();
@@ -398,6 +444,10 @@ impl MetricsCollector {
                 let latency_sum = self.latency_sum.swap(0, Ordering::Relaxed);
                 let latency_count = self.latency_count.swap(0, Ordering::Relaxed);
                 let online_players = self.online_players.load(Ordering::Relaxed);
+                let connection_capacity_current =
+                    self.connection_capacity_current.load(Ordering::Relaxed);
+                let connection_capacity_rejected =
+                    self.connection_capacity_rejected.swap(0, Ordering::Relaxed);
                 let mail_notification_received =
                     self.mail_notification_received.swap(0, Ordering::Relaxed);
                 let mail_notification_parse_failed = self
@@ -449,6 +499,9 @@ impl MetricsCollector {
                     self.websocket_handshake_success.swap(0, Ordering::Relaxed);
                 let websocket_handshake_failure =
                     self.websocket_handshake_failure.swap(0, Ordering::Relaxed);
+                let websocket_handshake_rate_limited = self
+                    .websocket_handshake_rate_limited
+                    .swap(0, Ordering::Relaxed);
                 let websocket_frame_rejected =
                     self.websocket_frame_rejected.swap(0, Ordering::Relaxed);
                 let websocket_abnormal_close =
@@ -477,6 +530,14 @@ impl MetricsCollector {
                     ("qps".to_string(), qps.to_string()),
                     ("latency_ms".to_string(), latency_ms.to_string()),
                     ("online_players".to_string(), online_players.to_string()),
+                    (
+                        "connection_capacity_current".to_string(),
+                        connection_capacity_current.to_string(),
+                    ),
+                    (
+                        "connection_capacity_rejected_total".to_string(),
+                        connection_capacity_rejected.to_string(),
+                    ),
                     (
                         "mail_notification_received".to_string(),
                         mail_notification_received.to_string(),
@@ -570,6 +631,10 @@ impl MetricsCollector {
                         websocket_handshake_failure.to_string(),
                     ),
                     (
+                        "websocket_handshake_rate_limited_total".to_string(),
+                        websocket_handshake_rate_limited.to_string(),
+                    ),
+                    (
                         "websocket_frame_rejected_total".to_string(),
                         websocket_frame_rejected.to_string(),
                     ),
@@ -645,6 +710,29 @@ mod tests {
         assert_eq!(collector.latency_count.load(Ordering::Relaxed), 1);
         assert_eq!(collector.online_players.load(Ordering::Relaxed), 10);
 
+        {
+            let _capacity = collector.track_connection_capacity();
+            assert_eq!(
+                collector
+                    .connection_capacity_current
+                    .load(Ordering::Relaxed),
+                1
+            );
+        }
+        assert_eq!(
+            collector
+                .connection_capacity_current
+                .load(Ordering::Relaxed),
+            0
+        );
+        collector.record_connection_capacity_rejected();
+        assert_eq!(
+            collector
+                .connection_capacity_rejected
+                .load(Ordering::Relaxed),
+            1
+        );
+
         collector.record_mail_notification_received();
         collector.record_mail_notification_parse_failed();
         collector.record_mail_notification_version_rejected();
@@ -719,6 +807,7 @@ mod tests {
 
         collector.record_websocket_handshake_success();
         collector.record_websocket_handshake_failure();
+        collector.record_websocket_handshake_rate_limited();
         collector.record_websocket_frame_rejected();
         collector.record_websocket_abnormal_close();
         collector.record_outbound_queue_failure(MetricTransport::Tcp);
@@ -732,6 +821,12 @@ mod tests {
         assert_eq!(
             collector
                 .websocket_handshake_failure
+                .load(Ordering::Relaxed),
+            1
+        );
+        assert_eq!(
+            collector
+                .websocket_handshake_rate_limited
                 .load(Ordering::Relaxed),
             1
         );
@@ -760,11 +855,18 @@ mod tests {
         let collector = MetricsCollector::new();
         collector.connection_closed(MetricTransport::Tcp);
         collector.connection_closed(MetricTransport::WebSocket);
+        collector.connection_capacity_closed();
 
         assert_eq!(collector.tcp_connections_current.load(Ordering::Relaxed), 0);
         assert_eq!(
             collector
                 .websocket_connections_current
+                .load(Ordering::Relaxed),
+            0
+        );
+        assert_eq!(
+            collector
+                .connection_capacity_current
                 .load(Ordering::Relaxed),
             0
         );

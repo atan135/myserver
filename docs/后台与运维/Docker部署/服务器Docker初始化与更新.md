@@ -179,6 +179,8 @@ DISALLOW_LEGACY_DIRECT_CONFIG=true
 - registry 自身可访问；每个应注册服务都有正确的 service name、instance ID、endpoint、visibility 和 heartbeat。
 - 所有关键依赖可通过 registry 发现，未使用 `GAME_PROXY_HOST`、`GAME_SERVER_ADMIN_HOST`、`MATCH_SERVICE_ADDR` 等 local fallback。
 - `game-proxy` 的 Redis route store 使用生产要求的 backend；玩家入口的 advertised host/port 为客户端可达地址，而内部 endpoint 不泄露到登录响应。
+- `chat-server` 必须保持单副本：production Compose 的 `deploy.replicas: 1` 和 `server-apply-release.sh` 的前后副本检查均通过；不得用 `docker compose --scale chat-server` 覆盖，因为当前 release 环境会让所有副本继承 `SERVICE_INSTANCE_ID=chat-server-1`。
+- 聊天实例容量门槛已加载：`CHAT_MAX_CONNECTIONS=500`、`CHAT_WS_HANDSHAKE_RATE_MAX=120` / 秒、`CHAT_WS_MAX_PENDING_HANDSHAKES=64`、每连接 `20` 条消息/秒、每连接 `32` 条出站队列和 `256MiB` 内存上限。接流量前确认 `connection_capacity_current`、握手拒绝、出站队列失败和 `chat_push_publish_queue_depth` 没有告警；具体阈值与处置见[聊天与邮件系统设计](../../周边服务/聊天与邮件系统设计.md)。
 - Node HTTP `/healthz`、后续 Rust readiness endpoint 和数据库 postflight 均通过；管理口仅能从受控网络访问。
 - 内存限制、Redis `noeviction`、PostgreSQL 参数、日志轮转和备份任务已实际加载，而非只存在于配置文件。
 
@@ -237,3 +239,4 @@ DISALLOW_LEGACY_DIRECT_CONFIG=true
 - 共享 local socket volume 只能在同一台宿主机使用，不能通过复制 volume 实现跨主机扩容或故障转移。
 - `docker compose` 的健康检查和 `depends_on` 不替代 service registry 的注册、heartbeat 与依赖发现校验。
 - 宿主机内存不足时，优先限制或下线非核心服务、开启维护并保护 PostgreSQL/Redis；不要通过扩大 swap、取消所有内存限制或批量重启容器处理。
+- 当前聊天 WSS 生产拓扑只支持一副本。将来启用多实例时，必须替换这套 Compose/release apply 门禁为受控编排：为每个副本签发稳定且唯一的 `SERVICE_INSTANCE_ID`，确认 Caddy 的 `dynamic a` 能解析全部 endpoint，保留 Redis owner-fenced route 与实例级 NATS push，并完成多实例登录、断线重连、摘流、旧 route、NATS 失败和容量告警演练。不能以直接 `--scale` 或复制 `compose.production.yml` 作为扩容方式。

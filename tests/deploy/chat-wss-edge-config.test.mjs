@@ -9,7 +9,14 @@ test("chat Caddy site only proxies an upgraded root request", async () => {
 
   assert.match(caddyfile, /\{\$CADDY_CHAT_HOST\}\s*\{/);
   assert.match(caddyfile, /@chat_websocket\s*\{[\s\S]*?method GET[\s\S]*?path \/[\s\S]*?header Connection \*Upgrade\*[\s\S]*?header Upgrade websocket[\s\S]*?\}/);
-  assert.match(caddyfile, /handle @chat_websocket\s*\{[\s\S]*?reverse_proxy chat-server:9011/);
+  assert.match(caddyfile, /handle @chat_websocket\s*\{[\s\S]*?reverse_proxy\s*\{[\s\S]*?dynamic a chat-server 9011/);
+  assert.match(caddyfile, /dynamic a chat-server 9011\s*\{\s*refresh 5s\s*\}/);
+  assert.match(caddyfile, /dynamic a chat-server 9011[\s\S]*?lb_policy round_robin/);
+  assert.match(caddyfile, /lb_retries 2/);
+  assert.match(caddyfile, /lb_try_duration 5s/);
+  assert.match(caddyfile, /fail_duration 15s/);
+  assert.match(caddyfile, /max_fails 1/);
+  assert.doesNotMatch(caddyfile, /lb_policy cookie/);
   assert.match(caddyfile, /handle\s*\{[\s\S]*?respond 426/);
 });
 
@@ -39,6 +46,14 @@ test("production Compose keeps both chat listeners off the host network", async 
   assert.match(chatService, /CHAT_BIND_ADDR: 0\.0\.0\.0:9001/);
   assert.match(chatService, /CHAT_WS_BIND_ADDR: 0\.0\.0\.0:9011/);
   assert.match(chatService, /HEARTBEAT_TIMEOUT_SECS: "30"/);
+  assert.match(chatService, /CHAT_WS_HANDSHAKE_RATE_WINDOW_SECS: "1"/);
+  assert.match(chatService, /CHAT_WS_HANDSHAKE_RATE_MAX: "120"/);
+  assert.match(chatService, /CHAT_MSG_RATE_MAX: "20"/);
+  assert.match(chatService, /CHAT_MAX_CONNECTIONS: "500"/);
+  assert.match(chatService, /CHAT_OUTBOUND_QUEUE_CAPACITY: "32"/);
+  assert.match(chatService, /CHAT_PUSH_PUBLISH_QUEUE_CAPACITY: "128"/);
+  assert.match(chatService, /CHAT_PUSH_MAX_PAYLOAD_BYTES: "8192"/);
+  assert.match(chatService, /deploy:\s*\n\s+replicas: 1/);
   assert.match(chatService, /CHAT_WS_TRUSTED_PROXY_CIDRS: \$\{CHAT_WS_TRUSTED_PROXY_CIDRS:-172\.30\.0\.0\/24\}/);
   assert.doesNotMatch(chatService, /\n\s+ports:/);
   assert.match(caddyService, /CADDY_CHAT_HOST: \$\{CADDY_CHAT_HOST:\?set CADDY_CHAT_HOST\}/);
@@ -46,6 +61,15 @@ test("production Compose keeps both chat listeners off the host network", async 
   assert.match(caddyService, /chat-server:\s*\n\s+condition: service_started/);
   assert.doesNotMatch(compose, /["']?9011:9011(?:\/tcp)?["']?/);
   assert.doesNotMatch(compose, /["']?9001:9001(?:\/tcp)?["']?/);
+});
+
+test("release apply script rejects chat-server scale overrides with duplicate instance IDs", async () => {
+  const applyRelease = await read("scripts/docker/server-apply-release.sh");
+
+  assert.match(applyRelease, /assert_chat_server_replica_count\(\)/);
+  assert.match(applyRelease, /assert_chat_server_replica_count 1/);
+  assert.match(applyRelease, /existing_chat_servers/);
+  assert.match(applyRelease, /SERVICE_INSTANCE_ID=chat-server-1/);
 });
 
 test("production operations contract keeps chat ports private and reconnect isolated", async () => {

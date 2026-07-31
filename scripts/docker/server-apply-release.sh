@@ -45,6 +45,28 @@ cd "$release_dir"
 sha256sum --check --status SHA256SUMS
 compose=(docker compose --env-file compose.production.env -f compose.production.yml)
 "${compose[@]}" config --quiet
+
+assert_chat_server_replica_count() {
+  local expected="$1"
+  local -a containers=()
+  mapfile -t containers < <("${compose[@]}" ps -q chat-server)
+  if (( ${#containers[@]} != expected )); then
+    echo "Production chat-server replica gate requires $expected instance(s), found ${#containers[@]}." >&2
+    echo "Do not use docker compose --scale chat-server with this release topology: every replica would inherit SERVICE_INSTANCE_ID=chat-server-1." >&2
+    return 1
+  fi
+}
+
+# Reject a previously overridden --scale before an update can replace or route
+# traffic through duplicate chat-server instance IDs.
+declare -a existing_chat_servers=()
+mapfile -t existing_chat_servers < <("${compose[@]}" ps -q chat-server)
+if (( ${#existing_chat_servers[@]} > 1 )); then
+  echo "Production chat-server replica gate requires at most one existing instance, found ${#existing_chat_servers[@]}." >&2
+  echo "Resolve the duplicate deployment before applying a release; do not scale this topology in place." >&2
+  exit 65
+fi
+
 "${compose[@]}" pull
 "${compose[@]}" --profile ops pull migration-runner
 
@@ -73,6 +95,7 @@ wait_healthy nats
 "${compose[@]}" --profile ops run --rm migration-runner apply --environment production --actor "$actor"
 
 "${compose[@]}" up -d game-server match-service chat-server mail-service announce-service metrics-collector
+assert_chat_server_replica_count 1
 "${compose[@]}" up -d game-proxy auth-http admin-api
 "${compose[@]}" --profile ops run --rm migration-runner \
   postflight --environment production --check-readiness --require-readiness

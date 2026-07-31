@@ -32,8 +32,10 @@ const DEFAULT_WS_BRIDGE_CAPACITY: usize = 8 * 1024;
 const MAX_WS_HANDSHAKE_TIMEOUT_SECS: u64 = 30;
 const MAX_WS_HANDSHAKE_MAX_BYTES: usize = 64 * 1024;
 const MAX_WS_PENDING_HANDSHAKES: usize = 4096;
+const MAX_WS_HANDSHAKE_RATE_PER_WINDOW: u64 = 10_000;
 const MAX_WS_BRIDGE_CAPACITY: usize = 1024 * 1024;
 const MAX_CHAT_BODY_BYTES: usize = 16 * 1024 * 1024;
+const MAX_CHAT_CONNECTIONS: u64 = 50_000;
 const CHAT_PROTOCOL_VERSION: u8 = 1;
 
 struct Config {
@@ -46,6 +48,8 @@ struct Config {
     ws_handshake_timeout_secs: u64,
     ws_handshake_max_bytes: usize,
     ws_max_pending_handshakes: usize,
+    ws_handshake_rate_window_secs: u64,
+    ws_handshake_rate_max: u64,
     ws_trusted_proxies: websocket::TrustedProxySet,
     ws_max_frame_len: usize,
     ws_bridge_capacity: usize,
@@ -55,6 +59,7 @@ struct Config {
     msg_rate_max: u64,
     max_connections_per_player: u64,
     max_connections_per_ip: u64,
+    max_connections: u64,
     outbound_queue_capacity: usize,
     ticket_secret: String,
     redis_url: String,
@@ -146,6 +151,18 @@ impl Config {
                 DEFAULT_WS_MAX_PENDING_HANDSHAKES,
                 MAX_WS_PENDING_HANDSHAKES,
             ),
+            ws_handshake_rate_window_secs: parse_positive_u64_env_strict(
+                "CHAT_WS_HANDSHAKE_RATE_WINDOW_SECS",
+                1,
+                60,
+            ),
+            // Zero keeps the local TCP-first development workflow unrestricted.
+            // Production validation below requires an explicit positive limit.
+            ws_handshake_rate_max: parse_nonnegative_u64_env_strict(
+                "CHAT_WS_HANDSHAKE_RATE_MAX",
+                0,
+                MAX_WS_HANDSHAKE_RATE_PER_WINDOW,
+            ),
             ws_trusted_proxies: websocket::TrustedProxySet::parse_csv(
                 &std::env::var("CHAT_WS_TRUSTED_PROXY_CIDRS").unwrap_or_default(),
             )
@@ -165,6 +182,11 @@ impl Config {
             msg_rate_max: parse_u64_env("CHAT_MSG_RATE_MAX", 0),
             max_connections_per_player: parse_u64_env("CHAT_MAX_CONNECTIONS_PER_PLAYER", 0),
             max_connections_per_ip: parse_u64_env("CHAT_MAX_CONNECTIONS_PER_IP", 0),
+            max_connections: parse_nonnegative_u64_env_strict(
+                "CHAT_MAX_CONNECTIONS",
+                0,
+                MAX_CHAT_CONNECTIONS,
+            ),
             outbound_queue_capacity: parse_outbound_queue_capacity(
                 std::env::var("CHAT_OUTBOUND_QUEUE_CAPACITY").ok(),
             ),
@@ -494,6 +516,18 @@ fn validate_production_config(config: &Config) {
             "invalid chat-server production config: CHAT_WS_TRUSTED_PROXY_CIDRS must not trust an IPv4 or IPv6 /0 network"
         );
     }
+
+    if config.max_connections == 0 {
+        panic!(
+            "invalid chat-server production config: CHAT_MAX_CONNECTIONS must be a positive per-instance connection cap"
+        );
+    }
+
+    if config.ws_enabled && config.ws_handshake_rate_max == 0 {
+        panic!(
+            "invalid chat-server production config: CHAT_WS_HANDSHAKE_RATE_MAX must be positive when WSS is enabled"
+        );
+    }
 }
 
 fn is_default_ticket_secret(value: &str) -> bool {
@@ -549,6 +583,18 @@ fn parse_positive_u64_env_strict(name: &str, default_value: u64, max_value: u64)
             .ok()
             .filter(|value| *value > 0 && *value <= max_value)
             .unwrap_or_else(|| panic!("invalid {name}: must be an integer in 1..={max_value}")),
+        Err(_) => default_value,
+    }
+}
+
+fn parse_nonnegative_u64_env_strict(name: &str, default_value: u64, max_value: u64) -> u64 {
+    match std::env::var(name) {
+        Ok(raw) => raw
+            .trim()
+            .parse::<u64>()
+            .ok()
+            .filter(|value| *value <= max_value)
+            .unwrap_or_else(|| panic!("invalid {name}: must be an integer in 0..={max_value}")),
         Err(_) => default_value,
     }
 }
@@ -770,6 +816,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ws_handshake_timeout_secs: config.ws_handshake_timeout_secs,
         ws_handshake_max_bytes: config.ws_handshake_max_bytes,
         ws_max_pending_handshakes: config.ws_max_pending_handshakes,
+        ws_handshake_rate_window_secs: config.ws_handshake_rate_window_secs,
+        ws_handshake_rate_max: config.ws_handshake_rate_max,
         ws_trusted_proxies: config.ws_trusted_proxies.clone(),
         ws_max_frame_len: config.ws_max_frame_len,
         ws_bridge_capacity: config.ws_bridge_capacity,
@@ -779,6 +827,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         msg_rate_max: config.msg_rate_max,
         max_connections_per_player: config.max_connections_per_player,
         max_connections_per_ip: config.max_connections_per_ip,
+        max_connections: config.max_connections,
         ticket_secret: config.ticket_secret.clone(),
         redis_url: config.redis_url.clone(),
         redis_key_prefix: config.redis_key_prefix.clone(),
@@ -956,6 +1005,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         chat_push_config,
         sessions_for_chat_push,
         chat_push_outbound,
+        config.chat_push_publish_queue_capacity,
         chat_push_shutdown_rx,
     ));
 
@@ -1116,7 +1166,10 @@ mod tests {
         "CHAT_MAIL_LEGACY_COMPAT_UNTIL_EPOCH_SECONDS",
         "CHAT_WS_ENABLED",
         "CHAT_WS_BIND_ADDR",
+        "CHAT_WS_HANDSHAKE_RATE_WINDOW_SECS",
+        "CHAT_WS_HANDSHAKE_RATE_MAX",
         "CHAT_WS_TRUSTED_PROXY_CIDRS",
+        "CHAT_MAX_CONNECTIONS",
     ];
 
     fn env_lock() -> &'static Mutex<()> {
@@ -1176,6 +1229,9 @@ mod tests {
             env::set_var("GLOBAL_ID_ORIGIN_ID", "1");
             env::set_var("GLOBAL_ID_WORKER_ID", "4");
             env::set_var("CHAT_WS_ENABLED", "false");
+            env::set_var("CHAT_MAX_CONNECTIONS", "500");
+            env::set_var("CHAT_WS_HANDSHAKE_RATE_WINDOW_SECS", "1");
+            env::set_var("CHAT_WS_HANDSHAKE_RATE_MAX", "120");
             env::remove_var("CHAT_WS_TRUSTED_PROXY_CIDRS");
         }
     }
@@ -1322,17 +1378,20 @@ mod tests {
         let _env = EnvGuard::capture(&[
             "CHAT_MAX_CONNECTIONS_PER_PLAYER",
             "CHAT_MAX_CONNECTIONS_PER_IP",
+            "CHAT_MAX_CONNECTIONS",
         ]);
 
         unsafe {
             env::remove_var("CHAT_MAX_CONNECTIONS_PER_PLAYER");
             env::remove_var("CHAT_MAX_CONNECTIONS_PER_IP");
+            env::remove_var("CHAT_MAX_CONNECTIONS");
         }
 
         let config = Config::from_env();
 
         assert_eq!(config.max_connections_per_player, 0);
         assert_eq!(config.max_connections_per_ip, 0);
+        assert_eq!(config.max_connections, 0);
     }
 
     #[test]
@@ -1341,17 +1400,20 @@ mod tests {
         let _env = EnvGuard::capture(&[
             "CHAT_MAX_CONNECTIONS_PER_PLAYER",
             "CHAT_MAX_CONNECTIONS_PER_IP",
+            "CHAT_MAX_CONNECTIONS",
         ]);
 
         unsafe {
             env::set_var("CHAT_MAX_CONNECTIONS_PER_PLAYER", "2");
             env::set_var("CHAT_MAX_CONNECTIONS_PER_IP", "10");
+            env::set_var("CHAT_MAX_CONNECTIONS", "500");
         }
 
         let config = Config::from_env();
 
         assert_eq!(config.max_connections_per_player, 2);
         assert_eq!(config.max_connections_per_ip, 10);
+        assert_eq!(config.max_connections, 500);
     }
 
     #[test]
@@ -1363,6 +1425,8 @@ mod tests {
             "CHAT_WS_HANDSHAKE_TIMEOUT_SECS",
             "CHAT_WS_HANDSHAKE_MAX_BYTES",
             "CHAT_WS_MAX_PENDING_HANDSHAKES",
+            "CHAT_WS_HANDSHAKE_RATE_WINDOW_SECS",
+            "CHAT_WS_HANDSHAKE_RATE_MAX",
             "CHAT_WS_TRUSTED_PROXY_CIDRS",
             "CHAT_WS_MAX_FRAME_LEN",
             "CHAT_WS_BRIDGE_CAPACITY",
@@ -1376,6 +1440,8 @@ mod tests {
             env::remove_var("CHAT_WS_HANDSHAKE_TIMEOUT_SECS");
             env::remove_var("CHAT_WS_HANDSHAKE_MAX_BYTES");
             env::remove_var("CHAT_WS_MAX_PENDING_HANDSHAKES");
+            env::remove_var("CHAT_WS_HANDSHAKE_RATE_WINDOW_SECS");
+            env::remove_var("CHAT_WS_HANDSHAKE_RATE_MAX");
             env::remove_var("CHAT_WS_TRUSTED_PROXY_CIDRS");
             env::remove_var("CHAT_WS_MAX_FRAME_LEN");
             env::remove_var("CHAT_WS_BRIDGE_CAPACITY");
@@ -1397,6 +1463,8 @@ mod tests {
             config.ws_max_pending_handshakes,
             DEFAULT_WS_MAX_PENDING_HANDSHAKES
         );
+        assert_eq!(config.ws_handshake_rate_window_secs, 1);
+        assert_eq!(config.ws_handshake_rate_max, 0);
         assert_eq!(config.ws_bridge_capacity, DEFAULT_WS_BRIDGE_CAPACITY);
     }
 
@@ -1496,24 +1564,30 @@ mod tests {
             "CHAT_WS_HANDSHAKE_TIMEOUT_SECS",
             "CHAT_WS_HANDSHAKE_MAX_BYTES",
             "CHAT_WS_MAX_PENDING_HANDSHAKES",
+            "CHAT_WS_HANDSHAKE_RATE_MAX",
             "CHAT_WS_BRIDGE_CAPACITY",
             "MAX_BODY_LEN",
+            "CHAT_MAX_CONNECTIONS",
         ]);
 
         for (name, value) in [
             ("CHAT_WS_HANDSHAKE_TIMEOUT_SECS", "0"),
             ("CHAT_WS_HANDSHAKE_MAX_BYTES", "65537"),
             ("CHAT_WS_MAX_PENDING_HANDSHAKES", "4097"),
+            ("CHAT_WS_HANDSHAKE_RATE_MAX", "10001"),
             ("CHAT_WS_BRIDGE_CAPACITY", "invalid"),
             ("MAX_BODY_LEN", "16777217"),
+            ("CHAT_MAX_CONNECTIONS", "50001"),
         ] {
             unsafe {
                 for variable in [
                     "CHAT_WS_HANDSHAKE_TIMEOUT_SECS",
                     "CHAT_WS_HANDSHAKE_MAX_BYTES",
                     "CHAT_WS_MAX_PENDING_HANDSHAKES",
+                    "CHAT_WS_HANDSHAKE_RATE_MAX",
                     "CHAT_WS_BRIDGE_CAPACITY",
                     "MAX_BODY_LEN",
+                    "CHAT_MAX_CONNECTIONS",
                 ] {
                     env::remove_var(variable);
                 }
@@ -1684,6 +1758,8 @@ mod tests {
             ws_handshake_timeout_secs: DEFAULT_WS_HANDSHAKE_TIMEOUT_SECS,
             ws_handshake_max_bytes: DEFAULT_WS_HANDSHAKE_MAX_BYTES,
             ws_max_pending_handshakes: DEFAULT_WS_MAX_PENDING_HANDSHAKES,
+            ws_handshake_rate_window_secs: 1,
+            ws_handshake_rate_max: 0,
             ws_trusted_proxies: websocket::TrustedProxySet::default(),
             ws_max_frame_len: protocol::HEADER_LEN + 4096,
             ws_bridge_capacity: DEFAULT_WS_BRIDGE_CAPACITY,
@@ -1693,6 +1769,7 @@ mod tests {
             msg_rate_max: 0,
             max_connections_per_player: 0,
             max_connections_per_ip: 0,
+            max_connections: 0,
             outbound_queue_capacity: DEFAULT_OUTBOUND_QUEUE_CAPACITY,
             ticket_secret: "test-secret".to_string(),
             redis_url: "redis://127.0.0.1:6379".to_string(),
@@ -1810,6 +1887,8 @@ mod tests {
             ws_handshake_timeout_secs: DEFAULT_WS_HANDSHAKE_TIMEOUT_SECS,
             ws_handshake_max_bytes: DEFAULT_WS_HANDSHAKE_MAX_BYTES,
             ws_max_pending_handshakes: DEFAULT_WS_MAX_PENDING_HANDSHAKES,
+            ws_handshake_rate_window_secs: 1,
+            ws_handshake_rate_max: 0,
             ws_trusted_proxies: websocket::TrustedProxySet::default(),
             ws_max_frame_len: protocol::HEADER_LEN + 4096,
             ws_bridge_capacity: DEFAULT_WS_BRIDGE_CAPACITY,
@@ -1819,6 +1898,7 @@ mod tests {
             msg_rate_max: 0,
             max_connections_per_player: 0,
             max_connections_per_ip: 0,
+            max_connections: 0,
             outbound_queue_capacity: DEFAULT_OUTBOUND_QUEUE_CAPACITY,
             ticket_secret: "test-secret".to_string(),
             redis_url: "redis://127.0.0.1:6379".to_string(),

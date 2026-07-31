@@ -50,6 +50,8 @@
 - `CADDY_CHAT_HOST` 独立站点只接受 `GET /` 的合法 WebSocket Upgrade。其它 HTTP 方法、普通 HTTP、错误路径或缺少 Upgrade 的请求固定返回 `426`，不得进入 `chat-server:9011`。
 - Caddy 直接从公网接入时使用直连 peer 生成 `X-Forwarded-For`，并覆盖 `X-Request-ID`、设置 `X-Real-IP` 后才转发。`chat-server` 只在 TCP peer 属于生产 internal 子网 `172.30.0.0/24` 时解析代理头，不信任公网客户端自报地址。
 - Caddy 握手入口使用 `5s` header 读取超时、`16KB` header 上限和 `2m` HTTP keep-alive 空闲超时；到上游使用 `3s` 建连、`5s` 响应头超时。升级后的聊天连接仍由 `chat-server` 的 `HEARTBEAT_TIMEOUT_SECS=30` 限制应用层空闲时间。
+- Caddy 对聊天上游使用 Docker DNS 的 `dynamic a chat-server 9011` 与 `round_robin`：只在新 Upgrade 时选择实例，升级后的长连接固定到该实例，不使用跨请求 cookie。它不是跨实例聊天 push 的替代；目标玩家仍由 Redis online route 的 owner 和实例级 Core NATS subject 决定。
+- 当前正式 release topology 明确固定 `chat-server` 的 `deploy.replicas: 1` 和 `SERVICE_INSTANCE_ID=chat-server-1`。`server-apply-release.sh` 在更新前拒绝多于一个既有副本，并在启动 chat-server 后要求恰好一个副本；不得使用 `docker compose --scale chat-server` 覆盖此门禁，否则多个容器会拥有相同 instance ID。
 - 聊天站点访问日志删除完整 URI 及 Authorization、Cookie、Sec-WebSocket-Protocol 字段，只保留边缘生成的 request ID、固定路由分类和常规状态信息。ticket 只能位于首个 `ChatAuthReq` binary message，不能放入 URL、query、cookie、subprotocol 或握手头。
 - Compose 中 Caddy 同时连接 `edge` 和 `internal`，`chat-server` 只连接 `internal`；`9001/9011` 均不映射到宿主机。云安全组和主机防火墙对公网只开放 `80/TCP`、`443/TCP`、`4000/UDP`；`22/TCP` 只允许固定运维来源，所有 TCP fallback 和 `9001/9011` 必须拒绝公网入站。
 - Caddy reload、容器替换、证书维护或上游替换不承诺保持已有 WebSocket 连接。客户端必须按带随机抖动的指数退避重连，并在 ticket 失效时重新签票；这些操作只影响 Caddy `443/TCP` 的聊天连接，不改动或重启 `game-proxy` 的 `4000/UDP` KCP 链路。
@@ -96,7 +98,7 @@
 | `auth-http` | 单实例可运行；使用 Redis/PostgreSQL 处理 session、ticket、审计 | 多实例生产可用；HTTP 层可水平扩展，ticket/session 依赖共享 Redis/PostgreSQL | 网关层限流、统一配置、灰度和完整安全审计 |
 | `game-proxy` | 多 upstream 发现和切换基础能力；route store 默认内存态，可选 Redis 持久化 rollout session、room route、player route；admin HTTP 口已有 token 鉴权和基础输入校验；`complete-if-drained` 可选经 `auth-http` 校验旧服真实 drain status 后再结束 rollout | 多实例生产可用；route store 持久化，共享 room/player route，支持 sticky 或共享路由 | 多 proxy 一致性、admin RBAC/持久审计、L7 session relay、生产部署平台 stop hook 接入 |
 | `game-server` | 单实例稳定运行；已有 server id、注册中心接入、room runtime、drain 基础和受控 graceful shutdown 安全闸 | 多实例生产可用；room ownership 唯一、room route 可恢复、room transfer 可校验 | transfer payload 闭环、唯一 owner 仲裁、room route 持久化、故障恢复 |
-| `chat-server` | 独立服务；当前可作为内部聊天能力 | 原始 listener 内网化，正式客户端经专用 Caddy WSS 入口接入；多实例前维持单副本约束 | WebSocket 适配、会话路由、服务发现和横向扩展策略 |
+| `chat-server` | TCP/WSS 共用会话处理器；Redis owner-fenced online route + 实例级 Core NATS 在线 push；Caddy 仅均衡新 WSS 连接，release topology 受单副本门禁保护 | 原始 listener 内网化，正式客户端经专用 Caddy WSS 入口接入；多实例生产化需受控部署、唯一 instance ID 和故障验证 | 多副本编排、唯一实例身份签发、容量压测、故障/摘流演练和监控告警闭环 |
 | `match-service` | gRPC 匹配服务；可与 `game-server` 协作建房 | 内网多实例服务；匹配池状态可分片或共享，建房目标可路由 | 匹配池分片、跨实例一致性、目标 game-server 选择策略 |
 | `announce-service` | 独立 HTTP 服务；接入服务注册 | 内网多实例服务；公告读写经 API/BFF 或服务端入口收敛 | 缓存一致性、权限、对客户端暴露路径收敛 |
 | `mail-service` | 独立 HTTP 服务；通过 NATS 通知 `chat-server` | 内网多实例服务；邮件读写经 API/BFF 或服务端入口收敛 | 幂等投递、通知去重、客户端入口收敛 |

@@ -46,6 +46,7 @@ pub struct ChatPushRouter {
     instance_id: String,
     max_payload_bytes: usize,
     max_message_body_bytes: usize,
+    publish_queue_capacity: usize,
     outbound: mpsc::Sender<RoutedChatPush>,
 }
 
@@ -135,7 +136,13 @@ impl ChatPushRouter {
         config: &RuntimeConfig,
         publish_queue_capacity: usize,
     ) -> (Self, mpsc::Receiver<RoutedChatPush>) {
-        let (outbound, receiver) = mpsc::channel(publish_queue_capacity.max(1));
+        let publish_queue_capacity = publish_queue_capacity.max(1);
+        let (outbound, receiver) = mpsc::channel(publish_queue_capacity);
+        METRICS.set_extra("chat_push_publish_queue_depth", "0");
+        METRICS.set_extra(
+            "chat_push_publish_queue_capacity",
+            publish_queue_capacity.to_string(),
+        );
         (
             Self {
                 redis_url: config.redis_url.clone(),
@@ -143,6 +150,7 @@ impl ChatPushRouter {
                 instance_id: config.instance_id.clone(),
                 max_payload_bytes: config.max_payload_bytes,
                 max_message_body_bytes: config.max_message_body_bytes,
+                publish_queue_capacity,
                 outbound,
             },
             receiver,
@@ -237,32 +245,54 @@ impl ChatPushRouter {
     }
 
     fn try_queue_remote(&self, push: RoutedChatPush) -> RemoteQueueOutcome {
-        let payload_len = match serde_json::to_vec(&push) {
-            Ok(payload) => payload.len(),
-            Err(_) => return RemoteQueueOutcome::Rejected,
+        let outcome = match serde_json::to_vec(&push) {
+            Ok(payload)
+                if payload.len() <= self.max_payload_bytes
+                    && push.body.len() <= self.max_message_body_bytes.saturating_mul(2) =>
+            {
+                match self.outbound.try_send(push) {
+                    Ok(()) => RemoteQueueOutcome::Queued,
+                    Err(mpsc::error::TrySendError::Full(_)) => RemoteQueueOutcome::Full,
+                    Err(mpsc::error::TrySendError::Closed(_)) => RemoteQueueOutcome::Closed,
+                }
+            }
+            _ => RemoteQueueOutcome::Rejected,
         };
-        if payload_len > self.max_payload_bytes
-            || push.body.len() > self.max_message_body_bytes.saturating_mul(2)
-        {
-            return RemoteQueueOutcome::Rejected;
-        }
-        match self.outbound.try_send(push) {
-            Ok(()) => RemoteQueueOutcome::Queued,
-            Err(mpsc::error::TrySendError::Full(_)) => RemoteQueueOutcome::Full,
-            Err(mpsc::error::TrySendError::Closed(_)) => RemoteQueueOutcome::Closed,
-        }
+        self.report_publish_queue_depth();
+        outcome
     }
+
+    fn report_publish_queue_depth(&self) {
+        report_publish_queue_depth(self.publish_queue_capacity, self.outbound.capacity());
+    }
+}
+
+fn report_publish_queue_depth(publish_queue_capacity: usize, remaining: usize) {
+    METRICS.set_extra(
+        "chat_push_publish_queue_depth",
+        publish_queue_capacity.saturating_sub(remaining).to_string(),
+    );
+    METRICS.set_extra(
+        "chat_push_publish_queue_capacity",
+        publish_queue_capacity.to_string(),
+    );
 }
 
 pub async fn run(
     config: RuntimeConfig,
     sessions: ChatSessionMap,
     outbound: mpsc::Receiver<RoutedChatPush>,
+    publish_queue_capacity: usize,
     shutdown: watch::Receiver<bool>,
 ) {
     let publisher_config = config.clone();
     let publisher_shutdown = shutdown.clone();
-    let publisher = run_publisher(publisher_config, outbound, publisher_shutdown);
+    let publisher = run_publisher(
+        publisher_config,
+        outbound,
+        publish_queue_capacity.max(1),
+        publisher_shutdown,
+    );
     let subscriber = run_subscriber(config, sessions, shutdown);
     tokio::join!(publisher, subscriber);
 }
@@ -270,11 +300,13 @@ pub async fn run(
 async fn run_publisher(
     config: RuntimeConfig,
     mut outbound: mpsc::Receiver<RoutedChatPush>,
+    publish_queue_capacity: usize,
     mut shutdown: watch::Receiver<bool>,
 ) {
     let mut reconnect_delay = config.reconnect_base_delay;
     let mut client = None;
     while let Some(push) = next_outbound(&mut outbound, &mut shutdown).await {
+        report_publish_queue_depth(publish_queue_capacity, outbound.capacity());
         // Re-read Redis immediately before publishing so a queued event is not
         // sent to an instance that was replaced during a NATS reconnect.
         let target_route = match online_route::get_online_route(

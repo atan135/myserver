@@ -28,6 +28,53 @@ const UNKNOWN_MESSAGE_TYPE: &str = "UNKNOWN_MESSAGE_TYPE";
 const OUTBOUND_QUEUE_FULL: &str = "OUTBOUND_QUEUE_FULL";
 static NEXT_CONNECTION_TOKEN: AtomicU64 = AtomicU64::new(1);
 
+#[derive(Debug)]
+struct HandshakeRateWindow {
+    started_at: Instant,
+    admitted: u64,
+}
+
+/// A bounded, process-local admission gate for expensive HTTP upgrades. The
+/// Caddy edge still owns TLS, while this guard keeps one chat instance from
+/// accepting unlimited upgrade work during a reconnect storm.
+#[derive(Clone, Debug)]
+struct HandshakeRateLimiter {
+    window: Duration,
+    max_admitted: u64,
+    state: Arc<Mutex<HandshakeRateWindow>>,
+}
+
+impl HandshakeRateLimiter {
+    fn new(window: Duration, max_admitted: u64) -> Self {
+        Self {
+            window,
+            max_admitted,
+            state: Arc::new(Mutex::new(HandshakeRateWindow {
+                started_at: Instant::now(),
+                admitted: 0,
+            })),
+        }
+    }
+
+    fn try_admit(&self) -> bool {
+        if self.max_admitted == 0 {
+            return true;
+        }
+
+        let now = Instant::now();
+        let mut state = self.state.lock().expect("handshake rate mutex poisoned");
+        if now.duration_since(state.started_at) >= self.window {
+            state.started_at = now;
+            state.admitted = 0;
+        }
+        if state.admitted >= self.max_admitted {
+            return false;
+        }
+        state.admitted += 1;
+        true
+    }
+}
+
 fn new_connection_token(instance_id: &str) -> String {
     let sequence = NEXT_CONNECTION_TOKEN.fetch_add(1, Ordering::Relaxed);
     format!("{instance_id}:{}:{sequence}", std::process::id())
@@ -404,6 +451,8 @@ pub struct Config {
     pub ws_handshake_timeout_secs: u64,
     pub ws_handshake_max_bytes: usize,
     pub ws_max_pending_handshakes: usize,
+    pub ws_handshake_rate_window_secs: u64,
+    pub ws_handshake_rate_max: u64,
     pub ws_trusted_proxies: websocket::TrustedProxySet,
     pub ws_max_frame_len: usize,
     pub ws_bridge_capacity: usize,
@@ -413,6 +462,7 @@ pub struct Config {
     pub msg_rate_max: u64,
     pub max_connections_per_player: u64,
     pub max_connections_per_ip: u64,
+    pub max_connections: u64,
     pub ticket_secret: String,
     pub redis_url: String,
     pub redis_key_prefix: String,
@@ -473,6 +523,7 @@ pub async fn run(
 
     info!(
         addr = %config.bind_addr,
+        max_connections = config.max_connections,
         max_connections_per_player = config.max_connections_per_player,
         max_connections_per_ip = config.max_connections_per_ip,
         "chat server listening"
@@ -487,7 +538,22 @@ pub async fn run(
         config.max_connections_per_player,
         config.max_connections_per_ip,
     ));
+    let connection_slots = match usize::try_from(config.max_connections) {
+        Ok(0) => None,
+        Ok(max_connections) => Some(Arc::new(Semaphore::new(max_connections))),
+        Err(_) => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "CHAT_MAX_CONNECTIONS exceeds this platform's usize range",
+            )
+            .into());
+        }
+    };
     let ws_handshake_slots = Arc::new(Semaphore::new(config.ws_max_pending_handshakes));
+    let ws_handshake_rate = HandshakeRateLimiter::new(
+        Duration::from_secs(config.ws_handshake_rate_window_secs),
+        config.ws_handshake_rate_max,
+    );
     let readiness_task = service_registry::readiness::spawn_from_env("chat-server").await?;
 
     let mut lease_lost = false;
@@ -514,6 +580,24 @@ pub async fn run(
         };
         let (socket, peer_addr) = accepted?;
 
+        let connection_slot = match connection_slots.as_ref() {
+            Some(slots) => match Arc::clone(slots).try_acquire_owned() {
+                Ok(permit) => Some(permit),
+                Err(_) => {
+                    METRICS.record_connection_capacity_rejected();
+                    warn!(
+                        peer = %peer_addr.ip(),
+                        transport = transport.as_str(),
+                        error_category = "connection_capacity_exceeded",
+                        "chat connection rejected before protocol handling"
+                    );
+                    drop(socket);
+                    continue;
+                }
+            },
+            None => None,
+        };
+
         let chat_store = chat_store.clone();
         let chat_sessions = chat_sessions.clone();
         let chat_push_router = chat_push_router.clone();
@@ -523,6 +607,8 @@ pub async fn run(
         match transport {
             Transport::Tcp => {
                 tokio::spawn(async move {
+                    let _connection_capacity_permit = connection_slot;
+                    let _connection_capacity_metric = METRICS.track_connection_capacity();
                     let _connection_metric = METRICS.track_connection(MetricTransport::Tcp);
                     if let Err(e) = handle_connection(
                         socket,
@@ -548,6 +634,18 @@ pub async fn run(
                 });
             }
             Transport::WebSocket => {
+                if !ws_handshake_rate.try_admit() {
+                    METRICS.record_websocket_handshake_failure();
+                    METRICS.record_websocket_handshake_rate_limited();
+                    warn!(
+                        peer = %peer_addr.ip(),
+                        transport = Transport::WebSocket.as_str(),
+                        error_category = "handshake_rate_exceeded",
+                        "WebSocket handshake rejected before upgrade"
+                    );
+                    drop(socket);
+                    continue;
+                }
                 let handshake_permit = match Arc::clone(&ws_handshake_slots).try_acquire_owned() {
                     Ok(permit) => permit,
                     Err(_) => {
@@ -563,6 +661,8 @@ pub async fn run(
                     }
                 };
                 tokio::spawn(async move {
+                    let _connection_capacity_permit = connection_slot;
+                    let _connection_capacity_metric = METRICS.track_connection_capacity();
                     let adapter_config = AdapterConfig {
                         handshake_timeout: Duration::from_secs(config.ws_handshake_timeout_secs),
                         handshake_max_bytes: config.ws_handshake_max_bytes,
@@ -1301,6 +1401,15 @@ mod tests {
     use crate::ticket::hash_ticket;
     use std::net::{IpAddr, Ipv4Addr};
     use std::sync::Arc;
+
+    #[test]
+    fn websocket_handshake_rate_limiter_rejects_after_window_capacity() {
+        let limiter = HandshakeRateLimiter::new(Duration::from_secs(1), 2);
+
+        assert!(limiter.try_admit());
+        assert!(limiter.try_admit());
+        assert!(!limiter.try_admit());
+    }
 
     #[test]
     fn ticket_key_uses_prefix_and_sha256_hash() {
