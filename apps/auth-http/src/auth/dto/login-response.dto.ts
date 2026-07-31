@@ -18,7 +18,7 @@ export class LoginServicesDto {
   @ApiProperty({
     type: ClientServiceDto,
     nullable: true,
-    description: "Internal capability service endpoint. Production defaults to null unless explicitly exposed through registry discovery."
+    description: "Configured public WSS endpoint when deployed; otherwise null unless non-production internal discovery is explicitly enabled."
   })
   chat: ClientServiceDto | null;
 

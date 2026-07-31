@@ -95,6 +95,35 @@ function createDiscoveryRedis(instances) {
   }
 
   return {
+    async zrangebyscore(indexKey) {
+      const serviceName = indexKey.match(/service:([^:]+):instance-index$/)?.[1];
+      if (serviceName !== "game-server") {
+        return [];
+      }
+      const prefix = "service:game-server:instances:";
+      return [...hashes.keys()]
+        .filter((key) => key.startsWith(prefix) && key.endsWith(":data"))
+        .map((key) => key.slice(prefix.length, -":data".length));
+    },
+    pipeline() {
+      const operations = [];
+      return {
+        hget(key, field) {
+          operations.push(["hget", key, field]);
+          return this;
+        },
+        exists(key) {
+          operations.push(["exists", key]);
+          return this;
+        },
+        async exec() {
+          return operations.map(([operation, key, field]) => [
+            null,
+            operation === "hget" ? hashes.get(`${key}:${field}`) ?? null : keys.has(key) ? 1 : 0
+          ]);
+        }
+      };
+    },
     async scan(cursor, _match, pattern) {
       if (cursor !== "0") {
         return ["0", []];

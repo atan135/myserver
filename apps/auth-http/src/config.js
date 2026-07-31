@@ -74,6 +74,25 @@ function normalizeAdvertisedHost(host) {
     : host;
 }
 
+function parsePublicChatDescriptor() {
+  const configuredHost = process.env.AUTH_PUBLIC_CHAT_HOST;
+  if (configuredHost === undefined || configuredHost.trim() === "") {
+    return null;
+  }
+
+  if (configuredHost !== configuredHost.trim() || /[\s/:?#@\[\]\\]/.test(configuredHost)) {
+    throw new Error("Invalid auth-http public chat config: AUTH_PUBLIC_CHAT_HOST must be a hostname without a scheme, port, path, query, or fragment");
+  }
+
+  const portValue = process.env.AUTH_PUBLIC_CHAT_PORT || "443";
+  const port = Number.parseInt(portValue, 10);
+  if (!/^\d+$/.test(portValue) || !Number.isSafeInteger(port) || port < 1 || port > 65535) {
+    throw new Error("Invalid auth-http public chat config: AUTH_PUBLIC_CHAT_PORT must be an integer between 1 and 65535");
+  }
+
+  return { host: configuredHost, port, protocol: "wss" };
+}
+
 const DEFAULT_TICKET_SECRETS = new Set([
   "dev-only-change-this-ticket-secret",
   "replace-with-a-long-random-string",
@@ -391,6 +410,7 @@ export function getConfig() {
     authExposeInternalServiceEndpoints:
       !isProductionEnv() &&
       parseBoolean(process.env.AUTH_EXPOSE_INTERNAL_SERVICE_ENDPOINTS, false),
+    publicChatDescriptor: parsePublicChatDescriptor(),
     authRequireTls: parseBoolean(process.env.AUTH_REQUIRE_TLS, isProductionEnv()),
     trustProxy: parseBoolean(process.env.TRUST_PROXY, false),
     trustedProxies: parseCsv(process.env.TRUSTED_PROXIES),

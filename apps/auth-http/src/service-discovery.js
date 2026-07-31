@@ -52,7 +52,7 @@ export class ServiceDiscovery {
   async discoverClientServices() {
     const services = {
       game: createGameService(this.config),
-      chat: null,
+      chat: this.config.publicChatDescriptor || null,
       mail: null,
       announce: null
     };
@@ -88,7 +88,9 @@ export class ServiceDiscovery {
     const exposeInternalServiceEndpoints = this.config.authExposeInternalServiceEndpoints === true;
     const sideServiceDiscoveryTasks = exposeInternalServiceEndpoints
       ? [
-          this.discoverOneEndpoint("chat-server", "tcp", "client"),
+          this.config.publicChatDescriptor
+            ? Promise.resolve(null)
+            : this.discoverOneEndpoint("chat-server", "tcp", "client"),
           this.discoverOneEndpoint("mail-service", "http", "client"),
           this.discoverOneEndpoint("announce-service", "http", "client")
         ]
@@ -120,7 +122,9 @@ export class ServiceDiscovery {
       });
     }
 
-    services.chat = createEndpointDescriptor(chatEndpoint, "tcp");
+    if (!services.chat) {
+      services.chat = createEndpointDescriptor(chatEndpoint, "tcp");
+    }
     services.mail = createEndpointDescriptor(mailEndpoint, "http");
     services.announce = createEndpointDescriptor(announceEndpoint, "http");
     return services;

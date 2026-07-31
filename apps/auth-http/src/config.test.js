@@ -9,6 +9,8 @@ const CONFIG_ENV_KEYS = [
   "APP_ENV",
   "AUTH_REQUIRE_TLS",
   "AUTH_EXPOSE_INTERNAL_SERVICE_ENDPOINTS",
+  "AUTH_PUBLIC_CHAT_HOST",
+  "AUTH_PUBLIC_CHAT_PORT",
   "AUTH_REGISTER_REQUIRE_REVIEW",
   "DISCOVERY_REQUIRED",
   "DISALLOW_LEGACY_DIRECT_CONFIG",
@@ -182,6 +184,61 @@ test("auth-http rejects internal service endpoint exposure in production", async
   }, (config) => {
     assert.equal(config.authExposeInternalServiceEndpoints, false);
   });
+});
+
+test("auth-http builds a stable public WSS chat descriptor from deployment config", async () => {
+  await withEnv({
+    NODE_ENV: "production",
+    REGISTRY_ENABLED: "true",
+    TICKET_SECRET: "prod-ticket-secret-with-enough-entropy",
+    GAME_ADMIN_TOKEN: "prod-game-admin-token-with-enough-entropy",
+    INTERNAL_API_TOKEN: "prod-internal-api-token-with-enough-entropy",
+    AUTH_PUBLIC_CHAT_HOST: "chat.game.example",
+    AUTH_PUBLIC_CHAT_PORT: "443"
+  }, (config) => {
+    assert.deepEqual(config.publicChatDescriptor, {
+      host: "chat.game.example",
+      port: 443,
+      protocol: "wss"
+    });
+  });
+});
+
+test("auth-http leaves the public chat descriptor unset when deployment config is absent", async () => {
+  await withEnv({ NODE_ENV: "development" }, (config) => {
+    assert.equal(config.publicChatDescriptor, null);
+  });
+});
+
+test("auth-http leaves the public chat descriptor unset in production when deployment config is absent", async () => {
+  await withEnv({
+    NODE_ENV: "production",
+    REGISTRY_ENABLED: "true",
+    TICKET_SECRET: "prod-ticket-secret-with-enough-entropy",
+    GAME_ADMIN_TOKEN: "prod-game-admin-token-with-enough-entropy",
+    INTERNAL_API_TOKEN: "prod-internal-api-token-with-enough-entropy"
+  }, (config) => {
+    assert.equal(config.publicChatDescriptor, null);
+  });
+});
+
+test("auth-http rejects malformed public chat deployment config", async () => {
+  await assert.rejects(
+    () => withEnv({ AUTH_PUBLIC_CHAT_HOST: "wss://chat.game.example" }, () => {}),
+    /AUTH_PUBLIC_CHAT_HOST must be a hostname/
+  );
+  await assert.rejects(
+    () => withEnv({ AUTH_PUBLIC_CHAT_HOST: " chat.game.example" }, () => {}),
+    /AUTH_PUBLIC_CHAT_HOST must be a hostname/
+  );
+  await assert.rejects(
+    () => withEnv({ AUTH_PUBLIC_CHAT_HOST: "chat.game.example:443" }, () => {}),
+    /AUTH_PUBLIC_CHAT_HOST must be a hostname/
+  );
+  await assert.rejects(
+    () => withEnv({ AUTH_PUBLIC_CHAT_HOST: "chat.game.example", AUTH_PUBLIC_CHAT_PORT: "443oops" }, () => {}),
+    /AUTH_PUBLIC_CHAT_PORT must be an integer/
+  );
 });
 
 test("auth-http production discovery requirement cannot be disabled", async () => {

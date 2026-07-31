@@ -59,3 +59,22 @@ test("production operations contract keeps chat ports private and reconnect isol
   assert.match(operations, /公网业务入站只允许 `80\/TCP`、`443\/TCP` 和 `4000\/UDP`/);
   assert.match(operations, /`9001`、`9011`/);
 });
+
+test("release tooling requires and renders the Caddy chat host", async () => {
+  const [render, createBundle, upload, envExample, compose] = await Promise.all([
+    read("scripts/docker/render-release-env.mjs"),
+    read("scripts/docker/create-release-bundle.sh"),
+    read("scripts/docker/upload-release-bundle.sh"),
+    read("deploy/docker/compose.production.env.example"),
+    read("deploy/docker/compose.production.yml")
+  ]);
+
+  for (const source of [render, createBundle, upload]) {
+    assert.match(source, /caddy-chat-host/);
+  }
+  assert.match(render, /\["CADDY_CHAT_HOST", envValue\("caddy-chat-host"\)\]/);
+  assert.match(upload, /MYSERVER_CADDY_CHAT_HOST/);
+  assert.match(envExample, /^CADDY_CHAT_HOST=chat\.example\.com$/m);
+  assert.match(compose, /AUTH_PUBLIC_CHAT_HOST: \$\{CADDY_CHAT_HOST:\?set CADDY_CHAT_HOST\}/);
+  assert.match(compose, /AUTH_PUBLIC_CHAT_PORT: "443"/);
+});

@@ -4,6 +4,7 @@ const testFiles = [
   "src/config.test.js",
   "src/registry-client.test.js",
   "src/service-discovery.test.js",
+  "src/client-service-response.test.js",
   "src/game-admin-client.test.js",
   "src/internal/internal.controller.test.js",
   "src/characters/characters.service.test.js",

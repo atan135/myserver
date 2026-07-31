@@ -14,6 +14,7 @@ Required options (or matching environment variables):
   --identity <native-linux-key>     MYSERVER_SSH_IDENTITY
   --caddy-auth-host <domain>        MYSERVER_CADDY_AUTH_HOST
   --caddy-admin-host <domain>       MYSERVER_CADDY_ADMIN_HOST
+  --caddy-chat-host <domain>        MYSERVER_CADDY_CHAT_HOST
   --caddy-email <email>             MYSERVER_CADDY_EMAIL
   --game-proxy-host <host>          MYSERVER_GAME_PROXY_HOST
 
@@ -31,6 +32,7 @@ ssh_port="${MYSERVER_SSH_PORT:-22}"
 ssh_identity="${MYSERVER_SSH_IDENTITY:-}"
 caddy_auth_host="${MYSERVER_CADDY_AUTH_HOST:-}"
 caddy_admin_host="${MYSERVER_CADDY_ADMIN_HOST:-}"
+caddy_chat_host="${MYSERVER_CADDY_CHAT_HOST:-}"
 caddy_email="${MYSERVER_CADDY_EMAIL:-}"
 game_proxy_host="${MYSERVER_GAME_PROXY_HOST:-}"
 
@@ -43,6 +45,7 @@ while [[ $# -gt 0 ]]; do
     --identity) ssh_identity="${2:?--identity requires a value}"; shift 2 ;;
     --caddy-auth-host) caddy_auth_host="${2:?--caddy-auth-host requires a value}"; shift 2 ;;
     --caddy-admin-host) caddy_admin_host="${2:?--caddy-admin-host requires a value}"; shift 2 ;;
+    --caddy-chat-host) caddy_chat_host="${2:?--caddy-chat-host requires a value}"; shift 2 ;;
     --caddy-email) caddy_email="${2:?--caddy-email requires a value}"; shift 2 ;;
     --game-proxy-host) game_proxy_host="${2:?--game-proxy-host requires a value}"; shift 2 ;;
     --help|-h) usage; exit 0 ;;
@@ -50,7 +53,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-for value in "$release_id" "$ssh_host" "$ssh_identity" "$caddy_auth_host" "$caddy_admin_host" "$caddy_email" "$game_proxy_host"; do
+for value in "$release_id" "$ssh_host" "$ssh_identity" "$caddy_auth_host" "$caddy_admin_host" "$caddy_chat_host" "$caddy_email" "$game_proxy_host"; do
   [[ -n "$value" ]] || { usage >&2; exit 64; }
 done
 case "$root" in /mnt/*) echo "Run from a WSL-native checkout: $root" >&2; exit 65 ;; esac
@@ -109,6 +112,7 @@ git worktree add --detach "$worktree" "$lock_commit" >/dev/null
   --release-root "/data/myserver/release/$release_id" \
   --caddy-auth-host "$caddy_auth_host" \
   --caddy-admin-host "$caddy_admin_host" \
+  --caddy-chat-host "$caddy_chat_host" \
   --caddy-email "$caddy_email" \
   --game-proxy-advertised-host "$game_proxy_host"
 (

@@ -300,6 +300,8 @@ services:
       DISALLOW_LEGACY_DIRECT_CONFIG: "true"
       SERVICE_INSTANCE_ID: auth-http-1
       SERVICE_BUILD_VERSION: ${RELEASE_ID:?set RELEASE_ID}
+      AUTH_PUBLIC_CHAT_HOST: ${CADDY_CHAT_HOST:?set CADDY_CHAT_HOST}
+      AUTH_PUBLIC_CHAT_PORT: "443"
     depends_on:
       postgres:
         condition: service_healthy
