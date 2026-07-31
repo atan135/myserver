@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import net from "node:net";
+import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
@@ -12,6 +13,8 @@ import pg from "pg";
 
 import {
   createServiceInstancePayload,
+  heartbeatRegistryInstance,
+  registerRegistryInstance,
   registryHeartbeatKey,
   registryInstanceKey
 } from "../../packages/service-registry/node/registry-schema.js";
@@ -36,6 +39,12 @@ const chatServerBin = path.join(projectRoot, "target", "debug", `chat-server${ex
 const ticketSecret = "mail-acceptance-ticket-secret-2026";
 const mailServiceToken = "mail-acceptance-service-token-2026";
 const gameAdminToken = "mail-acceptance-game-admin-token-2026";
+const mailGrantAssertionKeyId = "mail-acceptance-v1";
+const mailGrantAssertionKeyPair = crypto.generateKeyPairSync("ed25519");
+const mailGrantAssertionPrivateKey = mailGrantAssertionKeyPair.privateKey.export({ type: "pkcs8", format: "pem" });
+const mailGrantAssertionPublicKeys = JSON.stringify({
+  [mailGrantAssertionKeyId]: mailGrantAssertionKeyPair.publicKey.export({ format: "jwk" }).x
+});
 const redisPrefix = `acceptance:mail:${randomId("run")}:`;
 const registryPrefix = `${redisPrefix}registry:`;
 const playerId = randomId("player");
@@ -74,6 +83,7 @@ let mailAProcess;
 let mailBProcess;
 let gameClient;
 let chatClient;
+let registryHeartbeatTimer;
 let workerIdCounter = 10;
 
 function nextWorkerId() {
@@ -133,7 +143,7 @@ function spawnManaged(name, command, args, { cwd = projectRoot, env = {} } = {})
 }
 
 async function stopManaged(processRef) {
-  if (!processRef?.child || processRef.child.exitCode !== null) return;
+  if (!processRef?.child || processRef.child.exitCode !== null || processRef.child.signalCode !== null) return;
   const exited = once(processRef.child, "close").catch(() => []);
   if (process.platform === "win32") {
     const killer = spawn("taskkill", ["/pid", String(processRef.child.pid), "/T", "/F"], { stdio: "ignore" });
@@ -248,6 +258,8 @@ function gameEnv(instanceId, gamePort, adminPort) {
     GAME_ADMIN_TOKEN: gameAdminToken,
     GAME_ADMIN_AUDIT_ENABLED: "false",
     GAME_ADMIN_AUDIT_REQUIRE_ACTOR: "true",
+    MAIL_GRANT_ASSERTION_ISSUER: "mail-service",
+    MAIL_GRANT_ASSERTION_PUBLIC_KEYS_JSON: mailGrantAssertionPublicKeys,
     REGISTRY_ENABLED: "false",
     DISCOVERY_REQUIRED: "false",
     DB_ENABLED: "true",
@@ -267,6 +279,14 @@ function gameEnv(instanceId, gamePort, adminPort) {
 }
 
 async function startGame(instanceId, gamePort, adminPort) {
+  // SIGKILL leaves Unix-domain socket paths behind. This drill restarts the
+  // same named instance, so remove only its own stale socket artifacts.
+  if (process.platform !== "win32") {
+    await Promise.all([
+      fs.promises.rm(path.join(os.tmpdir(), `${instanceId}.sock`), { force: true }),
+      fs.promises.rm(path.join(os.tmpdir(), `${instanceId}-internal.sock`), { force: true })
+    ]);
+  }
   const processRef = spawnManaged(instanceId, gameServerBin, [], {
     cwd: path.join(projectRoot, "apps", "game-server"),
     env: gameEnv(instanceId, gamePort, adminPort)
@@ -336,6 +356,9 @@ function mailEnv(instanceId, port, registryKeyPrefix = registryPrefix) {
     MAIL_SERVICE_TOKEN: mailServiceToken,
     GAME_ADMIN_TOKEN: gameAdminToken,
     GAME_ADMIN_ACTOR: instanceId,
+    MAIL_GRANT_ASSERTION_ISSUER: "mail-service",
+    MAIL_GRANT_ASSERTION_KEY_ID: mailGrantAssertionKeyId,
+    MAIL_GRANT_ASSERTION_PRIVATE_KEY: mailGrantAssertionPrivateKey,
     GAME_ADMIN_CONNECT_TIMEOUT_MS: "500",
     GAME_ADMIN_WRITE_TIMEOUT_MS: "500",
     GAME_ADMIN_READ_TIMEOUT_MS: "1000",
@@ -447,13 +470,39 @@ async function registerGameEndpoint(instanceId, gamePort, adminProxyPort) {
     metadata,
     weight: 100
   });
-  await redis.hset(registryInstanceKey(registryPrefix, "game-server", instanceId), "data", JSON.stringify(payload));
-  await redis.set(registryHeartbeatKey(registryPrefix, "game-server", instanceId), "1", "EX", 1800);
+  await registerRegistryInstance(redis, {
+    registryKeyPrefix: registryPrefix,
+    serviceName: "game-server",
+    instanceId,
+    data: payload
+  });
+}
+
+function stopGameRegistryHeartbeat() {
+  if (registryHeartbeatTimer) {
+    clearInterval(registryHeartbeatTimer);
+    registryHeartbeatTimer = null;
+  }
+}
+
+function startGameRegistryHeartbeat() {
+  stopGameRegistryHeartbeat();
+  registryHeartbeatTimer = setInterval(() => {
+    Promise.all([gameAId, gameBId].map((instanceId) =>
+      heartbeatRegistryInstance(redis, {
+        registryKeyPrefix: registryPrefix,
+        serviceName: "game-server",
+        instanceId
+      })
+    )).catch(() => {});
+  }, 5_000);
+  registryHeartbeatTimer.unref?.();
 }
 
 async function registerGames() {
   await registerGameEndpoint(gameAId, gameAPort, gameAProxyPort);
   await registerGameEndpoint(gameBId, gameBPort, gameBProxyPort);
+  startGameRegistryHeartbeat();
 }
 
 async function fetchJson(url, options = {}) {
@@ -533,6 +582,17 @@ async function grantCount(mailId) {
   return rows[0].count;
 }
 
+async function claimDiagnostic(mailId) {
+  const { rows } = await directDb.query(
+    `SELECT status, last_error_code, last_error_category, last_error_message,
+            last_result_state, game_instance_id, attempts
+       FROM mail_claim_workflows
+      WHERE mail_id = $1`,
+    [mailId]
+  );
+  return rows[0] || null;
+}
+
 async function itemCount(itemId) {
   const { rows } = await directDb.query("SELECT inventory_data FROM character_inventory WHERE character_id = $1", [characterId]);
   const slots = rows[0]?.inventory_data?.slots || [];
@@ -548,6 +608,7 @@ async function expectMailPush(mailId, timeoutMs = 8000) {
 }
 
 async function removeGameRegistry() {
+  stopGameRegistryHeartbeat();
   await redis.del(
     registryInstanceKey(registryPrefix, "game-server", gameAId),
     registryHeartbeatKey(registryPrefix, "game-server", gameAId),
@@ -622,6 +683,7 @@ before(async () => {
 });
 
 after(async () => {
+  stopGameRegistryHeartbeat();
   gameClient?.close();
   chatClient?.close();
   await Promise.allSettled([
@@ -656,7 +718,13 @@ test("mail reliability fault drill with real PostgreSQL, game-server and chat-se
     const push = await expectMailPush(mailId);
     assert.equal(push.title, "normal");
     const claim = await claimMail(mailAPort, mailId);
-    assert.equal(claim.response.status, 200, JSON.stringify(claim.payload));
+    assert.equal(
+      claim.response.status,
+      200,
+      claim.response.status === 200
+        ? undefined
+        : JSON.stringify({ payload: claim.payload, workflow: await claimDiagnostic(mailId) })
+    );
     const workflow = await waitForWorkflow(mailId);
     assert.equal(workflow.game_instance_id, gameAId);
     assert.equal(await grantCount(mailId), 1);
@@ -749,7 +817,10 @@ test("mail reliability fault drill with real PostgreSQL, game-server and chat-se
       return crashTriggered;
     }, { timeoutMs: 15000, intervalMs: 300, label: "mail crash fault trigger" });
     await waitFor(() => crashTriggered, { timeoutMs: 15000, label: "mail crash fault trigger" });
-    await waitFor(() => crashingProcess.child.exitCode !== null, { timeoutMs: 10000, label: "crashed mail process exit" });
+    await waitFor(
+      () => crashingProcess.child.exitCode !== null || crashingProcess.child.signalCode !== null,
+      { timeoutMs: 10000, label: "crashed mail process exit" }
+    );
     mailAProcess = null;
     try {
       await waitFor(() => grantCount(mailId).then((count) => count === 1), {
