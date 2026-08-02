@@ -94,8 +94,8 @@
 - [x] Caddy 增加独立 `CADDY_CHAT_HOST` site，只接受 WebSocket upgrade，不把普通 HTTP 请求转给聊天协议端口。（验证：`deploy/docker/caddy/Caddyfile:46` 定义独立 site，`:70` 匹配 `GET /` 与 Upgrade，`:94` 对其余请求返回 426；部署静态测试 4/4 通过）
 - [x] Caddy 将 WSS 转发到 `chat-server:9011`，保留客户端地址、请求 ID 和必要代理头。（验证：`deploy/docker/caddy/Caddyfile:79` 转发 internal listener，`:82` 覆盖边缘 request ID，`:83` 设置直连 peer，X-Forwarded-* 使用 Caddy 防伪默认行为）
 - [x] 配置合理的握手超时、空闲连接、header 大小和访问日志策略；禁止记录 ticket/query 凭证。（验证：`deploy/docker/caddy/Caddyfile:5`-`:8` 设置 header/idle 上限，`:60`-`:63` 删除完整 URI 与凭证头；`compose.production.yml:152` 设置 30 秒应用层心跳超时）
-- [x] Compose 只让 Caddy 与 chat-server 通过 internal network 通信，不增加 `9011:9011` 宿主机映射。（验证：`tests/deploy/chat-wss-edge-config.test.mjs:32` 静态断言 Caddy 为 edge+internal、chat-server 仅 internal，且全文件不存在 9001/9011 宿主映射）
-- [x] 云安全组与主机防火墙继续只公开 `80/TCP`、`443/TCP` 和 `4000/UDP`，明确拒绝 `9001/9011` 公网访问。（验证：2026-07-31 经 SSH 直接检查生产主机，9001/9011 无 listener，Docker 无对应 ports 映射，iptables/nft 无对应 NAT；UFW 默认拒绝入站，聊天玩家服务仅使用 80/443 TCP 与 4000 UDP，既有 SSH 管理入口作为独立运维例外）
+- [x] Compose 只让 Caddy 与 chat-server 通过 internal network 通信，不增加聊天原始 listener 的宿主机映射。（验证：[聊天边缘静态断言](../../../tests/deploy/chat-wss-edge-config.test.mjs) 证明 Caddy 为 edge+internal、chat-server 仅 internal，且 Compose 不暴露聊天原始 listener）
+- [x] 云安全组与主机防火墙继续只公开 `80/TCP`、`443/TCP` 和 `4000/UDP`，聊天原始 listener 不对公网开放。（验证：2026-07-31 经 SSH 直接检查生产主机，聊天 raw listener 无监听、Docker ports 映射或 NAT；UFW 默认拒绝入站，聊天玩家服务仅使用 80/443 TCP 与 4000 UDP，既有 SSH 管理入口作为独立运维例外）
 - [x] Caddy reload、容器替换和证书续期期间已有连接允许断开并由客户端退避重连，不影响游戏 KCP 连接。（验证：`docs/后台与运维/生产拓扑与Room迁移设计.md:55` 固化带抖动指数退避及与 4000/UDP KCP 隔离；`聊天与邮件系统设计.md:202` 同步客户端契约）
 - [x] 经用户确认 Docker/Caddy 依赖后，执行 Compose config 与 Caddy 配置校验并记录结果。（验证：WSL Docker Compose `config --no-env-resolution --quiet` 使用虚拟环境值通过；本地 Caddy `v2.10.2` 在 `--network none` 下对当前 Caddyfile 执行 `caddy validate` 返回 `Valid configuration`；未启动、reload 或替换容器）
 
@@ -107,7 +107,7 @@
 - 验证记录：主 agent 审核 auth、Compose、发布脚本、响应测试与文档 diff；`npm test --workspace auth-http` 88 passed、`node --test tests/deploy/chat-wss-edge-config.test.mjs` 5 passed、`node --test tests/registry/deployment-discovery-dry-run.test.mjs` 2 passed、Node/Bash 语法检查、临时 release env 渲染与 `git diff --check` 通过。`npm run check:deployment-discovery -- --fixture tests/fixtures/rollout-registry-discovery.json --environment production` 仍因该既有 rollout fixture 缺少 7 个非本阶段 endpoint 而失败，且该检查不覆盖 auth 的公网 WSS descriptor，已作为既有 fixture 覆盖缺口记录；未启动 Redis、PostgreSQL、NATS、Docker、Caddy 或真实服务。
 
 - [x] 发布 bundle 增加 `--caddy-chat-host` / `CADDY_CHAT_HOST`，同步 render、upload、示例环境和必填校验。（验证：`scripts/docker/create-release-bundle.sh:8`、`scripts/docker/upload-release-bundle.sh:17`、`scripts/docker/render-release-env.mjs:12` 均要求该参数，`:51` 渲染 `CADDY_CHAT_HOST`；临时 env 文件包含 `CADDY_CHAT_HOST=chat.example.com`）
-- [x] `auth-http` 增加受配置控制的公网聊天 descriptor，生产返回 `host=chat.game.zergzerg.cn`、`port=443`、`protocol=wss`。（验证：`apps/auth-http/src/config.js:77` 解析严格 host/port 并固定 `wss`，`compose.production.yml:303` 注入域名及 443；auth config 生产用例通过）
+- [x] `auth-http` 增加受配置控制的公网聊天 descriptor，生产返回稳定的 WSS 地址。（验证：[auth 配置](../../../apps/auth-http/src/config.js) 解析受限的公网 host 和 secure port，并固定 `wss`；[生产 Compose](../../../deploy/docker/compose.production.yml) 注入聊天域名；auth config 回归通过）
 - [x] 公网聊天 descriptor 来源必须是部署配置，不得从 `chat-server.ws` 内部 registry endpoint 推导或泄漏 Docker host。（验证：`apps/auth-http/src/service-discovery.js:55` 优先配置 descriptor，`:92` 有公网配置时跳过 `chat-server.tcp` 查询；覆盖 registry 内网 endpoint 的回归用例通过）
 - [x] 登录、角色选择/签票响应中的 `services.chat` 保持同一格式和地址；旧客户端忽略新增字段时不受影响。（验证：`apps/auth-http/src/client-service-response.test.js` 覆盖三种响应，均断言同一 `{host, port, protocol}` descriptor；既有 DTO 保持 nullable 字段）
 - [x] 未配置公网聊天地址时保持 `services.chat=null`，不得回退到生产内网 endpoint。（验证：`apps/auth-http/src/config.test.js` 覆盖本地和生产缺配置均为 `publicChatDescriptor=null`；`service-discovery.js:125` 仅在无公网 descriptor 时保留原有非生产内部发现路径）
