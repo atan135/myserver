@@ -59,7 +59,7 @@
                 respond @mail_x_http_method_override 404
                 @mail_x_method_override header X-Method-Override *
                 respond @mail_x_method_override 404
-                @mail_query_method_override query _method *
+                @mail_query_method_override query _method=*
                 respond @mail_query_method_override 404
 
                 # Classify the route before credentials. A system-send method
@@ -99,14 +99,12 @@
                 @mail_player_route expression `(method('GET') && path_regexp('^/api/v1/mails$')) || (method('GET') && path_regexp('^/api/v1/mails/[A-Za-z0-9:_-]{1,64}$')) || (method('PUT') && path_regexp('^/api/v1/mails/[A-Za-z0-9:_-]{1,64}/read$')) || (method('POST') && path_regexp('^/api/v1/mails/[A-Za-z0-9:_-]{1,64}/claim$'))`
                 handle @mail_player_route {
                     reverse_proxy mail-service:9003 {
-                        # Replace every public proxy/request-id claim at this
-                        # edge. mail-service must separately trust only Caddy's
-                        # internal CIDR before consuming these values.
-                        header_up -X-Forwarded-For
-                        header_up -X-Forwarded-Proto
-                        header_up -X-Forwarded-Host
-                        header_up -X-Real-IP
-                        header_up -X-Request-ID
+                        # Overwrite every public proxy/request-id claim at
+                        # this edge. Do not pair header_up deletion and set
+                        # operations for the same field: Caddy applies the
+                        # combined deletion after the set. mail-service must
+                        # separately trust only Caddy's internal CIDR before
+                        # consuming these values.
                         header_up X-Forwarded-For {http.request.remote.host}
                         header_up X-Forwarded-Proto https
                         header_up X-Forwarded-Host {http.request.host}

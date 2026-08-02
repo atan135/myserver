@@ -38,7 +38,7 @@ test("mail Caddy route rejects control-plane paths and request bypasses before p
   assert.match(site, /%2f\|%5c\|%2e/);
   assert.match(site, /@mail_x_http_method_override header X-HTTP-Method-Override \*/);
   assert.match(site, /@mail_x_method_override header X-Method-Override \*/);
-  assert.match(site, /@mail_query_method_override query _method \*/);
+  assert.match(site, /@mail_query_method_override query _method=\*/);
   assert.match(site, /@mail_transfer_encoding header Transfer-Encoding \*/);
   assert.match(site, /@mail_repeated_singletons expression/);
   assert.match(site, /@mail_conflicting_credentials expression/);
@@ -65,6 +65,9 @@ test("mail Caddy route bounds requests, rebuilds proxy headers, and avoids priva
   assert.match(site, /header_up X-Forwarded-Proto https/);
   assert.match(site, /header_up X-Real-IP \{http\.request\.remote\.host\}/);
   assert.match(site, /header_up X-Request-ID \{http\.request\.uuid\}/);
+  for (const header of ["X-Forwarded-For", "X-Forwarded-Proto", "X-Forwarded-Host", "X-Real-IP", "X-Request-ID"]) {
+    assert.doesNotMatch(site, new RegExp(`header_up -${header}`));
+  }
   assert.match(site, /header_down Cache-Control "private, no-store"/);
   assert.match(site, /handle_errors\s*\{[\s\S]*?respond @mail_upstream_error 503/);
 
