@@ -41,11 +41,18 @@ const TRANSPORT_ASSERTION = { testOnly: true };
 function createRedisWithGameServers(instances, routes = new Map()) {
   const instanceById = new Map(instances.map((instance) => [instance.id, instance]));
 
-  return {
-    async scan(cursor, _match, pattern) {
-      assert.equal(cursor, "0");
-      assert.equal(pattern, "service:game-server:instances:*");
-      return ["0", instances.map((instance) => `service:game-server:instances:${instance.id}`)];
+  const redis = {
+    async scan() {
+      throw new Error("legacy SCAN must not be used for service discovery");
+    },
+    async zrangebyscore(indexKey, minimum, maximum, limitKeyword, offset, limit) {
+      assert.equal(indexKey, "service:game-server:instance-index");
+      assert.equal(maximum, "+inf");
+      assert.equal(limitKeyword, "LIMIT");
+      assert.equal(offset, 0);
+      assert.ok(Number.isFinite(Number(minimum)));
+      assert.equal(limit, 64);
+      return [...instanceById.keys()].sort().slice(0, limit);
     },
     async exists(key) {
       const instanceId = key.split(":").at(-1);
@@ -60,8 +67,27 @@ function createRedisWithGameServers(instances, routes = new Map()) {
     async get(key) {
       const value = routes.get(key);
       return typeof value === "function" ? value() : value ?? null;
+    },
+    pipeline() {
+      const commands = [];
+      const pipeline = {
+        hget(key, field) {
+          commands.push(() => redis.hget(key, field));
+          return pipeline;
+        },
+        exists(key) {
+          commands.push(() => redis.exists(key));
+          return pipeline;
+        },
+        async exec() {
+          return Promise.all(commands.map(async (command) => [null, await command()]));
+        }
+      };
+      return pipeline;
     }
   };
+
+  return redis;
 }
 
 function onlineRoute(
@@ -745,13 +771,13 @@ test("GameAdminClient grantMailAttachments rejects missing authoritative online 
   }
 });
 
-test("GameAdminClient classifies registry scan failure as route unavailable", async () => {
-  let scanCalls = 0;
+test("GameAdminClient classifies registry index query failure as route unavailable", async () => {
+  let indexQueryCalls = 0;
   const redis = {
-    async scan() {
-      scanCalls += 1;
-      const error = new Error("registry scan failed");
-      error.code = "REDIS_SCAN_FAILED";
+    async zrangebyscore() {
+      indexQueryCalls += 1;
+      const error = new Error("registry index query failed");
+      error.code = "REDIS_INDEX_QUERY_FAILED";
       throw error;
     }
   };
@@ -769,7 +795,7 @@ test("GameAdminClient classifies registry scan failure as route unavailable", as
       [{ itemId: 1001, count: 1, binded: false }]
     ),
     (error) => {
-      assert.equal(error.code, "REDIS_SCAN_FAILED");
+      assert.equal(error.code, "REDIS_INDEX_QUERY_FAILED");
       assert.equal(error.errorCategory, "ROUTE_UNAVAILABLE");
       assert.equal(error.resultState, "not_applied");
       assert.equal(error.retryable, true);
@@ -778,7 +804,7 @@ test("GameAdminClient classifies registry scan failure as route unavailable", as
       return true;
     }
   );
-  assert.equal(scanCalls, 2);
+  assert.equal(indexQueryCalls, 2);
 });
 
 test("GameAdminClient routes a strict claim to the server-owned online instance", async () => {

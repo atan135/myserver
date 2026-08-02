@@ -2,7 +2,12 @@ import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import test from "node:test";
 
-import { verifyTicketSignature } from "./mail-auth.js";
+import {
+  MailPlayerAuthService,
+  ticketKey,
+  ticketVersionKey,
+  verifyTicketSignature
+} from "./mail-auth.js";
 
 const ticketSecret = "mail-ticket-secret-for-character-tests";
 
@@ -40,5 +45,51 @@ test("verifyTicketSignature rejects tickets missing characterId", () => {
   assert.throws(
     () => verifyTicketSignature(ticketSecret, ticket, Date.parse("2026-01-01T00:00:00.000Z")),
     { code: "INVALID_TICKET_PAYLOAD" }
+  );
+});
+
+test("MailPlayerAuthService rejects a signed ticket owned by another player", async () => {
+  const ticket = createTicket({
+    playerId: "player-1",
+    characterId: "chr_1",
+    ver: 3,
+    exp: "2099-01-01T00:00:00.000Z"
+  });
+  const redis = {
+    async get(key) {
+      if (key === ticketKey("", ticket)) return "player-attacker";
+      if (key === ticketVersionKey("", "player-1")) return "3";
+      return null;
+    }
+  };
+  const auth = new MailPlayerAuthService({ ticketSecret, redisKeyPrefix: "" }, redis);
+
+  await assert.rejects(() => auth.authenticateTicket(ticket), { code: "TICKET_REVOKED" });
+});
+
+test("MailPlayerAuthService requires an unmodified ticket with the active version", async () => {
+  const ticket = createTicket({
+    playerId: "player-1",
+    characterId: "chr_1",
+    ver: 3,
+    exp: "2099-01-01T00:00:00.000Z"
+  });
+  const redis = {
+    async get(key) {
+      if (key === ticketKey("", ticket)) return "player-1";
+      if (key === ticketVersionKey("", "player-1")) return "3";
+      return null;
+    }
+  };
+  const auth = new MailPlayerAuthService({ ticketSecret, redisKeyPrefix: "" }, redis);
+
+  assert.deepEqual(await auth.authenticateTicket(ticket), {
+    playerId: "player-1",
+    characterId: "chr_1",
+    ticketVersion: 3
+  });
+  await assert.rejects(
+    () => auth.authenticateTicket(`${ticket}tampered`),
+    { code: "INVALID_TICKET_SIGNATURE" }
   );
 });
