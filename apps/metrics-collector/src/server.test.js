@@ -21,7 +21,7 @@ function metricsMessage(payload) {
 class MemoryRedisScriptFixture {
   constructor() {
     this.calls = [];
-    this.result = ["ok", "1"];
+    this.result = null;
   }
 
   async eval(script, keyCount, ...arguments_) {
@@ -31,7 +31,8 @@ class MemoryRedisScriptFixture {
       keys: arguments_.slice(0, keyCount),
       argv: arguments_.slice(keyCount)
     });
-    return this.result;
+    const argv = arguments_.slice(keyCount);
+    return this.result ?? ["ok", "1", argv[14]];
   }
 }
 
@@ -83,7 +84,7 @@ test("metrics v2 write passes bounded keys and a complete record to one Lua scri
     })
   );
 
-  assert.deepEqual(result, { schemaVersion: 2, latestUpdated: true });
+  assert.deepEqual(result, { schemaVersion: 2, latestUpdated: true, legacyWritten: false });
   assert.equal(redis.calls.length, 1);
   const [call] = redis.calls;
   assert.equal(call.script, METRICS_V2_WRITE_LUA);
@@ -115,13 +116,38 @@ test("metrics v2 write passes bounded keys and a complete record to one Lua scri
   assert.equal(call.argv[11], "900");
   assert.equal(call.argv[12], String(NOW));
   assert.equal(call.argv[13], "16384");
-  assert.equal(call.argv[14], "604800");
-  assert.equal(call.argv[15], "30");
+  assert.equal(call.argv[14], "0");
+  assert.equal(call.argv[15], "604800");
+  assert.equal(call.argv[16], "30");
+});
+
+test("metrics v2 writes legacy keys only during an explicitly enabled compatibility window", async () => {
+  const redis = new MemoryRedisScriptFixture();
+  const before = getMetricsStorageCounters();
+  const bucket = NOW - 5;
+
+  const result = await writeMetrics(
+    redis,
+    storageConfig({ metricsLegacyWriteEnabled: true }),
+    metricsMessage({
+      service: "game-server",
+      instance_id: "gs-1",
+      bucket,
+      timestamp: bucket + 2,
+      metrics: { qps: 5 }
+    })
+  );
+
+  assert.deepEqual(result, { schemaVersion: 2, latestUpdated: true, legacyWritten: true });
+  assert.equal(redis.calls[0].argv[14], "1");
+  const after = getMetricsStorageCounters();
+  assert.equal(after.metrics_legacy_write_enabled, 1);
+  assert.equal(after.metrics_legacy_writes_total, before.metrics_legacy_writes_total + 1);
 });
 
 test("metrics v2 maps an out-of-order Lua result without replacing the latest snapshot", async () => {
   const redis = new MemoryRedisScriptFixture();
-  redis.result = ["ok", "0"];
+  redis.result = ["ok", "0", "0"];
 
   const result = await writeMetrics(
     redis,
@@ -135,7 +161,7 @@ test("metrics v2 maps an out-of-order Lua result without replacing the latest sn
     })
   );
 
-  assert.deepEqual(result, { schemaVersion: 2, latestUpdated: false });
+  assert.deepEqual(result, { schemaVersion: 2, latestUpdated: false, legacyWritten: false });
 });
 
 test("metrics collector rejects invalid, future and oversized payloads before Redis", async () => {
@@ -229,4 +255,10 @@ test("metrics storage configuration rejects a non-v2 schema or undersized histor
       assert.throws(() => getConfig(), /METRICS_HISTORY_INDEX_MAX_MEMBERS/);
     }
   );
+  await withEnv({ METRICS_LEGACY_WRITE_ENABLED: undefined }, async () => {
+    assert.equal(getConfig().metricsLegacyWriteEnabled, false);
+  });
+  await withEnv({ METRICS_LEGACY_WRITE_ENABLED: "yes" }, async () => {
+    assert.throws(() => getConfig(), /METRICS_LEGACY_WRITE_ENABLED/);
+  });
 });

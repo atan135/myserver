@@ -16,6 +16,13 @@ function parseBoolean(value, fallback) {
   return value === "true" || value === "1";
 }
 
+function parseStrictBoolean(name, value, fallback) {
+  if (value === undefined) return fallback;
+  if (value === "true" || value === "1") return true;
+  if (value === "false" || value === "0") return false;
+  throw new Error(`${name} must be one of true, false, 1 or 0`);
+}
+
 function parseInteger(name, rawValue, { minimum, maximum = Number.MAX_SAFE_INTEGER }) {
   const value = Number(rawValue);
   if (!Number.isSafeInteger(value) || value < minimum || value > maximum) {
@@ -72,6 +79,11 @@ export function getConfig() {
     process.env.METRICS_STORAGE_SCHEMA_VERSION || "2",
     { minimum: 2, maximum: 2 }
   );
+  const metricsLegacyWriteEnabled = parseStrictBoolean(
+    "METRICS_LEGACY_WRITE_ENABLED",
+    process.env.METRICS_LEGACY_WRITE_ENABLED,
+    false
+  );
   const metricsTtlSeconds = parseInteger(
     "METRICS_TTL_SECONDS",
     process.env.METRICS_TTL_SECONDS || "604800",
@@ -102,7 +114,7 @@ export function getConfig() {
     natsUrl: process.env.NATS_URL || "nats://127.0.0.1:4222",
     redisUrl: process.env.REDIS_URL || "redis://127.0.0.1:6379",
     metricsSubject: process.env.METRICS_SUBJECT || "myserver.metrics.>",
-    // Retained until the admin-api reader has completed its v2 cutover.
+    metricsLegacyWriteEnabled,
     metricsTtlSeconds,
     heartbeatTtlSeconds,
     metricsStorageSchemaVersion,

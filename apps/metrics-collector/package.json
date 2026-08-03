@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "node --watch src/server.js",
     "start": "node src/server.js",
-    "test": "node --test src/server.test.js ../../tests/ops/metrics-multi-instance.test.mjs"
+    "test": "node --test src/server.test.js ../../tests/ops/metrics-multi-instance.test.mjs ../../tests/ops/metrics-legacy-cleanup.test.mjs ../../tests/ops/metrics-collector-redis.test.mjs"
   },
   "dependencies": {
     "dotenv": "^16.6.1",

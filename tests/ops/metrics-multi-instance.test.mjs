@@ -152,6 +152,7 @@ async function withEnv(overrides, callback) {
 test("metrics collector writes instance scoped key and stable fallback key", async () => {
   const redis = new FakeRedis();
   const config = {
+    metricsLegacyWriteEnabled: true,
     metricsTtlSeconds: 600,
     heartbeatTtlSeconds: 30
   };
@@ -472,34 +473,64 @@ test("admin instance metric point keeps unknown fields as per-instance extra", (
   });
 });
 
-test("archive aggregates same bucket legacy and instance keys before insert and deletes sources", async () => {
-  const redis = new FakeRedis();
-  redis.hashes.set("metrics:game-server:1700000000", {
-    qps: "3",
-    latency_ms: "30",
-    online_players: "4",
-    online_sessions: "5"
-  });
-  redis.hashes.set("metrics:game-server:gs-1:1700000000", {
-    qps: "5",
-    latency_ms: "15",
-    online_players: "10",
-    online_sessions: "12",
-    instance_id: "gs-1"
-  });
-  redis.hashes.set("metrics:game-server:gs-2:1700000000", {
-    qps: "7",
-    latency_ms: "9",
-    online_players: "20",
-    online_sessions: "21",
-    instance_id: "gs-2"
-  });
-  redis.hashes.set("metrics:game-server:gs-1:1700000010", {
-    qps: "99",
-    latency_ms: "1",
-    online_players: "99",
-    instance_id: "gs-1"
-  });
+test("archive aggregates a v2 history bucket before insert and deletes only indexed sources", async () => {
+  const bucket = 1700000000;
+  const historyKey = `metrics:v2:history:game-server:${bucket}`;
+  const indexKey = "metrics:v2:history-index:game-server";
+  const history = {
+    "gs-1": JSON.stringify({
+      _schema: "metrics-v2",
+      _service: "game-server",
+      _instance_id: "gs-1",
+      _bucket: String(bucket),
+      qps: "5",
+      latency_ms: "15",
+      online_players: "10",
+      instance_id: "gs-1"
+    }),
+    "gs-2": JSON.stringify({
+      _schema: "metrics-v2",
+      _service: "game-server",
+      _instance_id: "gs-2",
+      _bucket: String(bucket),
+      qps: "7",
+      latency_ms: "9",
+      online_players: "20",
+      instance_id: "gs-2"
+    })
+  };
+  let sourcePresent = true;
+  let indexPresent = true;
+  const redis = {
+    async zrangebyscore(key) {
+      assert.equal(key, indexKey);
+      return indexPresent ? [String(bucket)] : [];
+    },
+    pipeline() {
+      const commands = [];
+      const pipeline = {
+        hgetall(key) { commands.push(["hgetall", key]); return pipeline; },
+        unlink(key) { commands.push(["unlink", key]); return pipeline; },
+        zrem(key, member) { commands.push(["zrem", key, member]); return pipeline; },
+        async exec() {
+          return commands.map(([command, key, member]) => {
+            if (command === "hgetall") return [null, key === historyKey && sourcePresent ? history : {}];
+            if (command === "unlink") {
+              assert.equal(key, historyKey);
+              sourcePresent = false;
+              return [null, 1];
+            }
+            assert.equal(command, "zrem");
+            assert.equal(key, indexKey);
+            assert.equal(member, String(bucket));
+            indexPresent = false;
+            return [null, 1];
+          });
+        }
+      };
+      return pipeline;
+    }
+  };
 
   const inserts = [];
   const dbPool = {
@@ -516,21 +547,19 @@ test("archive aggregates same bucket legacy and instance keys before insert and 
     1700000005
   );
 
-  assert.equal(archived, 1);
+  assert.deepEqual(archived, { archived: 1, failed: 0 });
   assert.equal(inserts.length, 1);
   assert.deepEqual(inserts[0].params.slice(0, 5), [
     "game-server",
     1700000000,
+    12,
     15,
-    30,
-    34
+    30
   ]);
   assert.deepEqual(JSON.parse(inserts[0].params[5]), {
     instance_ids: "gs-1,gs-2",
     instance_count: "2"
   });
-  assert.equal(redis.hashes.has("metrics:game-server:1700000000"), false);
-  assert.equal(redis.hashes.has("metrics:game-server:gs-1:1700000000"), false);
-  assert.equal(redis.hashes.has("metrics:game-server:gs-2:1700000000"), false);
-  assert.equal(redis.hashes.has("metrics:game-server:gs-1:1700000010"), true);
+  assert.equal(sourcePresent, false);
+  assert.equal(indexPresent, false);
 });

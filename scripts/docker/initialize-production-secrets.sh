@@ -209,7 +209,8 @@ write_secret_file mail-service.env \
 write_secret_file metrics-collector.env \
   "REDIS_URL=$redis_url" \
   "REGISTRY_URL=$redis_url" \
-  "NATS_URL=$nats_url"
+  "NATS_URL=$nats_url" \
+  'METRICS_LEGACY_WRITE_ENABLED=false'
 
 write_secret_file game-server.env \
   "REDIS_URL=$redis_url" \

@@ -14,6 +14,7 @@ const IDENTIFIER_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 
 const DEFAULT_STORAGE_CONFIG = Object.freeze({
   metricsKeyPrefix: "",
+  metricsLegacyWriteEnabled: false,
   metricsTtlSeconds: 604800,
   heartbeatTtlSeconds: 30,
   metricsStorageSchemaVersion: 2,
@@ -27,11 +28,13 @@ const DEFAULT_STORAGE_CONFIG = Object.freeze({
 
 const storageCounters = {
   capacityRejected: 0,
+  legacyWrites: 0,
+  legacyWriteEnabled: 0,
   rejected: 0,
   writes: 0
 };
 
-// metrics-v2-write-v2. All v2 state transitions, including capacity checks,
+// metrics-v2-write-v3. All v2 state transitions, including capacity checks,
 // happen inside this one script so concurrent collector replicas cannot race.
 export const METRICS_V2_WRITE_LUA = `
 local function valid_identifier(value)
@@ -73,8 +76,10 @@ local max_instances = tonumber(ARGV[11])
 local history_index_max_members = tonumber(ARGV[12])
 local now = tonumber(ARGV[13])
 local max_record_bytes = tonumber(ARGV[14])
-local legacy_metrics_ttl = tonumber(ARGV[15])
-local legacy_heartbeat_ttl = tonumber(ARGV[16])
+local legacy_write_mode = ARGV[15]
+local legacy_metrics_ttl = tonumber(ARGV[16])
+local legacy_heartbeat_ttl = tonumber(ARGV[17])
+local legacy_write_enabled = legacy_write_mode == "1"
 
 if not valid_identifier(service) or not valid_identifier(instance) then
   return { "reject", "INVALID_IDENTIFIER" }
@@ -82,8 +87,14 @@ end
 if not bucket or bucket % 5 ~= 0 or not reported_at or not received_at or not now then
   return { "reject", "INVALID_TIMESTAMP" }
 end
-if not latest_ttl or not latest_index_ttl or not history_ttl or not max_instances or not history_index_max_members or not max_record_bytes or not legacy_metrics_ttl or not legacy_heartbeat_ttl then
+if not latest_ttl or not latest_index_ttl or not history_ttl or not max_instances or not history_index_max_members or not max_record_bytes then
   return { "reject", "INVALID_CONFIGURATION" }
+end
+if legacy_write_mode ~= "0" and legacy_write_mode ~= "1" then
+  return { "reject", "INVALID_LEGACY_WRITE_MODE" }
+end
+if legacy_write_enabled and (not legacy_metrics_ttl or not legacy_heartbeat_ttl) then
+  return { "reject", "INVALID_LEGACY_CONFIGURATION" }
 end
 if reported_at > now + 30 or bucket > now + 30 then
   return { "reject", "FUTURE_TIMESTAMP" }
@@ -96,9 +107,16 @@ if string.len(record_json) > max_record_bytes then
 end
 
 local record_ok, record = pcall(cjson.decode, record_json)
-local legacy_ok, legacy_fields = pcall(cjson.decode, legacy_fields_json)
-if not record_ok or not legacy_ok or type(record) ~= "table" or type(legacy_fields) ~= "table" then
+if not record_ok or type(record) ~= "table" then
   return { "reject", "INVALID_RECORD" }
+end
+local legacy_fields = nil
+if legacy_write_enabled then
+  local legacy_ok
+  legacy_ok, legacy_fields = pcall(cjson.decode, legacy_fields_json)
+  if not legacy_ok or type(legacy_fields) ~= "table" then
+    return { "reject", "INVALID_LEGACY_RECORD" }
+  end
 end
 if record._schema ~= "metrics-v2" or record._service ~= service or record._instance_id ~= instance
   or tostring(record._bucket) ~= tostring(bucket) or tostring(record._reported_at) ~= tostring(reported_at)
@@ -126,12 +144,14 @@ if not redis.call("HGET", history_key, instance) and redis.call("HLEN", history_
   return { "reject", "HISTORY_INSTANCE_CAPACITY_EXCEEDED" }
 end
 
-if not write_hash(legacy_metrics_key, legacy_fields) then
-  return { "reject", "INVALID_LEGACY_FIELDS" }
+if legacy_write_enabled then
+  if not write_hash(legacy_metrics_key, legacy_fields) then
+    return { "reject", "INVALID_LEGACY_FIELDS" }
+  end
+  redis.call("EXPIRE", legacy_metrics_key, legacy_metrics_ttl)
+  redis.call("SET", legacy_heartbeat_key, tostring(reported_at), "EX", legacy_heartbeat_ttl)
+  redis.call("SET", legacy_instance_heartbeat_key, tostring(reported_at), "EX", legacy_heartbeat_ttl)
 end
-redis.call("EXPIRE", legacy_metrics_key, legacy_metrics_ttl)
-redis.call("SET", legacy_heartbeat_key, tostring(reported_at), "EX", legacy_heartbeat_ttl)
-redis.call("SET", legacy_instance_heartbeat_key, tostring(reported_at), "EX", legacy_heartbeat_ttl)
 
 if update_latest then
   redis.call("DEL", latest_key)
@@ -148,7 +168,7 @@ redis.call("EXPIRE", history_key, history_ttl)
 redis.call("ZADD", history_index_key, bucket, tostring(bucket))
 redis.call("EXPIRE", history_index_key, history_ttl)
 
-return { "ok", update_latest and "1" or "0" }
+return { "ok", update_latest and "1" or "0", legacy_write_enabled and "1" or "0" }
 `;
 
 function normalizeMetricFields(metrics) {
@@ -214,10 +234,13 @@ function resolveStorageConfig(config) {
   if (!Number.isSafeInteger(resolved.metricsMaxRecordBytes) || resolved.metricsMaxRecordBytes < 256) {
     throw new Error("invalid metrics record size limit");
   }
-  if (!Number.isSafeInteger(resolved.metricsTtlSeconds) || resolved.metricsTtlSeconds < 1) {
+  if (typeof resolved.metricsLegacyWriteEnabled !== "boolean") {
+    throw new Error("invalid legacy metrics write mode");
+  }
+  if (resolved.metricsLegacyWriteEnabled && (!Number.isSafeInteger(resolved.metricsTtlSeconds) || resolved.metricsTtlSeconds < 1)) {
     throw new Error("invalid legacy metrics TTL");
   }
-  if (!Number.isSafeInteger(resolved.heartbeatTtlSeconds) || resolved.heartbeatTtlSeconds < 1) {
+  if (resolved.metricsLegacyWriteEnabled && (!Number.isSafeInteger(resolved.heartbeatTtlSeconds) || resolved.heartbeatTtlSeconds < 1)) {
     throw new Error("invalid legacy metrics heartbeat TTL");
   }
   return {
@@ -258,6 +281,8 @@ export function getMetricsStorageCounters() {
     ...storageCounters,
     metrics_storage_schema_version: 2,
     metrics_capacity_rejected_total: storageCounters.capacityRejected,
+    metrics_legacy_write_enabled: storageCounters.legacyWriteEnabled,
+    metrics_legacy_writes_total: storageCounters.legacyWrites,
     metrics_storage_rejected_total: storageCounters.rejected
   };
 }
@@ -319,7 +344,8 @@ function buildMetricRecord(payload, config, now, { enforceV2Window = true } = {}
   };
 }
 
-function classifyWriteResult(result) {
+function classifyWriteResult(result, config) {
+  storageCounters.legacyWriteEnabled = config.metricsLegacyWriteEnabled ? 1 : 0;
   if (!Array.isArray(result) || result[0] !== "ok") {
     const code = Array.isArray(result) && typeof result[1] === "string"
       ? result[1]
@@ -331,8 +357,13 @@ function classifyWriteResult(result) {
     throw new Error(`metrics v2 write rejected: ${code}`);
   }
   storageCounters.writes += 1;
+  const legacyWritten = result[2] === "1";
+  if (legacyWritten) {
+    storageCounters.legacyWrites += 1;
+  }
   return {
-    latestUpdated: result[1] === "1"
+    latestUpdated: result[1] === "1",
+    legacyWritten
   };
 }
 
@@ -357,6 +388,9 @@ async function writeLegacyMetrics(redis, config, record) {
     config.heartbeatTtlSeconds
   );
   await pipe.exec();
+  storageCounters.legacyWriteEnabled = 1;
+  storageCounters.legacyWrites += 1;
+  storageCounters.writes += 1;
 }
 
 async function writeMetricsV2(redis, config, record, now) {
@@ -398,10 +432,11 @@ async function writeMetricsV2(redis, config, record, now) {
     String(config.metricsHistoryIndexMaxMembers),
     String(now),
     String(config.metricsMaxRecordBytes),
+    config.metricsLegacyWriteEnabled ? "1" : "0",
     String(config.metricsTtlSeconds),
     String(config.heartbeatTtlSeconds)
   );
-  return classifyWriteResult(result);
+  return classifyWriteResult(result, config);
 }
 
 export function isDirectRun(metaUrl = import.meta.url, argvPath = process.argv[1]) {
@@ -410,20 +445,24 @@ export function isDirectRun(metaUrl = import.meta.url, argvPath = process.argv[1
 
 export async function writeMetrics(redis, config, message) {
   const resolvedConfig = resolveStorageConfig(config);
+  storageCounters.legacyWriteEnabled = resolvedConfig.metricsLegacyWriteEnabled ? 1 : 0;
   const now = currentUnixSeconds(resolvedConfig);
   const raw = codec.decode(message.data);
   const supportsV2 = typeof redis.eval === "function";
   const record = buildMetricRecord(JSON.parse(raw), resolvedConfig, now, {
-    // Legacy-only in-memory adapters intentionally retain their previous
-    // long-history behaviour while the production ioredis path is always v2.
+    // Minimal migration adapters can write legacy only when compatibility is
+    // explicitly enabled. Production ioredis always uses the v2 Lua path.
     enforceV2Window: supportsV2
   });
 
   // The old test and migration adapters use a minimal pipeline-only fake. A
   // production ioredis client always has eval(), and therefore always v2-writes.
   if (!supportsV2) {
+    if (!resolvedConfig.metricsLegacyWriteEnabled) {
+      throw new Error("Redis adapter does not support metrics v2 while legacy writes are disabled");
+    }
     await writeLegacyMetrics(redis, resolvedConfig, record);
-    return { schemaVersion: 1, latestUpdated: true };
+    return { schemaVersion: 1, latestUpdated: true, legacyWritten: true };
   }
 
   const result = await writeMetricsV2(redis, resolvedConfig, record, now);
@@ -458,7 +497,7 @@ async function main() {
 
   const subscription = nats.subscribe(config.metricsSubject);
   console.log(
-    `metrics-collector subscribed to ${config.metricsSubject}, writing metrics-v${config.metricsStorageSchemaVersion} to Redis; metrics_storage_schema_version=${config.metricsStorageSchemaVersion}`
+    `metrics-collector subscribed to ${config.metricsSubject}, writing metrics-v${config.metricsStorageSchemaVersion} to Redis; metrics_storage_schema_version=${config.metricsStorageSchemaVersion}; metrics_legacy_write_enabled=${config.metricsLegacyWriteEnabled ? 1 : 0}`
   );
 
   let shuttingDown = false;
@@ -486,7 +525,11 @@ async function main() {
     } catch (error) {
       const counters = getMetricsStorageCounters();
       console.error(
-        `[metrics-collector] write failed: ${error.message}; metrics_capacity_rejected_total=${counters.metrics_capacity_rejected_total}`
+        `[metrics-collector] write failed: ${error.message}; ` +
+        `metrics_capacity_rejected_total=${counters.metrics_capacity_rejected_total}; ` +
+        `metrics_storage_rejected_total=${counters.metrics_storage_rejected_total}; ` +
+        `metrics_legacy_write_enabled=${counters.metrics_legacy_write_enabled}; ` +
+        `metrics_legacy_writes_total=${counters.metrics_legacy_writes_total}`
       );
     }
   }
