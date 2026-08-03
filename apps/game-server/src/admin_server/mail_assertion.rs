@@ -205,7 +205,7 @@ impl MailGrantAssertionVerifier {
         let now = unix_ms();
         let mut seen = self.seen.lock().map_err(|_| MailGrantAssertionError::Unauthenticated)?;
         seen.retain(|_, entry| entry.expires_at_ms > now);
-        if let Some(existing) = seen.get(&assertion.request_id) {
+        if let Some(existing) = seen.get(&assertion.operation_id) {
             return if existing.payload_sha256 == assertion.payload_sha256 {
                 Err(MailGrantAssertionError::Replay)
             } else {
@@ -216,7 +216,7 @@ impl MailGrantAssertionVerifier {
             return Err(MailGrantAssertionError::Conflict);
         }
         seen.insert(
-            assertion.request_id.clone(),
+            assertion.operation_id.clone(),
             ReplayEntry {
                 payload_sha256: assertion.payload_sha256.clone(),
                 expires_at_ms: assertion.expires_at_ms,
@@ -386,7 +386,7 @@ mod tests {
     }
 
     #[test]
-    fn reserves_grants_against_replay_and_conflicting_fingerprints() {
+    fn reserves_assertion_operations_while_allowing_a_fresh_retry_of_the_same_grant() {
         let fingerprint = format!("sha256:{}", "c".repeat(64));
         let payload = grant_payload("chr-1", &fingerprint, "mail-claim");
         let (verifier, signing_key, assertion) = fixture(&payload, &fingerprint);
@@ -397,6 +397,14 @@ mod tests {
             verifier.verify_grant(&assertion, &grant_packet, "game-server-1"),
             Err(MailGrantAssertionError::Replay)
         );
+
+        let mut retry_assertion = assertion.clone();
+        retry_assertion.operation_id = "mail-op-2".to_string();
+        retry_assertion.signature = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(signing_key.sign(canonical(&retry_assertion).as_bytes()).to_bytes());
+        verifier
+            .verify_grant(&retry_assertion, &grant_packet, "game-server-1")
+            .unwrap();
 
         let conflicting_fingerprint = format!("sha256:{}", "d".repeat(64));
         let conflicting_payload = grant_payload("chr-1", &conflicting_fingerprint, "mail-claim");
