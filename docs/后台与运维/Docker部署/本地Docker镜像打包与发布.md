@@ -198,16 +198,17 @@ release_tag="v$(node --input-type=module -e \"import pkg from './package.json' w
 | 服务 | 初始内存上限 |
 |---|---:|
 | PostgreSQL | 1536 MB |
-| Redis | 640 MB，`maxmemory` 为 512 MB |
+| Redis | 768 MB，`maxmemory` 保持 512 MB，额外 256 MB 留给 allocator、AOF 和运行时开销 |
 | NATS Core | 128 MB |
 | game-server | 768 MB |
 | game-proxy / match-service / chat-server | 各 256 MB |
 | auth-http / mail-service | 各 256 MB |
 | admin-api | 384 MB |
-| announce-service / metrics-collector | 各 128 MB |
+| announce-service | 256 MB |
+| metrics-collector | 128 MB |
 | Caddy（含 admin-web 静态文件） | 64 MB |
 
-容器上限合计约 5.1 GB，至少为宿主机、Docker、内核和突发保留 1.5 GB。CPU 限制需要以压测为准，首版不做 CPU pinning；`game-server`、PostgreSQL 和 Redis 的 CPU 不应被低优先级后台服务长期抢占。
+常驻容器上限合计约 5.3 GB，至少为宿主机、Docker、内核和突发保留 1.5 GB。Redis 与 announce-service 的 `memswap_limit` 等于 `mem_limit`，不允许用 swap 掩盖运行时内存压力；其他服务的 swap 契约仍需结合压测统一校准。CPU 限制需要以压测为准，首版不做 CPU pinning；`game-server`、PostgreSQL 和 Redis 的 CPU 不应被低优先级后台服务长期抢占。
 
 Node 服务的 `NODE_OPTIONS=--max-old-space-size=<MB>` 必须低于对应容器上限，为 native module、运行时、日志缓冲和网络连接留出空间。`game-server` 首次触及上限时，优先根据房间数与内存曲线调至 1 GB，再重新核对整机预算，不能无差别提高所有服务限制。
 

@@ -205,6 +205,8 @@ Redis 保持 `maxmemory-policy noeviction`，因此达到 `maxmemory` 后会拒�
 
 只提高 Docker `mem_limit` 不会改变 Redis `maxmemory`。若确需调整容量，必须同时核对两层限制、memory-swap、4C8G 宿主机总预算和回退值；禁止 `FLUSHDB`、无前缀删除、直接删除 `metrics:v2:*` 或在 legacy producer 仍写入时循环清理。
 
+当前生产校准值为 Redis `mem_limit=768m`、`memswap_limit=768m`，内部 `maxmemory=512mb` 与 `noeviction` 保持不变；多出的 256 MiB 只承载 allocator、AOF 和运行时开销，不能视为可写业务数据容量。`announce-service` 使用 `mem_limit=256m`、`memswap_limit=256m`。这两个服务不允许使用额外 swap；调整依据是 2026-08-03 故障恢复期间 Redis 640 MiB cgroup 上限事件和 announce-service 128 MiB cgroup 上限、约 56 MiB swap 的实测证据。回退前必须先确认 cgroup 峰值、`memory.events`、Redis `used_memory/maxmemory` 和宿主机可用内存均满足旧上限。
+
 ## 4. 日常镜像更新
 
 ### 4.1 更新前
