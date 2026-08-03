@@ -94,14 +94,14 @@ export const maintenanceApi = {
 };
 
 export const monitoringApi = {
-  getServices: () =>
-    api.get("/services", { baseURL: "/api/admin/monitoring" }),
-  getServiceMetrics: (name, window) =>
-    api.get(`/services/${name}/metrics`, { baseURL: "/api/admin/monitoring", params: { window } }),
-  getRolloutDrain: () =>
-    api.get("/rollout-drain", { baseURL: "/api/admin/monitoring" }),
-  getRegistry: () =>
-    api.get("/registry", { baseURL: "/api/admin/monitoring" }),
+  getServices: (config = {}) =>
+    api.get("/services", { ...config, baseURL: "/api/admin/monitoring" }),
+  getServiceMetrics: (name, window, config = {}) =>
+    api.get(`/services/${name}/metrics`, { ...config, baseURL: "/api/admin/monitoring", params: { ...config.params, window } }),
+  getRolloutDrain: (config = {}) =>
+    api.get("/rollout-drain", { ...config, baseURL: "/api/admin/monitoring" }),
+  getRegistry: (config = {}) =>
+    api.get("/registry", { ...config, baseURL: "/api/admin/monitoring" }),
   triggerArchive: () =>
     api.post("/archive", undefined, { baseURL: "/api/admin/monitoring" })
 };

@@ -8,7 +8,11 @@
             返回
           </el-button>
         </div>
-        <h2>{{ serviceName }} 监控详情</h2>
+        <div class="detail-heading">
+          <h2>{{ serviceName }} 监控详情</h2>
+          <el-tag :type="detailStatusType" size="small">{{ detailStatusText }}</el-tag>
+          <span class="detail-updated">最近成功 {{ formatUpdatedAt(detailState.lastSuccessAt) }}</span>
+        </div>
         <div class="window-selector">
           <el-radio-group v-model="currentWindow" size="small">
             <el-radio-button value="1m">1分钟</el-radio-button>
@@ -66,6 +70,7 @@ import { Back } from "@element-plus/icons-vue";
 import * as echarts from "echarts";
 import AdminLayout from "../../components/AdminLayout.vue";
 import { monitoringApi } from "../../api";
+import { createSerialPoller } from "../../utils/serial-poller";
 
 const route = useRoute();
 const router = useRouter();
@@ -78,12 +83,18 @@ const currentQps = ref(0);
 const currentLatency = ref(0);
 const currentOnline = ref(0);
 const currentSecondaryMetric = ref(0);
+const detailState = ref({
+  loading: false,
+  lastAttemptAt: null,
+  lastSuccessAt: null,
+  failedSources: 0
+});
 
 const qpsChartRef = ref(null);
 const latencyChartRef = ref(null);
 let qpsChart = null;
 let latencyChart = null;
-let pollTimer = null;
+let poller = null;
 
 const SERVICE_ONLINE_LABELS = {
   "auth-http": "唯一玩家",
@@ -105,39 +116,90 @@ const secondaryMetricLabel = computed(() => {
   return "";
 });
 const summarySpan = computed(() => secondaryMetricLabel.value ? 6 : 8);
+const detailStatusType = computed(() => {
+  if (detailState.value.failedSources > 0) return "warning";
+  if (detailState.value.loading) return "info";
+  if (!detailState.value.lastSuccessAt) return "info";
+  return detailState.value.lastAttemptAt - detailState.value.lastSuccessAt > 45_000 ? "warning" : "success";
+});
+const detailStatusText = computed(() => {
+  if (detailState.value.loading && !detailState.value.lastSuccessAt) return "加载中";
+  if (detailState.value.failedSources > 0) return `部分失败（${detailState.value.failedSources}）`;
+  if (!detailState.value.lastSuccessAt) return "等待数据";
+  if (detailState.value.lastAttemptAt - detailState.value.lastSuccessAt > 45_000) return "数据陈旧";
+  return detailState.value.loading ? "刷新中" : "数据正常";
+});
 
-async function fetchServiceInfo() {
+async function fetchServiceInfo(signal) {
   try {
-    const response = await monitoringApi.getServices();
+    const requestedService = serviceName.value;
+    const response = await monitoringApi.getServices({ signal });
     if (response.data.ok !== false) {
-      serviceInfo.value = response.data.services?.find((s) => s.name === serviceName.value);
+      if (requestedService !== serviceName.value) return false;
+      serviceInfo.value = response.data.services?.find((s) => s.name === requestedService);
       if (serviceInfo.value) {
         currentQps.value = serviceInfo.value.qps || 0;
         currentLatency.value = serviceInfo.value.latency_ms || 0;
         currentOnline.value = serviceInfo.value.online_value || 0;
         currentSecondaryMetric.value = serviceInfo.value.active_sessions_5m || 0;
       }
+      return true;
     }
+    return false;
   } catch (error) {
+    if (signal.aborted) return false;
     console.error("Failed to fetch service info:", error);
+    return false;
   }
 }
 
-async function fetchMetrics() {
+async function fetchMetrics(signal) {
   try {
-    const response = await monitoringApi.getServiceMetrics(serviceName.value, currentWindow.value);
+    const requestedService = serviceName.value;
+    const requestedWindow = currentWindow.value;
+    const response = await monitoringApi.getServiceMetrics(requestedService, requestedWindow, { signal });
     if (response.data.ok !== false) {
+      if (requestedService !== serviceName.value || requestedWindow !== currentWindow.value) return false;
       metricsPoints.value = response.data.points || [];
       updateCharts();
+      return true;
     }
+    return false;
   } catch (error) {
+    if (signal.aborted) return false;
     console.error("Failed to fetch metrics:", error);
+    return false;
+  }
+}
+
+async function fetchMonitoringDetail({ signal }) {
+  detailState.value.loading = true;
+  detailState.value.lastAttemptAt = Date.now();
+  try {
+    const results = await Promise.all([fetchServiceInfo(signal), fetchMetrics(signal)]);
+    if (signal.aborted) return false;
+    detailState.value.failedSources = results.filter((succeeded) => !succeeded).length;
+    if (detailState.value.failedSources === 0) {
+      detailState.value.lastSuccessAt = Date.now();
+    }
+    return detailState.value.failedSources === 0;
+  } finally {
+    if (!signal.aborted) detailState.value.loading = false;
   }
 }
 
 function formatTime(timestamp) {
   const date = new Date(timestamp * 1000);
   return `${date.getHours().toString().padStart(2, "0")}:${date.getMinutes().toString().padStart(2, "0")}:${date.getSeconds().toString().padStart(2, "0")}`;
+}
+
+function formatUpdatedAt(timestamp) {
+  if (!timestamp) return "--";
+  return new Date(timestamp).toLocaleTimeString("zh-CN", {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit"
+  });
 }
 
 function updateCharts() {
@@ -220,29 +282,25 @@ function goBack() {
   router.push("/monitoring");
 }
 
-watch(currentWindow, () => {
-  fetchMetrics();
+watch([serviceName, currentWindow], () => {
+  poller?.trigger();
 });
+
+function resizeCharts() {
+  qpsChart?.resize();
+  latencyChart?.resize();
+}
 
 onMounted(() => {
   initCharts();
-  fetchServiceInfo();
-  fetchMetrics();
-  pollTimer = setInterval(() => {
-    fetchServiceInfo();
-    fetchMetrics();
-  }, 5000);
-
-  window.addEventListener("resize", () => {
-    qpsChart?.resize();
-    latencyChart?.resize();
-  });
+  poller = createSerialPoller({ task: fetchMonitoringDetail });
+  poller.start();
+  window.addEventListener("resize", resizeCharts);
 });
 
 onUnmounted(() => {
-  if (pollTimer) {
-    clearInterval(pollTimer);
-  }
+  poller?.stop();
+  window.removeEventListener("resize", resizeCharts);
   destroyCharts();
 });
 </script>
@@ -258,6 +316,19 @@ onUnmounted(() => {
 .header h2 {
   margin: 0;
   font-size: 20px;
+}
+
+.detail-heading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.detail-updated {
+  color: #909399;
+  font-size: 13px;
 }
 
 .back-btn {

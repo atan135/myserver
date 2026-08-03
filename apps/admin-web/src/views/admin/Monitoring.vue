@@ -4,6 +4,8 @@
       <div class="header">
         <div class="header-left">
           <h2>服务监控</h2>
+          <el-tag :type="overviewStatusType" size="small">{{ overviewStatusText }}</el-tag>
+          <span class="overview-updated">最近成功 {{ formatTimestamp(monitorState.lastSuccessAt) }}</span>
           <el-button
             v-if="authStore.hasPermission(P.MONITORING_ARCHIVE)"
             type="primary"
@@ -297,6 +299,7 @@ import AdminLayout from "../../components/AdminLayout.vue";
 import { monitoringApi } from "../../api";
 import { useAuthStore } from "../../stores/auth";
 import { ADMIN_PERMISSIONS as P } from "../../auth/permissions";
+import { createSerialPoller } from "../../utils/serial-poller";
 
 const router = useRouter();
 const authStore = useAuthStore();
@@ -312,7 +315,13 @@ const registry = reactive({
   loading: false,
   data: null
 });
-let pollTimer = null;
+const monitorState = reactive({
+  loading: false,
+  lastAttemptAt: null,
+  lastSuccessAt: null,
+  failedSources: 0
+});
+let poller = null;
 
 const SERVICE_ONLINE_LABELS = {
   "auth-http": "唯一玩家",
@@ -372,6 +381,19 @@ const hasRolloutSamples = computed(() => {
 const registryServices = computed(() => registry.data?.services || []);
 const registryAlerts = computed(() => registry.data?.alerts || []);
 const visibleRegistryAlerts = computed(() => registryAlerts.value.slice(0, 5));
+const overviewStatusType = computed(() => {
+  if (monitorState.failedSources > 0) return "warning";
+  if (monitorState.loading) return "info";
+  if (!monitorState.lastSuccessAt) return "info";
+  return monitorState.lastAttemptAt - monitorState.lastSuccessAt > 45_000 ? "warning" : "success";
+});
+const overviewStatusText = computed(() => {
+  if (monitorState.loading && !monitorState.lastSuccessAt) return "加载中";
+  if (monitorState.failedSources > 0) return `部分失败（${monitorState.failedSources}）`;
+  if (!monitorState.lastSuccessAt) return "等待数据";
+  if (monitorState.lastAttemptAt - monitorState.lastSuccessAt > 45_000) return "数据陈旧";
+  return monitorState.loading ? "刷新中" : "数据正常";
+});
 
 const registryAlertType = computed(() => {
   if (registry.data?.alert_level === "critical") {
@@ -412,44 +434,53 @@ function rolloutInstanceTagType(instance) {
   return "info";
 }
 
-async function fetchServices() {
+async function fetchServices(signal) {
   try {
-    const response = await monitoringApi.getServices();
+    const response = await monitoringApi.getServices({ signal });
     if (response.data.ok !== false) {
       services.value = response.data.services || [];
+      return true;
     }
+    return false;
   } catch (error) {
+    if (signal.aborted) return false;
     console.error("Failed to fetch services:", error);
+    return false;
   }
 }
 
-async function fetchRolloutDrain() {
+async function fetchRolloutDrain(signal) {
   rolloutDrain.loading = !rolloutDrain.data;
   try {
-    const response = await monitoringApi.getRolloutDrain();
+    const response = await monitoringApi.getRolloutDrain({ signal });
     rolloutDrain.data = normalizeRolloutDrain(response.data);
     rolloutDrain.status = rolloutDrain.data.status;
+    return response.data?.ok !== false;
   } catch (error) {
+    if (signal.aborted) return false;
     console.error("Failed to fetch rollout drain:", error);
-    rolloutDrain.data = normalizeRolloutDrain({
-      ok: false,
-      updated_at: Date.now(),
-      status: "error",
-      alert_level: "critical",
-      alert_message: "控制面不可达",
-      error: error.response?.data?.error || "ADMIN_API_UNAVAILABLE",
-      message: error.response?.data?.message || error.message
-    });
+    if (!rolloutDrain.data) {
+      rolloutDrain.data = normalizeRolloutDrain({
+        ok: false,
+        updated_at: Date.now(),
+        status: "error",
+        alert_level: "critical",
+        alert_message: "控制面不可达",
+        error: error.response?.data?.error || "ADMIN_API_UNAVAILABLE",
+        message: error.response?.data?.message || error.message
+      });
+    }
     rolloutDrain.status = "error";
+    return false;
   } finally {
     rolloutDrain.loading = false;
   }
 }
 
-async function fetchRegistry() {
+async function fetchRegistry(signal) {
   registry.loading = !registry.data;
   try {
-    const response = await monitoringApi.getRegistry();
+    const response = await monitoringApi.getRegistry({ signal });
     registry.data = {
       checked_at: response.data?.checked_at || Date.now(),
       alert_level: response.data?.alert_level || "info",
@@ -457,24 +488,29 @@ async function fetchRegistry() {
       alerts: Array.isArray(response.data?.alerts) ? response.data.alerts : [],
       services: Array.isArray(response.data?.services) ? response.data.services : []
     };
+    return response.data?.ok !== false;
   } catch (error) {
+    if (signal.aborted) return false;
     console.error("Failed to fetch registry:", error);
-    registry.data = {
-      checked_at: Date.now(),
-      alert_level: "critical",
-      alert_message: "Registry 状态获取失败",
-      alerts: [
-        {
-          kind: "discovery_failure",
-          service: "admin-api",
-          endpoint: "registry",
-          instance_id: "",
-          severity: "critical",
-          message: error.response?.data?.message || error.message || "Registry 状态获取失败"
-        }
-      ],
-      services: []
-    };
+    if (!registry.data) {
+      registry.data = {
+        checked_at: Date.now(),
+        alert_level: "critical",
+        alert_message: "Registry 状态获取失败",
+        alerts: [
+          {
+            kind: "discovery_failure",
+            service: "admin-api",
+            endpoint: "registry",
+            instance_id: "",
+            severity: "critical",
+            message: error.response?.data?.message || error.message || "Registry 状态获取失败"
+          }
+        ],
+        services: []
+      };
+    }
+    return false;
   } finally {
     registry.loading = false;
   }
@@ -642,10 +678,24 @@ function lastRegisteredAt(service) {
   return values.length ? Math.max(...values) : null;
 }
 
-function fetchMonitoringOverview() {
-  fetchServices();
-  fetchRolloutDrain();
-  fetchRegistry();
+async function fetchMonitoringOverview({ signal }) {
+  monitorState.loading = true;
+  monitorState.lastAttemptAt = Date.now();
+  try {
+    const results = await Promise.all([
+      fetchServices(signal),
+      fetchRolloutDrain(signal),
+      fetchRegistry(signal)
+    ]);
+    if (signal.aborted) return false;
+    monitorState.failedSources = results.filter((succeeded) => !succeeded).length;
+    if (monitorState.failedSources === 0) {
+      monitorState.lastSuccessAt = Date.now();
+    }
+    return monitorState.failedSources === 0;
+  } finally {
+    if (!signal.aborted) monitorState.loading = false;
+  }
 }
 
 function goToDetail(serviceName) {
@@ -666,15 +716,12 @@ async function handleArchive() {
 }
 
 onMounted(() => {
-  fetchMonitoringOverview();
-  // Poll every 5 seconds
-  pollTimer = setInterval(fetchMonitoringOverview, 5000);
+  poller = createSerialPoller({ task: fetchMonitoringOverview });
+  poller.start();
 });
 
 onUnmounted(() => {
-  if (pollTimer) {
-    clearInterval(pollTimer);
-  }
+  poller?.stop();
 });
 </script>
 
@@ -687,6 +734,12 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   gap: 12px;
+  flex-wrap: wrap;
+}
+
+.overview-updated {
+  color: #909399;
+  font-size: 13px;
 }
 
 .header {
