@@ -149,6 +149,26 @@ Node.js 服务使用 `log4js`，Rust 异步服务使用 `tracing + tracing-subsc
 - 根 npm 脚本：`package.json`
 - 本地 PowerShell 辅助脚本：`scripts/`
 
+## Windows 与 WSL 工作区边界
+
+Windows 原生工作区 `H:\project\MyServer` 是本项目唯一的日常开发工作区和未提交改动事实源。
+
+- 所有代码、配置和文档修改均在 Windows 工作区完成。
+- 依赖安装、代码生成、格式化、静态检查、单元测试、集成测试、本地服务启动和客户端联调均在 Windows 下执行。
+- Git 源码提交原则上从 Windows 工作区创建。
+- 不得为了执行 Linux 命令而从 WSL 的 `/mnt/h/project/MyServer` 直接运行项目构建、测试或依赖安装。
+
+WSL 原生工作区（例如 `~/src/MyServer`）仅用于 Linux 发布和远端运维：
+
+- 通过 Git 同步并检出已经确认的 commit，不通过目录复制或 rsync 传递未提交源码。
+- 执行发布所需的 Linux 编译、Docker 构建、镜像推送、release manifest 生成及产物验证。
+- 允许通过 WSL 使用 SSH 等工具查看和调试远端服务器。
+- 不在 WSL 工作区进行功能开发、常规代码修改、本地功能测试或多服务联调。
+- WSL 构建或远端调试发现代码问题时，应返回 Windows 工作区修改并测试，然后重新提交和同步。
+- 对远端服务器默认只执行只读诊断；部署、重启、配置修改、数据库变更和数据修复必须由用户明确授权。
+
+正式发布前，必须确认 WSL 工作区为干净状态，且其 `HEAD` 与准备发布的 Windows Git commit 完全一致。正式推送生成的 `deploy/docker/images.lock.json` 是唯一允许在 WSL 工作区产生并提交的仓库文件；该发布产物提交并推送后，必须先将 Windows 工作区 fast-forward 到该提交，再继续后续开发。
+
 ## 本地 Docker 构建环境
 
 本机 Docker 构建统一使用迁移到 H 盘的 WSL Ubuntu 发行版内原生 `dockerd`，不使用也不依赖 Docker Desktop。项目应位于 WSL 原生文件系统中，例如 `~/src/MyServer`，不要从 `/mnt/c` 或 `/mnt/h` 挂载路径执行 Docker 构建，以避免文件系统性能和 Git 换行符问题。

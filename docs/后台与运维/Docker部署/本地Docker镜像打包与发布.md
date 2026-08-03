@@ -60,18 +60,22 @@ scripts/docker/
 
 ## 4. 本地构建前置条件
 
-构建机需要 Docker Desktop 或 Linux Docker Engine，且启用 Buildx。构建 Linux 服务器镜像时，目标平台固定为 `linux/amd64`。构建开始前必须满足：
+本机构建统一使用 WSL Ubuntu 内的原生 Linux Docker Engine，不使用也不依赖 Docker Desktop，并启用 Buildx。构建 Linux 服务器镜像时，目标平台固定为 `linux/amd64`。构建开始前必须满足：
 
 1. 工作树中的本次发布改动已审阅，构建输入与将要记录的 Git commit 一致。
 2. 根 `package-lock.json`、各 Rust `Cargo.lock` 和共享 proto 生成结果没有未确认变更。
-3. 已执行与改动范围相符的静态检查与单元测试。发布前至少应运行 `npm run check:proto` 和数据库静态准入 `npm run db:deploy -- validate --environment ci`；Rust/Node 定向检查按实际改动服务补充。
+3. 已在 Windows 原生工作区执行与改动范围相符的静态检查与单元测试。发布前至少应运行 `npm run check:proto` 和数据库静态准入 `npm run db:deploy -- validate --environment ci`；Rust/Node 定向检查按实际改动服务补充。
 4. 本机已通过受控方式登录私有镜像仓库。登录凭据只保留在 Docker credential store 或 CI secret，不写入项目 `.env`、发布清单或控制台日志。
 
 真实 Redis、PostgreSQL、NATS 或多服务联调不属于镜像构建的默认步骤。需要执行时，应先明确依赖、端口、测试数据和清理范围，再按项目协作约定取得确认。
 
 ### 4.1 WSL 原生构建工作区
 
-本机 Docker 构建统一在 WSL Linux 文件系统中的 `/home/dev/src/MyServer`，即 `~/src/MyServer` 执行。不要从 `/mnt/h/project/MyServer` 运行依赖安装、Rust 编译或 Docker build；该路径是 Windows 文件系统挂载，频繁小文件访问会显著降低 Node、Cargo 与 Docker build 性能。
+Windows 原生工作区 `H:\project\MyServer` 是唯一的日常开发工作区和未提交改动事实源。本机 Docker 构建统一在 WSL Linux 文件系统中的 `/home/dev/src/MyServer`，即 `~/src/MyServer` 执行；WSL 工作区只用于 Linux 发布，不用于功能开发、常规测试或本地多服务联调。
+
+发布源码只能通过 Git 从 Windows 工作区同步已经确认的 commit，然后在 WSL 检出该精确 commit。不得通过目录复制或 rsync 将 Windows 未提交文件传入 WSL，也不要从 `/mnt/h/project/MyServer` 运行依赖安装、Rust 编译、项目测试或 Docker build；该路径是 Windows 文件系统挂载，频繁小文件访问会显著降低 Node、Cargo 与 Docker build 性能，并可能造成 Git 换行符和构建输入不一致。
+
+正式发布前必须确认 WSL 工作树干净，且 `HEAD` 与准备发布的 Windows Git commit 完全一致。WSL 构建发现源码问题时，应停止发布并返回 Windows 工作区修改和测试，再提交新 commit 后重新同步；不得直接在 WSL 修复源码。
 
 当前已验证的 WSL 构建工具链为 Node.js 22、Rust stable、`protoc`、Docker Engine 和 Buildx。构建前检查：
 
@@ -101,7 +105,9 @@ npm_config_build_from_source=true npm ci
 
 `node_modules/`、`apps/admin-web/dist/` 和 Cargo target 仅是本地构建产物，不得提交 Git，也不得通过复制本机目录进入 Docker build context。
 
-### 4.2 本地编译与协议准入
+### 4.2 发布编译与 Linux 构建准入
+
+以下 Node 和 Rust 编译用于确认 Linux 发布输入及镜像构建链路，不替代已经在 Windows 完成的静态检查、单元测试、集成测试或本地联调。
 
 Node workspace 构建：
 
@@ -134,7 +140,7 @@ done
 
 当前 WSL 在受限网络下使用用户级 `~/.cargo/config.toml` 配置 crates.io 的 approved sparse mirror。该配置属于开发机环境，不进入仓库、镜像或 release bundle。若 Rustup 工具链出现 `Missing manifest`，先在用户目录重装 stable toolchain 并验证 `rustc -vV`，不要修改任何项目 `Cargo.lock`。
 
-发布前仍必须执行：
+发布前必须已在 Windows 原生工作区执行：
 
 ```bash
 npm run check:proto
@@ -180,6 +186,8 @@ release_tag="v$(node --input-type=module -e \"import pkg from './package.json' w
 ```
 
 该脚本的职责是构建 11 个应用镜像、生成 SBOM/provenance、推送、获取各镜像 digest、生成 schema v2 `images.lock.json`，最后运行 `verify-release.sh`。正式 `--push` 会拒绝脏工作区、未跟踪发布文件和不对应当前提交的 release tag；脚本失败时不得生成可被视为完整发布的 lock 文件。
+
+正式推送生成的 `deploy/docker/images.lock.json` 是唯一允许在 WSL 工作区产生并提交的仓库文件。该发布产物应使用独立 release 提交推送；完成后必须先将 Windows 工作区 fast-forward 到该提交，再继续开发，避免两个工作区分叉。
 
 仅验证本地镜像时省略 `--push`；脚本会将镜像加载到本地 Docker daemon，不生成发布 lock 文件。不得以手工标签集合进入生产。
 
