@@ -104,6 +104,10 @@ test("mail Caddy access logs remove request URI and credentials, and production 
   assert.match(site, /request>uri delete/);
   assert.match(authHttp, /AUTH_PUBLIC_MAIL_HOST: \$\{CADDY_AUTH_HOST:\?set CADDY_AUTH_HOST\}/);
   assert.match(authHttp, /AUTH_PUBLIC_MAIL_PORT: "443"/);
+  assert.match(mailService, /MAIL_PLAYER_AUTH_REQUIRED: "true"/);
+  assert.match(mailService, /MAIL_TRUST_PROXY: "true"/);
+  assert.match(mailService, /MAIL_TRUSTED_PROXY_CIDRS: 172\.30\.0\.0\/24/);
+  assert.match(mailService, /MAIL_PUBLIC_RATE_LIMIT_ENABLED: "true"/);
   assert.match(caddyService, /mail-service:\s*\n\s+condition: service_started/);
   assert.doesNotMatch(mailService, /\n\s+ports:/);
   assert.doesNotMatch(compose, /["']?9003:9003(?:\/tcp)?["']?/);

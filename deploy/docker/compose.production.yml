@@ -197,6 +197,10 @@ services:
       REGISTRY_ENABLED: "true"
       DISCOVERY_REQUIRED: "true"
       DISALLOW_LEGACY_DIRECT_CONFIG: "true"
+      MAIL_PLAYER_AUTH_REQUIRED: "true"
+      MAIL_TRUST_PROXY: "true"
+      MAIL_TRUSTED_PROXY_CIDRS: 172.30.0.0/24
+      MAIL_PUBLIC_RATE_LIMIT_ENABLED: "true"
       SERVICE_INSTANCE_ID: mail-service-1
       SERVICE_BUILD_VERSION: ${RELEASE_ID:?set RELEASE_ID}
     depends_on:
