@@ -129,7 +129,7 @@ docs/                 # 当前正式设计文档
 
 ## 基础设定
 
-本地二进制工具优先放在项目根目录 `bin/` 下，例如 `bin/nats-server.exe`。脚本和环境检查应优先使用该目录中的可执行文件；未找到时再回退到系统 `PATH` 或常见安装目录。
+项目内受控或便携的本地二进制工具放在项目根目录 `bin/` 下，但具体解析顺序以对应脚本和制品配置为准。Redis 和 NATS 的本地脚本优先查找 `bin/`，再按脚本约定回退到系统 `PATH` 或常见安装目录；数据库迁移只接受 `db/config/sqlx-cli.json` 登记并校验过的 `bin/sqlx.exe`，不得回退到 `PATH`；Rust、Protobuf 和 PostgreSQL 客户端使用已安装的用户工具链或系统 `PATH`。
 
 日志配置统一使用以下环境变量模型：
 
@@ -142,10 +142,12 @@ Node.js 服务使用 `log4js`，Rust 异步服务使用 `tracing + tracing-subsc
 
 常见配置来源：
 
-- 固定入口端口：`apps/port.txt`
+- 本地端口登记与同步来源：`apps/port.txt`；未登记端口以对应服务配置和代码为准
 - Node.js 服务示例配置：各服务 `.env.example`
 - Rust 服务示例配置：各服务 `.env.example` 或启动脚本
-- 数据库初始化：`db/init.sql`
+- 数据库配置与迁移：`db/config/`、`db/bootstrap/`、`db/migrations/`、`db/seeds/`
+- 本地数据库重置：`scripts/reset-dev-data.ps1`
+- 数据库历史兼容与 catalog 对照：`db/init.sql`，不作为新增 Schema 的入口
 - 根 npm 脚本：`package.json`
 - 本地 PowerShell 辅助脚本：`scripts/`
 
