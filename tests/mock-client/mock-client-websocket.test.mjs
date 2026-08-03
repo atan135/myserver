@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import { once } from "node:events";
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 
 import { WebSocketServer } from "ws";
@@ -12,6 +14,23 @@ import { decodePacketFrame, encodePacket } from "../../tools/mock-client/src/pac
 import { authenticateChatClient, connectToChatServer, resolveChatWebSocketUrl } from "../../tools/mock-client/src/scenarios/chat.js";
 import { WebSocketProtocolClient } from "../../tools/mock-client/src/websocket-client.js";
 import { encodeBoolField, encodeStringField } from "../../tools/mock-client/src/protocol.js";
+
+const MOCK_CLIENT_ENTRY = fileURLToPath(new URL("../../tools/mock-client/src/index.js", import.meta.url));
+
+async function runMockClient(args) {
+  const child = spawn(process.execPath, [MOCK_CLIENT_ENTRY, ...args], {
+    cwd: fileURLToPath(new URL("../../", import.meta.url)),
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+  let stdout = "";
+  let stderr = "";
+  child.stdout.setEncoding("utf8");
+  child.stderr.setEncoding("utf8");
+  child.stdout.on("data", (chunk) => { stdout += chunk; });
+  child.stderr.on("data", (chunk) => { stderr += chunk; });
+  const [code, signal] = await once(child, "exit");
+  return { code, signal, stdout, stderr };
+}
 
 async function createWebSocketFixture(onPacket) {
   const server = new WebSocketServer({ port: 0 });
@@ -148,6 +167,33 @@ test("WebSocket chat authenticates and carries private, group, history, and mail
     MESSAGE_TYPE.CHAT_HISTORY_REQ
   ]);
   assert.deepEqual(requests[0].body, encodeChatAuthReq("ticket"));
+});
+
+test("chat CLI scenarios do not open an unrelated game TCP connection", async (t) => {
+  const fixture = await createWebSocketFixture((socket, packet) => {
+    if (packet.messageType === MESSAGE_TYPE.CHAT_AUTH_REQ) {
+      socket.send(encodePacket(MESSAGE_TYPE.CHAT_AUTH_RES, packet.seq, chatAuthRes()));
+    } else if (packet.messageType === MESSAGE_TYPE.CHAT_PRIVATE_REQ) {
+      socket.send(encodePacket(MESSAGE_TYPE.CHAT_PRIVATE_RES, packet.seq, chatSendRes("msg-cli")));
+    }
+  });
+  t.after(() => fixture.close());
+
+  const result = await runMockClient([
+    "--scenario", "chat-private",
+    "--ticket", "payload.signature",
+    "--chat-transport", "ws",
+    "--chat-ws-url", fixture.url,
+    "--target-id", "plr_target",
+    "--host", "127.0.0.1",
+    "--port", "1",
+    "--timeout-ms", "1000"
+  ]);
+
+  assert.equal(result.signal, null);
+  assert.equal(result.code, 0, result.stderr || result.stdout);
+  assert.match(result.stdout, /scenario completed: chat-private/);
+  assert.doesNotMatch(result.stderr, /ECONNREFUSED/);
 });
 
 test("WebSocket client rejects malformed logical binary messages and text messages", async (t) => {

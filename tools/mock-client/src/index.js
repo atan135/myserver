@@ -101,6 +101,40 @@ import {
   runCharacterLimit
 } from "./scenarios/index.js";
 
+const CHAT_SCENARIOS = new Set([
+  SCENARIO.CHAT_PRIVATE,
+  SCENARIO.CHAT_GROUP,
+  SCENARIO.GROUP_CREATE,
+  SCENARIO.GROUP_LIST,
+  SCENARIO.CHAT_HISTORY,
+  SCENARIO.CHAT_TWO_CLIENT,
+  SCENARIO.CHAT_PRIVATE_TWO_CLIENT,
+  SCENARIO.CHAT_INTERACTIVE
+]);
+
+async function runChatScenario(options) {
+  switch (options.scenario) {
+    case SCENARIO.CHAT_PRIVATE:
+      return runChatPrivate(options);
+    case SCENARIO.CHAT_GROUP:
+      return runChatGroup(options);
+    case SCENARIO.GROUP_CREATE:
+      return runGroupCreate(options);
+    case SCENARIO.GROUP_LIST:
+      return runGroupList(options);
+    case SCENARIO.CHAT_HISTORY:
+      return runChatHistory(options);
+    case SCENARIO.CHAT_TWO_CLIENT:
+      return runChatTwoClient(options);
+    case SCENARIO.CHAT_PRIVATE_TWO_CLIENT:
+      return runChatPrivateTwoClient(options);
+    case SCENARIO.CHAT_INTERACTIVE:
+      return runChatInteractive(options);
+    default:
+      throw new Error(`unknown chat scenario: ${options.scenario}`);
+  }
+}
+
 async function main() {
   const options = parseArgs(process.argv.slice(2));
 
@@ -594,6 +628,12 @@ async function main() {
     return;
   }
 
+  if (CHAT_SCENARIOS.has(options.scenario)) {
+    await runChatScenario(options);
+    console.log(`scenario completed: ${options.scenario}`);
+    return;
+  }
+
   // Determine if login is needed
   const needsLogin = [
     SCENARIO.HAPPY,
@@ -645,31 +685,6 @@ async function main() {
         break;
       case SCENARIO.CREATE_MATCHED_ROOM_AND_JOIN:
         await runCreateMatchedRoomAndJoin(options);
-        break;
-      // Chat scenarios
-      case SCENARIO.CHAT_PRIVATE:
-        await runChatPrivate(options);
-        break;
-      case SCENARIO.CHAT_GROUP:
-        await runChatGroup(options);
-        break;
-      case SCENARIO.GROUP_CREATE:
-        await runGroupCreate(options);
-        break;
-      case SCENARIO.GROUP_LIST:
-        await runGroupList(options);
-        break;
-      case SCENARIO.CHAT_HISTORY:
-        await runChatHistory(options);
-        break;
-      case SCENARIO.CHAT_TWO_CLIENT:
-        await runChatTwoClient(options);
-        break;
-      case SCENARIO.CHAT_PRIVATE_TWO_CLIENT:
-        await runChatPrivateTwoClient(options);
-        break;
-      case SCENARIO.CHAT_INTERACTIVE:
-        await runChatInteractive(options);
         break;
       // Inventory scenarios
       case SCENARIO.INVENTORY_EQUIP:
