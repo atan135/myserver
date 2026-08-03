@@ -256,7 +256,11 @@ export function validateMailId(mailId) {
 function isPlainObject(value) {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
   const prototype = Object.getPrototypeOf(value);
-  return prototype === Object.prototype || prototype === null;
+  if (prototype === Object.prototype || prototype === null) return true;
+
+  // Fastify's query parser uses an empty null-prototype object as a shared
+  // prototype. Accept that safe container without accepting custom classes.
+  return Object.getPrototypeOf(prototype) === null && Reflect.ownKeys(prototype).length === 0;
 }
 
 export function validateEmptyPlayerMutationBody(body) {
@@ -273,7 +277,8 @@ export function validateListQuery(query) {
     if (!LIST_QUERY_KEYS.has(key) || key === "_method") throw publicBadRequest();
   }
 
-  const status = query.status === undefined ? undefined : String(query.status);
+  const status = query.status;
+  if (status !== undefined && typeof status !== "string") throw publicBadRequest();
   if (status !== undefined && !MAIL_STATUSES.has(status)) throw publicBadRequest();
 
   const parseBoundedInteger = (value, fallback, min, max) => {

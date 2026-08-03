@@ -73,6 +73,7 @@ test("public player request validation rejects client-controlled identity and ma
   });
   assert.throws(() => validateListQuery({ player_id: "player-attacker" }));
   assert.throws(() => validateListQuery({ limit: "51" }));
+  assert.throws(() => validateListQuery({ status: ["unread"] }));
   assert.throws(() => validateMailId("mail/attacker"));
   assert.throws(() => validateEmptyPlayerMutationBody({ target_instance_id: "game-2" }));
   assert.throws(() => validateEmptyPlayerMutationBody({ attachments: [] }));
@@ -101,6 +102,22 @@ test("public player request validation rejects client-controlled identity and ma
     "list",
     { mailTrustProxy: false }
   ));
+});
+
+test("public player query validation accepts Fastify null-prototype containers only", () => {
+  const nullPrototypeQuery = Object.assign(Object.create(null), { limit: "10", offset: "0" });
+  assert.deepEqual(validateListQuery(nullPrototypeQuery), { limit: 10, offset: 0 });
+
+  const fastifyQueryPrototype = Object.create(null);
+  const fastifyQuery = Object.assign(Object.create(fastifyQueryPrototype), {
+    status: "unread",
+    limit: "10",
+    offset: "0"
+  });
+  assert.deepEqual(validateListQuery(fastifyQuery), { status: "unread", limit: 10, offset: 0 });
+
+  const customPrototype = Object.assign(Object.create(null), { unsafe: true });
+  assert.throws(() => validateListQuery(Object.create(customPrototype)));
 });
 
 test("public player request trusts forwarded identity only from configured Caddy CIDRs", () => {
