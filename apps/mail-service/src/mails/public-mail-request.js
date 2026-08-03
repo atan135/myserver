@@ -8,7 +8,7 @@ const MAX_PUBLIC_HEADER_BYTES = 16 * 1024;
 const MAX_GAME_TICKET_BYTES = 4096;
 const MAX_PUBLIC_BODY_BYTES = 1024;
 const MAX_LOCALE_BYTES = 128;
-const LOCALE_PATTERN = /^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})?(?:\s*;\s*q=(?:0(?:\.\d{1,3})?|1(?:\.0{1,3})?))?(?:\s*,\s*[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})?(?:\s*;\s*q=(?:0(?:\.\d{1,3})?|1(?:\.0{1,3})?))?)*$/;
+const LOCALE_PATTERN = /^(?:\*|[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})?)(?:\s*;\s*q=(?:0(?:\.\d{1,3})?|1(?:\.0{1,3})?))?(?:\s*,\s*(?:\*|[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})?)(?:\s*;\s*q=(?:0(?:\.\d{1,3})?|1(?:\.0{1,3})?))?)*$/;
 const REQUEST_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const SINGLETON_HEADERS = new Set([
   "x-game-ticket",

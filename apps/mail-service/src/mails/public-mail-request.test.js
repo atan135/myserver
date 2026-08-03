@@ -83,6 +83,12 @@ test("public player request validation rejects client-controlled identity and ma
     "list",
     { mailTrustProxy: false }
   ));
+  assert.doesNotThrow(() => validatePublicPlayerHeaders(
+    { "accept-language": "*" },
+    { socket: { remoteAddress: "127.0.0.1" } },
+    "list",
+    { mailTrustProxy: false }
+  ));
   assert.throws(() => validatePublicPlayerHeaders(
     { "accept-language": "zh_CN" },
     { socket: { remoteAddress: "127.0.0.1" } },
