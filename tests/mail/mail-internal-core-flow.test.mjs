@@ -195,12 +195,17 @@ test("real auth character ticket drives the isolated internal mail core flow", {
     assert.ok(createdMail.mail_id);
 
     const playerHeaders = { "x-game-ticket": selection.ticket };
-    const list = assertResponse(await requestJson(mailServer.baseUrl, "/api/v1/mails", {
-      headers: playerHeaders
-    }), 200);
+    const list = assertResponse(await requestJson(
+      mailServer.baseUrl,
+      "/api/v1/mails?status=unread&limit=10&offset=0",
+      {
+        headers: playerHeaders
+      }
+    ), 200);
     assert.deepEqual(list.mails.map((mail) => mail.mail_id), [createdMail.mail_id]);
     assert.equal(list.unread_count, 1);
     assert.equal(list.mails[0].has_attachments, false);
+    assert.deepEqual(list.pagination, { limit: 10, offset: 0, next_offset: null });
 
     const detail = assertResponse(await requestJson(mailServer.baseUrl, `/api/v1/mails/${createdMail.mail_id}`, {
       headers: playerHeaders
@@ -221,6 +226,15 @@ test("real auth character ticket drives the isolated internal mail core flow", {
       headers: playerHeaders
     }), 200);
     assert.equal(readDetail.mail.status, "read");
+
+    const readList = assertResponse(await requestJson(
+      mailServer.baseUrl,
+      "/api/v1/mails?status=read&limit=1&offset=0",
+      { headers: playerHeaders }
+    ), 200);
+    assert.deepEqual(readList.mails.map((mail) => mail.mail_id), [createdMail.mail_id]);
+    assert.equal(readList.unread_count, 0);
+    assert.deepEqual(readList.pagination, { limit: 1, offset: 0, next_offset: 1 });
 
     const noAttachmentClaim = await requestJson(
       mailServer.baseUrl,

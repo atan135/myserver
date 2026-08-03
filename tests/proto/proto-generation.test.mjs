@@ -13,9 +13,11 @@ import {
 
 test("proto generator accepts exactly one explicit mode", () => {
   assert.equal(parseMode(["--check"]), "--check");
+  assert.equal(parseMode(["--check", "--server-only"]), "--check");
   assert.equal(parseMode(["--write"]), "--write");
   assert.throws(() => parseMode([]), /Usage:/);
   assert.throws(() => parseMode(["--check", "--write"]), /Usage:/);
+  assert.throws(() => parseMode(["--write", "--server-only"]), /Usage:/);
 });
 
 test("generated Rust comparison reports missing, stale, and changed files", () => {

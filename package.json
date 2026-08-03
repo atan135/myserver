@@ -51,6 +51,7 @@
     "check:discovery-config": "node tools/check-discovery-config.js",
     "check:deployment-discovery": "node tools/check-deployment-discovery-dry-run.js",
     "check:proto": "node tools/check-proto.js",
+    "check:proto:server": "node tools/proto-compatibility-baseline.js --check && node tools/proto-generate.js --check --server-only && node tools/check-proto-breaking-changes.js --check && node tools/check-protocol-routing-consistency.js && node tools/check-proto-compatibility-fixtures.js",
     "fmt:rust": "powershell -ExecutionPolicy Bypass -File scripts/rustfmt-non-generated.ps1",
     "global-id:decode": "node tools/global-id-decode.js",
     "db": "node tools/db.js",
@@ -67,6 +68,10 @@
     "test": "node tools/run-node-tests.js tests/**/*.test.mjs",
     "test:auth-http": "node tools/run-node-tests.js tests/auth/auth-http.test.mjs",
     "test:integration": "node tools/run-node-tests.js tests/integration/integration-flow.test.mjs",
+    "test:mail:unit": "npm test --workspace mail-service && npx tsc --noEmit -p apps/mail-service/tsconfig.json && npm test --workspace mock-client && node tools/run-node-tests.js tests/deploy/mail-https-edge-config.test.mjs tests/deploy/chat-wss-edge-config.test.mjs tests/mock-client/mock-client-websocket.test.mjs",
+    "test:mail:core": "node tools/run-node-tests.js tests/mail/mail-runtime-cleanup.test.mjs tests/mail/mail-managed-process.test.mjs tests/mail/mail-internal-core-flow.test.mjs tests/mail/mail-notify-claim-drill.test.mjs",
+    "test:mail:reliability": "node tools/run-node-tests.js tests/mail/mail-reliability-fault-drill.test.mjs",
+    "test:mail:server": "node tools/run-mail-server-tests.js",
     "smoke:security": "node tools/smoke-security-and-ticket.js",
     "test:security": "npm run smoke:security --",
     "count:lines": "node tools/checkfile/count-lines.js"

@@ -41,10 +41,16 @@ export const RUST_PROTO_TARGETS = Object.freeze([
 ]);
 
 export function parseMode(args) {
-  if (args.length !== 1 || !["--check", "--write"].includes(args[0])) {
-    throw new Error("Usage: node tools/proto-generate.js --check|--write");
+  const serverOnly = args.includes("--server-only");
+  const modeArgs = args.filter((arg) => arg !== "--server-only");
+  if (
+    modeArgs.length !== 1 ||
+    !["--check", "--write"].includes(modeArgs[0]) ||
+    (serverOnly && modeArgs[0] !== "--check")
+  ) {
+    throw new Error("Usage: node tools/proto-generate.js --check [--server-only]|--write");
   }
-  return args[0];
+  return modeArgs[0];
 }
 
 function relativeDisplay(filePath) {
@@ -133,12 +139,16 @@ function runRustGenerator(target, outputDirectory) {
   }
 }
 
-function runHandwrittenNodeCheck() {
+function runHandwrittenNodeCheck({ serverOnly = false } = {}) {
   console.log("Checking Node.js/mock-client hand-written protobuf codecs; no Node.js generated source is produced.");
-  const result = spawnSync(process.execPath, ["tools/check-mock-client-protocol.js"], {
-    cwd: rootDir,
-    encoding: "utf8"
-  });
+  const result = spawnSync(
+    process.execPath,
+    ["tools/check-mock-client-protocol.js", ...(serverOnly ? ["--server-only"] : [])],
+    {
+      cwd: rootDir,
+      encoding: "utf8"
+    }
+  );
   if (result.error) {
     throw new Error(
       `Node.js/mock-client protocol check could not start ${process.execPath}: ${result.error.message}. Target files: tools/mock-client/src/messages.js and tools/mock-client/src/constants.js.`
@@ -183,12 +193,13 @@ function checkGeneratedRust() {
 
 export function main(args = process.argv.slice(2)) {
   const mode = parseMode(args);
+  const serverOnly = args.includes("--server-only");
   if (mode === "--write") {
     writeGeneratedRust();
   } else {
     checkGeneratedRust();
   }
-  runHandwrittenNodeCheck();
+  runHandwrittenNodeCheck({ serverOnly });
   console.log(`Protocol ${mode === "--write" ? "generation" : "generated-code drift check"} passed.`);
 }
 

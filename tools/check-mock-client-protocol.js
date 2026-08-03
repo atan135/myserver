@@ -594,7 +594,7 @@ function checkChatSharedProto() {
   return errors;
 }
 
-function main() {
+function main({ serverOnly = false } = {}) {
   const errors = [];
   const protoSource = readRepoFile("packages/proto/game.proto");
   const chatProtoSource = readRepoFile("packages/proto/chat.proto");
@@ -640,7 +640,9 @@ function main() {
   ]);
   errors.push(...checkMockClientMessageFields(protoMessages, protoEnumNames));
 
-  const mybevyResult = checkMybevyClientProtocol(expectedMessageTypes);
+  const mybevyResult = serverOnly
+    ? { checkedFiles: [], errors: [], skipped: "server-only protocol check requested" }
+    : checkMybevyClientProtocol(expectedMessageTypes);
   errors.push(...mybevyResult.errors);
   errors.push(...checkChatSharedProto());
 
@@ -663,5 +665,10 @@ function main() {
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
-  main();
+  const args = process.argv.slice(2);
+  if (args.length > 1 || (args.length === 1 && args[0] !== "--server-only")) {
+    console.error("Usage: node tools/check-mock-client-protocol.js [--server-only]");
+    process.exit(1);
+  }
+  main({ serverOnly: args[0] === "--server-only" });
 }

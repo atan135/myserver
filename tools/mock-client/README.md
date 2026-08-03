@@ -105,9 +105,10 @@ npm test --workspace mock-client
 node --test tests/mail/mail-runtime-cleanup.test.mjs tests/mail/mail-managed-process.test.mjs
 node --test tests/mail/mail-internal-core-flow.test.mjs
 node --test tests/mail/mail-reliability-fault-drill.test.mjs
+npm run test:mail:server
 ```
 
-后两个真实联调用例要求本地 PostgreSQL 管理凭证；可靠性演练还要求 Redis 和 Core NATS 的可执行文件可被解析，以及已编译的 `game-server` / `chat-server`。Redis、Core NATS 和应用服务都由测试在随机 loopback 端口启动，不要求也不复用预先运行的默认端口服务。测试自行创建并删除 `myserver_mail_acceptance_<run-id>` 数据库，并使用独立 Redis prefix。可通过 `TEST_GAME_SERVER_BIN` / `TEST_CHAT_SERVER_BIN` 指向相对项目根目录的隔离制品；文档和验收记录不保存这些环境中的凭证值。
+`mail-internal-core-flow` 和 `mail-reliability-fault-drill` 两个真实联调用例要求本地 PostgreSQL 管理凭证；可靠性演练还要求 Redis 和 Core NATS 的可执行文件可被解析，以及已编译的 `game-server` / `chat-server`。`test:mail:server` 是完整服务端准入入口，会在 `.tmp/cargo-target/mail-server-self-test` 构建隔离的 Rust 制品，不覆盖或停止正在运行的默认目录服务。Redis、Core NATS 和应用服务都由测试在随机 loopback 端口启动，不要求也不复用预先运行的默认端口服务。测试自行创建并删除 `myserver_mail_acceptance_<run-id>` 数据库，并使用独立 Redis prefix。单独运行可靠性演练时，可通过 `TEST_GAME_SERVER_BIN` / `TEST_CHAT_SERVER_BIN` 指向相对项目根目录的隔离制品；文档和验收记录不保存这些环境中的凭证值。
 
 ### scenarios/announce.js
 公告辅助场景：

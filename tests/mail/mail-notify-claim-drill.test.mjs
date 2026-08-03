@@ -9,8 +9,7 @@ import { connect, StringCodec } from "nats";
 import {
   createServiceInstancePayload,
   RegistryDiscoveryClient,
-  registryHeartbeatKey,
-  registryInstanceKey
+  registerRegistryInstance
 } from "../../packages/service-registry/node/registry-schema.js";
 import { discoverGameServerAdminEndpoints } from "../../apps/mail-service/src/registry-client.js";
 import {
@@ -22,15 +21,21 @@ import {
   cleanupRegistryInstances,
   findFreePort,
   randomId,
+  runWithCleanup,
   startMailService,
-  startNatsServer
+  startNatsServer,
+  startRedisServer
 } from "../helpers/runtime.mjs";
 
-const redisUrl = process.env.TEST_REDIS_URL || "redis://127.0.0.1:6379";
 const ticketSecret = "test-only-ticket-secret";
 const mailServiceToken = "test-only-mail-service-token";
 const redisKeyPrefix = `test:mail-drill:${randomId("redis")}:`;
 const registryKeyPrefix = `test:mail-drill:${randomId("registry")}:`;
+const mailGrantAssertionKeyPair = crypto.generateKeyPairSync("ed25519");
+const mailGrantAssertionPrivateKey = mailGrantAssertionKeyPair.privateKey.export({
+  type: "pkcs8",
+  format: "pem"
+});
 const playerId = randomId("player");
 const characterId = "chr_0000000000001";
 const chatInstanceId = randomId("chat-server");
@@ -39,12 +44,14 @@ const mailServiceInstanceId = randomId("mail-service");
 const codec = StringCodec();
 
 const MESSAGE_TYPE = {
-  ADMIN_AUTH_REQ: 2099,
-  GM_SEND_ITEM_REQ: 3003,
+  MAIL_ATTACHMENT_GRANT_ASSERTION_REQ: 2097,
+  MAIL_ATTACHMENT_GRANT_REQ: 3011,
   GM_SEND_ITEM_RES: 3004
 };
 
 let redis;
+let redisServer;
+let redisUrl;
 let natsServer;
 let mailService;
 let grantServer;
@@ -108,7 +115,7 @@ function encodeGrantResponse(request) {
 
 async function createGrantCaptureServer() {
   const requests = [];
-  const authRequests = [];
+  const assertionRequests = [];
   const server = net.createServer((socket) => {
     let buffer = Buffer.alloc(0);
 
@@ -127,11 +134,11 @@ async function createGrantCaptureServer() {
         const body = buffer.subarray(14, packetLen);
         buffer = buffer.subarray(packetLen);
 
-        if (messageType === MESSAGE_TYPE.ADMIN_AUTH_REQ) {
-          authRequests.push(JSON.parse(body.toString("utf8")));
+        if (messageType === MESSAGE_TYPE.MAIL_ATTACHMENT_GRANT_ASSERTION_REQ) {
+          assertionRequests.push(JSON.parse(body.toString("utf8")));
         }
 
-        if (messageType === MESSAGE_TYPE.GM_SEND_ITEM_REQ) {
+        if (messageType === MESSAGE_TYPE.MAIL_ATTACHMENT_GRANT_REQ) {
           const request = JSON.parse(body.toString("utf8"));
           requests.push(request);
           socket.write(encodePacket(MESSAGE_TYPE.GM_SEND_ITEM_RES, seq, encodeGrantResponse(request)));
@@ -144,7 +151,7 @@ async function createGrantCaptureServer() {
   return {
     port: server.address().port,
     requests,
-    authRequests,
+    assertionRequests,
     close: () => new Promise((resolve) => server.close(resolve))
   };
 }
@@ -209,12 +216,12 @@ async function writeGameServerRegistryEndpoint() {
     weight: 100
   });
 
-  await redis.hset(
-    registryInstanceKey(registryKeyPrefix, "game-server", gameServerInstanceId),
-    "data",
-    JSON.stringify(payload)
-  );
-  await redis.setex(registryHeartbeatKey(registryKeyPrefix, "game-server", gameServerInstanceId), 60, "1");
+  await registerRegistryInstance(redis, {
+    registryKeyPrefix,
+    serviceName: "game-server",
+    instanceId: gameServerInstanceId,
+    data: payload
+  });
 }
 
 function nextNatsJson(sub, timeoutMs = 5000) {
@@ -247,6 +254,13 @@ async function fetchJson(url, options = {}) {
 }
 
 before(async () => {
+  if (process.env.TEST_REDIS_URL) {
+    redisUrl = process.env.TEST_REDIS_URL;
+  } else {
+    redisServer = await startRedisServer();
+    redisUrl = redisServer.url;
+  }
+
   redis = new Redis(redisUrl, {
     lazyConnect: true,
     maxRetriesPerRequest: 1,
@@ -286,7 +300,10 @@ before(async () => {
     natsUrl: natsServer.url,
     ticketSecret,
     mailServiceToken,
-    serviceInstanceId: mailServiceInstanceId
+    serviceInstanceId: mailServiceInstanceId,
+    envOverrides: {
+      MAIL_GRANT_ASSERTION_PRIVATE_KEY: mailGrantAssertionPrivateKey
+    }
   });
 
   subscriber = await connect({ servers: natsServer.url, name: "mail-drill-subscriber" });
@@ -294,23 +311,18 @@ before(async () => {
 });
 
 after(async () => {
-  if (subscriber) {
-    await subscriber.drain().catch(() => subscriber.close());
-  }
-  if (mailService) {
-    await mailService.close();
-  }
-  if (grantServer) {
-    await grantServer.close();
-  }
-  if (natsServer) {
-    await natsServer.close();
-  }
-  if (redis) {
-    await redis.quit();
-  }
-  await cleanupRedisPrefix(redisUrl, redisKeyPrefix);
-  await cleanupRedisPrefix(redisUrl, registryKeyPrefix);
+  await runWithCleanup(async () => {}, [
+    async () => {
+      if (subscriber) await subscriber.drain().catch(() => subscriber.close());
+    },
+    () => mailService?.close(),
+    () => grantServer?.close(),
+    () => natsServer?.close(),
+    () => redis?.quit(),
+    () => redisUrl ? cleanupRedisPrefix(redisUrl, redisKeyPrefix) : undefined,
+    () => redisUrl ? cleanupRedisPrefix(redisUrl, registryKeyPrefix) : undefined,
+    () => redisServer?.close()
+  ], "mail notify claim drill cleanup failed");
 });
 
 test("mail create publishes online notification and claim grants attachments through strict registry discovery", { timeout: 30000 }, async () => {
@@ -398,12 +410,10 @@ test("mail create publishes online notification and claim grants attachments thr
   const claimResult = await fetchJson(`${mailService.baseUrl}/api/v1/mails/${createResult.payload.mail_id}/claim`, {
     method: "POST",
     headers: {
-      authorization: `Bearer ${subscriber.ticket}`,
+      "x-game-ticket": subscriber.ticket,
       "content-type": "application/json"
     },
-    body: JSON.stringify({
-      player_id: playerId
-    })
+    body: JSON.stringify({})
   });
 
   assert.equal(claimResult.response.status, 200);
@@ -411,11 +421,24 @@ test("mail create publishes online notification and claim grants attachments thr
   assert.equal(claimResult.payload.claimed, true);
   assert.equal(claimResult.payload.status, "claimed");
   assert.equal(grantServer.requests.length, 1);
-  assert.equal(grantServer.authRequests.length, 1);
-  assert.deepEqual(grantServer.authRequests[0], {
-    token: "test-only-game-admin-token",
-    actor: mailServiceInstanceId
-  });
+  assert.equal(grantServer.assertionRequests.length, 1);
+  const assertion = grantServer.assertionRequests[0];
+  assert.equal(assertion.version, 1);
+  assert.match(assertion.operationId, /^mail-op-[0-9a-f-]{36}$/);
+  assert.equal(assertion.requestId, `mail_claim:${createResult.payload.mail_id}`);
+  assert.equal(assertion.mailId, createResult.payload.mail_id);
+  assert.equal(assertion.characterId, characterId);
+  assert.match(assertion.attachmentFingerprint, /^sha256:[0-9a-f]{64}$/);
+  assert.equal(assertion.issuer, "mail-service");
+  assert.equal(assertion.keyId, "mail-service-v1");
+  assert.equal(assertion.service, "mail-service");
+  assert.equal(assertion.serviceInstanceId, mailServiceInstanceId);
+  assert.equal(assertion.targetService, "game-server");
+  assert.equal(assertion.targetInstanceId, gameServerInstanceId);
+  assert.ok(Number.isSafeInteger(assertion.issuedAtMs));
+  assert.ok(assertion.expiresAtMs > assertion.issuedAtMs);
+  assert.match(assertion.payloadSha256, /^[A-Za-z0-9_-]{43}$/);
+  assert.match(assertion.signature, /^[A-Za-z0-9_-]{86}$/);
   assert.deepEqual(grantServer.requests[0], {
     requestId: `mail_claim:${createResult.payload.mail_id}`,
     mailId: createResult.payload.mail_id,
@@ -426,7 +449,8 @@ test("mail create publishes online notification and claim grants attachments thr
     reason: `claim mail ${createResult.payload.mail_id}`,
     traceId: grantServer.requests[0].traceId,
     routeGeneration: "1",
-    routeToken: "a".repeat(64)
+    routeToken: "a".repeat(64),
+    contractVersion: 1
   });
   assert.match(grantServer.requests[0].requestFingerprint, /^sha256:[0-9a-f]{64}$/);
   assert.match(grantServer.requests[0].traceId, /^[0-9a-f]{32}$/);
