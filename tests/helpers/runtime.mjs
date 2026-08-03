@@ -9,6 +9,9 @@ import process from "node:process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import Redis from "ioredis";
+import pg from "pg";
+
+const { Client: PgClient } = pg;
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.resolve(__dirname, "..", "..");
@@ -75,6 +78,123 @@ export async function cleanupRegistryInstances(redisUrl, instances, registryKeyP
   } finally {
     await redis.quit();
   }
+}
+
+export async function runWithCleanup(work, cleanupActions, cleanupLabel = "cleanup failed") {
+  let result;
+  let workError;
+
+  try {
+    result = await work();
+  } catch (error) {
+    workError = error;
+  }
+
+  const cleanupErrors = [];
+  for (const cleanup of cleanupActions) {
+    try {
+      await cleanup();
+    } catch (error) {
+      cleanupErrors.push(error);
+    }
+  }
+
+  if (workError && cleanupErrors.length > 0) {
+    throw new AggregateError(
+      [workError, ...cleanupErrors],
+      `${workError.message}; ${cleanupLabel}`,
+      { cause: workError }
+    );
+  }
+  if (workError) throw workError;
+  if (cleanupErrors.length > 0) throw new AggregateError(cleanupErrors, cleanupLabel);
+  return result;
+}
+
+function quotePostgresIdentifier(identifier) {
+  return `"${identifier.replaceAll('"', '""')}"`;
+}
+
+async function dropMailAcceptanceDatabase(maintenanceUrl, databaseName) {
+  const cleanupAdmin = new PgClient({ connectionString: maintenanceUrl.toString() });
+  await runWithCleanup(async () => {
+    await cleanupAdmin.connect();
+    await cleanupAdmin.query(
+      "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1 AND pid <> pg_backend_pid()",
+      [databaseName]
+    );
+    await cleanupAdmin.query(`DROP DATABASE IF EXISTS ${quotePostgresIdentifier(databaseName)}`);
+    const remaining = await cleanupAdmin.query(
+      "SELECT 1 FROM pg_database WHERE datname = $1",
+      [databaseName]
+    );
+    assert.equal(remaining.rowCount, 0, "mail acceptance database cleanup failed");
+  }, [() => cleanupAdmin.end()], "mail acceptance database connection cleanup failed");
+}
+
+export async function createMailAcceptanceDatabase({
+  adminUrl,
+  databaseName,
+  migrationPaths = []
+}) {
+  assert.match(
+    databaseName,
+    /^myserver_mail_acceptance_[a-z0-9_]+$/,
+    "mail acceptance database name must match myserver_mail_acceptance_<run-id>"
+  );
+
+  const maintenanceUrl = new URL(adminUrl);
+  maintenanceUrl.pathname = "/postgres";
+  const databaseUrl = new URL(maintenanceUrl);
+  databaseUrl.pathname = `/${databaseName}`;
+  const admin = new PgClient({ connectionString: maintenanceUrl.toString() });
+  let target;
+  let created = false;
+
+  try {
+    await admin.connect();
+    const existing = await admin.query("SELECT 1 FROM pg_database WHERE datname = $1", [databaseName]);
+    assert.equal(existing.rowCount, 0, "mail acceptance database must not already exist");
+    await admin.query(`CREATE DATABASE ${quotePostgresIdentifier(databaseName)}`);
+    created = true;
+
+    target = new PgClient({ connectionString: databaseUrl.toString() });
+    await target.connect();
+    for (const migrationPath of migrationPaths) {
+      await target.query(fs.readFileSync(migrationPath, "utf8"));
+    }
+    await target.end();
+    target = null;
+  } catch (error) {
+    return runWithCleanup(async () => {
+      throw error;
+    }, [
+      () => target?.end(),
+      () => admin.end(),
+      () => created ? dropMailAcceptanceDatabase(maintenanceUrl, databaseName) : undefined
+    ], "mail acceptance database initialization cleanup failed");
+  }
+
+  try {
+    await admin.end();
+  } catch (error) {
+    return runWithCleanup(async () => {
+      throw error;
+    }, [
+      () => dropMailAcceptanceDatabase(maintenanceUrl, databaseName)
+    ], "mail acceptance database initialization cleanup failed");
+  }
+  let dropped = false;
+
+  return {
+    databaseName,
+    databaseUrl: databaseUrl.toString(),
+    async drop() {
+      if (dropped) return;
+      await dropMailAcceptanceDatabase(maintenanceUrl, databaseName);
+      dropped = true;
+    }
+  };
 }
 
 function setEnvVars(nextEnv) {
@@ -217,7 +337,7 @@ export async function startMailService({
   serviceInstanceId,
   envOverrides = {}
 }) {
-  const restoreEnv = setEnvVars({
+  const nextEnv = {
     NODE_ENV: "test",
     APP_ENV: "test",
     HOST: host,
@@ -249,7 +369,12 @@ export async function startMailService({
     GAME_ADMIN_READ_TIMEOUT_MS: "1000",
     GAME_ADMIN_MAX_RESPONSE_BYTES: "4096",
     ...envOverrides
-  });
+  };
+  if (isExplicitStrictDiscovery(nextEnv)) {
+    nextEnv.GAME_SERVER_ADMIN_HOST = undefined;
+    nextEnv.GAME_SERVER_ADMIN_PORT = undefined;
+  }
+  const restoreEnv = setEnvVars(nextEnv);
 
   let context;
 
@@ -382,6 +507,14 @@ function resolveNatsServerBin() {
   }
 
   return process.platform === "win32" ? "nats-server.exe" : "nats-server";
+}
+
+function resolveRedisServerBin() {
+  if (process.env.REDIS_SERVER_BIN) {
+    return process.env.REDIS_SERVER_BIN;
+  }
+
+  return process.platform === "win32" ? "redis-server.exe" : "redis-server";
 }
 
 async function waitForTcpPort({ host, port, timeoutMs = 60000, onTick }) {
@@ -568,6 +701,63 @@ export async function startNatsServer({ host = "127.0.0.1", port } = {}) {
     stderr,
     async close() {
       await terminateChild(child, { name: "nats-server" });
+    }
+  };
+}
+
+export async function startRedisServer({ host = "127.0.0.1", port } = {}) {
+  const stdout = [];
+  const stderr = [];
+  const redisPort = port || await findFreePort(host);
+  const binaryPath = resolveRedisServerBin();
+  let spawnError = null;
+
+  const child = spawn(binaryPath, [
+    "--bind", host,
+    "--port", String(redisPort),
+    "--save", "",
+    "--appendonly", "no"
+  ], {
+    cwd: projectRoot,
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+
+  child.once("error", (error) => {
+    spawnError = error;
+  });
+  child.stdout.on("data", (chunk) => {
+    stdout.push(chunk.toString());
+  });
+  child.stderr.on("data", (chunk) => {
+    stderr.push(chunk.toString());
+  });
+
+  try {
+    await waitForTcpPort({
+      host,
+      port: redisPort,
+      onTick: () => {
+        if (spawnError) {
+          throw spawnError;
+        }
+        if (child.exitCode !== null) {
+          throw new Error(`redis-server exited early with code ${child.exitCode}`);
+        }
+      }
+    });
+  } catch (error) {
+    await terminateChild(child, { name: "redis-server" }).catch(() => {});
+    throw new Error(`${error.message}\n[redis-server stdout]\n${stdout.join("")}\n[redis-server stderr]\n${stderr.join("")}`);
+  }
+
+  return {
+    host,
+    port: redisPort,
+    url: `redis://${host}:${redisPort}`,
+    stdout,
+    stderr,
+    async close() {
+      await terminateChild(child, { name: "redis-server" });
     }
   };
 }
