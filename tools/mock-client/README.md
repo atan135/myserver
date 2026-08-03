@@ -94,6 +94,21 @@ Protobuf 风格的编解码工具：
 - 领取收到 `202` 结果未知时只查询同一邮件状态，不重发 claim
 - 支持联调 `chat-server` 的 `MAIL_NOTIFY_PUSH`
 
+邮件内网清单只验收本地或隔离测试入口，不包含 Caddy、DNS、TLS、公开 descriptor 或公网可达性。手工验证玩家场景时同时传 `--no-service-discovery` 和 loopback `--mail-base-url`，确保目标不会被登录响应改写；内部发信另传测试环境提供的 `--service-token`。不要把 game ticket、service token、数据库连接串或真实服务地址写入命令脚本、文档和日志。
+
+完整隔离验收优先使用仓库测试 harness，不需要占用 `3000`、`7000`、`9001`、`9003` 等默认端口，也不会停止已经运行的开发服务。依赖和清理边界见 `docs/周边服务/聊天与邮件系统设计.md` 的“内网隔离测试与验收”。在仓库根目录使用以下定向命令：
+
+```powershell
+npm test --workspace mail-service
+npx tsc --noEmit -p apps/mail-service/tsconfig.json
+npm test --workspace mock-client
+node --test tests/mail/mail-runtime-cleanup.test.mjs tests/mail/mail-managed-process.test.mjs
+node --test tests/mail/mail-internal-core-flow.test.mjs
+node --test tests/mail/mail-reliability-fault-drill.test.mjs
+```
+
+后两个真实联调用例要求本地 PostgreSQL 管理凭证；可靠性演练还要求 Redis 和 Core NATS 的可执行文件可被解析，以及已编译的 `game-server` / `chat-server`。Redis、Core NATS 和应用服务都由测试在随机 loopback 端口启动，不要求也不复用预先运行的默认端口服务。测试自行创建并删除 `myserver_mail_acceptance_<run-id>` 数据库，并使用独立 Redis prefix。可通过 `TEST_GAME_SERVER_BIN` / `TEST_CHAT_SERVER_BIN` 指向相对项目根目录的隔离制品；文档和验收记录不保存这些环境中的凭证值。
+
 ### scenarios/announce.js
 公告辅助场景：
 - 通过 HTTP 调用 `announce-service` 的公告 CRUD 接口
