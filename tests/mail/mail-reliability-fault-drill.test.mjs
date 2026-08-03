@@ -8,6 +8,7 @@ import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { after, before, test } from "node:test";
 
+import dotenv from "dotenv";
 import Redis from "ioredis";
 import pg from "pg";
 
@@ -21,21 +22,37 @@ import {
 import { discoverGameServerAdminEndpoints } from "../../apps/mail-service/src/registry-client.js";
 import { TcpProtocolClient } from "../../tools/mock-client/src/client.js";
 import { MESSAGE_TYPE } from "../../tools/mock-client/src/constants.js";
+import { encodeItemDiscardReq } from "../../tools/mock-client/src/messages.js";
 import { authenticateChatClient } from "../../tools/mock-client/src/scenarios/chat.js";
 import { authenticateClient } from "../../tools/mock-client/src/scenarios/room.js";
 import {
+  cleanupRedisPrefix,
+  createMailAcceptanceDatabase,
   findFreePort,
   randomId,
+  runWithCleanup,
   startNatsServer
 } from "../helpers/runtime.mjs";
+import {
+  resolveProjectExecutable,
+  spawnManaged,
+  waitForManagedPort
+} from "../helpers/managed-process.mjs";
 
-const { Client, Pool } = pg;
+const { Pool } = pg;
 const projectRoot = path.resolve(import.meta.dirname, "..", "..");
-const databaseUrl = process.env.TEST_DATABASE_URL;
 const redisServerBin = process.env.REDIS_SERVER_BIN || "redis-server";
 const executableSuffix = process.platform === "win32" ? ".exe" : "";
-const gameServerBin = path.join(projectRoot, "target", "debug", `game-server${executableSuffix}`);
-const chatServerBin = path.join(projectRoot, "target", "debug", `chat-server${executableSuffix}`);
+const gameServerBin = resolveProjectExecutable(
+  projectRoot,
+  process.env.TEST_GAME_SERVER_BIN,
+  path.join(projectRoot, "target", "debug", `game-server${executableSuffix}`)
+);
+const chatServerBin = resolveProjectExecutable(
+  projectRoot,
+  process.env.TEST_CHAT_SERVER_BIN,
+  path.join(projectRoot, "target", "debug", `chat-server${executableSuffix}`)
+);
 const ticketSecret = "mail-acceptance-ticket-secret-2026";
 const mailServiceToken = "mail-acceptance-service-token-2026";
 const gameAdminToken = "mail-acceptance-game-admin-token-2026";
@@ -52,7 +69,11 @@ const characterId = `chr_${crypto.randomBytes(7).toString("hex").slice(0, 13)}`;
 const gameAId = randomId("game-a");
 const gameBId = randomId("game-b");
 const chatId = randomId("chat");
+const runId = crypto.randomBytes(8).toString("hex");
+const databaseName = `myserver_mail_acceptance_${runId}`;
 
+let databaseUrl;
+let acceptanceDatabase;
 let redisPort;
 let natsPort;
 let dbProxyPort;
@@ -85,6 +106,7 @@ let gameClient;
 let chatClient;
 let registryHeartbeatTimer;
 let workerIdCounter = 10;
+let clientSeqCounter = 60;
 
 function nextWorkerId() {
   return workerIdCounter++;
@@ -92,6 +114,25 @@ function nextWorkerId() {
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function resolvePostgresAdminUrl() {
+  for (const value of [process.env.TEST_POSTGRES_ADMIN_URL, process.env.TEST_DATABASE_URL]) {
+    if (value) return value;
+  }
+
+  for (const envPath of [
+    path.join(projectRoot, "apps", "mail-service", ".env"),
+    path.join(projectRoot, "apps", "auth-http", ".env")
+  ]) {
+    if (!fs.existsSync(envPath)) continue;
+    const parsed = dotenv.parse(fs.readFileSync(envPath));
+    if (parsed.DATABASE_URL) return parsed.DATABASE_URL;
+  }
+
+  throw new Error(
+    "PostgreSQL admin credentials are unavailable; set TEST_POSTGRES_ADMIN_URL or configure a local service .env"
+  );
 }
 
 async function waitFor(check, { timeoutMs = 15000, intervalMs = 100, label = "condition" } = {}) {
@@ -110,36 +151,7 @@ async function waitFor(check, { timeoutMs = 15000, intervalMs = 100, label = "co
 }
 
 async function waitForPort(port, host = "127.0.0.1", processRef) {
-  return waitFor(async () => {
-    if (processRef?.child.exitCode !== null) {
-      throw new Error(`${processRef.name} exited with ${processRef.child.exitCode}: ${processRef.stderr.join("").slice(-2000)}`);
-    }
-    return new Promise((resolve) => {
-      const socket = net.createConnection({ host, port });
-      socket.once("connect", () => {
-        socket.destroy();
-        resolve(true);
-      });
-      socket.once("error", () => resolve(false));
-    });
-  }, { timeoutMs: 60000, label: `${host}:${port}` });
-}
-
-function spawnManaged(name, command, args, { cwd = projectRoot, env = {} } = {}) {
-  const stdout = [];
-  const stderr = [];
-  const child = spawn(command, args, {
-    cwd,
-    env: { ...process.env, ...env },
-    stdio: ["ignore", "pipe", "pipe"]
-  });
-  const append = (target, chunk) => {
-    target.push(chunk.toString());
-    while (target.join("").length > 100_000) target.shift();
-  };
-  child.stdout.on("data", (chunk) => append(stdout, chunk));
-  child.stderr.on("data", (chunk) => append(stderr, chunk));
-  return { name, child, stdout, stderr };
+  return waitForManagedPort(port, { host, processRef });
 }
 
 async function stopManaged(processRef) {
@@ -353,6 +365,7 @@ function mailEnv(instanceId, port, registryKeyPrefix = registryPrefix) {
     NATS_URL: natsUrl,
     TICKET_SECRET: ticketSecret,
     MAIL_PLAYER_AUTH_REQUIRED: "true",
+    MAIL_PUBLIC_RATE_LIMIT_ENABLED: "false",
     MAIL_SERVICE_TOKEN: mailServiceToken,
     GAME_ADMIN_TOKEN: gameAdminToken,
     GAME_ADMIN_ACTOR: instanceId,
@@ -361,7 +374,7 @@ function mailEnv(instanceId, port, registryKeyPrefix = registryPrefix) {
     MAIL_GRANT_ASSERTION_PRIVATE_KEY: mailGrantAssertionPrivateKey,
     GAME_ADMIN_CONNECT_TIMEOUT_MS: "500",
     GAME_ADMIN_WRITE_TIMEOUT_MS: "500",
-    GAME_ADMIN_READ_TIMEOUT_MS: "1000",
+    GAME_ADMIN_READ_TIMEOUT_MS: "5000",
     MAIL_OUTBOX_POLL_INTERVAL_MS: "100",
     MAIL_OUTBOX_LEASE_MS: "1000",
     MAIL_OUTBOX_BACKOFF_BASE_MS: "100",
@@ -387,10 +400,22 @@ async function startMail(instanceId, port, registryKeyPrefix = registryPrefix) {
     env: mailEnv(instanceId, port, registryKeyPrefix)
   });
   await waitForPort(port, "127.0.0.1", processRef);
-  await waitFor(async () => {
-    const response = await fetch(`http://127.0.0.1:${port}/healthz`).catch(() => null);
-    return response?.ok;
-  }, { timeoutMs: 60000, label: `${instanceId} health` });
+  let lastHealth = "unavailable";
+  try {
+    await waitFor(async () => {
+      if (processRef.child.exitCode !== null || processRef.child.signalCode !== null) {
+        throw new Error(`${instanceId} exited with ${processRef.child.exitCode ?? processRef.child.signalCode}`);
+      }
+      const response = await fetch(`http://127.0.0.1:${port}/healthz`).catch(() => null);
+      lastHealth = response ? `${response.status} ${await response.text()}` : "connection failed";
+      return response?.ok;
+    }, { timeoutMs: 60000, label: `${instanceId} health` });
+  } catch (error) {
+    throw new Error(
+      `${error.message}; exit=${processRef.child.exitCode ?? processRef.child.signalCode}; ` +
+      `health=${lastHealth.slice(-2000)}; stderr=${processRef.stderr.join("").slice(-2000)}`
+    );
+  }
   return processRef;
 }
 
@@ -537,14 +562,14 @@ async function createMail(port, title, itemId = 1001, count = 1) {
   return result.payload.mail_id;
 }
 
-function claimMail(port, mailId, body = {}) {
+function claimMail(port, mailId, body) {
   return fetchJson(`http://127.0.0.1:${port}/api/v1/mails/${mailId}/claim`, {
     method: "POST",
     headers: {
-      authorization: `Bearer ${ticket}`,
-      "content-type": "application/json"
+      "x-game-ticket": ticket,
+      ...(body === undefined ? {} : { "content-type": "application/json" })
     },
-    body: JSON.stringify(body)
+    body: body === undefined ? undefined : JSON.stringify(body)
   });
 }
 
@@ -599,6 +624,40 @@ async function itemCount(itemId) {
   return slots.filter(Boolean).filter((item) => item.item_id === itemId).reduce((sum, item) => sum + item.count, 0);
 }
 
+async function inventorySlots() {
+  const { rows } = await directDb.query("SELECT inventory_data FROM character_inventory WHERE character_id = $1", [characterId]);
+  return rows[0]?.inventory_data?.slots || [];
+}
+
+async function exactInventoryItems() {
+  const { rows } = await directDb.query(
+    `SELECT slot->>'uid' AS uid,
+            (slot->>'item_id')::integer AS item_id,
+            (slot->>'count')::integer AS count
+       FROM character_inventory,
+            jsonb_array_elements(inventory_data->'slots') WITH ORDINALITY AS entry(slot, slot_index)
+      WHERE character_id = $1
+        AND slot <> 'null'::jsonb
+      ORDER BY slot_index`,
+    [characterId]
+  );
+  return rows;
+}
+
+async function discardInventoryItem(itemUid, count = 1) {
+  await gameClient.send(
+    MESSAGE_TYPE.ITEM_DISCARD_REQ,
+    clientSeqCounter++,
+    encodeItemDiscardReq(BigInt(itemUid), count)
+  );
+  const result = await gameClient.readUntil(
+    10_000,
+    (packet) => packet.messageType === MESSAGE_TYPE.ITEM_DISCARD_RES,
+    "mail-capacity-discard"
+  );
+  assert.equal(result.ok, true, JSON.stringify(result));
+}
+
 async function expectMailPush(mailId, timeoutMs = 8000) {
   return chatClient.readUntil(
     timeoutMs,
@@ -617,16 +676,36 @@ async function removeGameRegistry() {
   );
 }
 
+async function cleanupAcceptanceRedisPrefix() {
+  await cleanupRedisPrefix(redisUrl, redisPrefix);
+  const verifier = new Redis(redisUrl, {
+    lazyConnect: true,
+    maxRetriesPerRequest: 1,
+    enableReadyCheck: true
+  });
+  verifier.on("error", () => {});
+  await verifier.connect();
+  try {
+    assert.deepEqual(await verifier.keys(`${redisPrefix}*`), []);
+  } finally {
+    await verifier.quit();
+  }
+}
+
 before(async () => {
-  assert.ok(databaseUrl, "TEST_DATABASE_URL is required");
   assert.ok(fs.existsSync(gameServerBin), `missing ${gameServerBin}`);
   assert.ok(fs.existsSync(chatServerBin), `missing ${chatServerBin}`);
-  const acceptanceDatabaseName = new URL(databaseUrl).pathname.replace(/^\//, "");
-  assert.match(
-    acceptanceDatabaseName,
-    /^myserver_mail_acceptance(?:_[a-z0-9_]+)?$/,
-    "TEST_DATABASE_URL must target a dedicated mail acceptance database"
-  );
+  acceptanceDatabase = await createMailAcceptanceDatabase({
+    adminUrl: resolvePostgresAdminUrl(),
+    databaseName,
+    migrationPaths: [
+      path.join(projectRoot, "db", "migrations", "auth", "20260718161350_initial_schema.sql"),
+      path.join(projectRoot, "db", "migrations", "game", "20260718161350_initial_schema.sql"),
+      path.join(projectRoot, "db", "migrations", "game", "20260729190000_restore_character_asset_ledger_guard.sql"),
+      path.join(projectRoot, "db", "migrations", "mail", "20260718161350_initial_schema.sql")
+    ]
+  });
+  databaseUrl = acceptanceDatabase.databaseUrl;
 
   [
     redisPort,
@@ -686,29 +765,22 @@ after(async () => {
   stopGameRegistryHeartbeat();
   gameClient?.close();
   chatClient?.close();
-  await Promise.allSettled([
-    stopManaged(mailAProcess),
-    stopManaged(mailBProcess),
-    stopManaged(chatProcess),
-    stopManaged(gameAProcess),
-    stopManaged(gameBProcess)
-  ]);
-  await Promise.allSettled([gameAProxy?.stop(), gameBProxy?.stop(), dbProxy?.stop()]);
-  await natsServer?.close().catch(() => {});
-  await stopManaged(redisProcess);
-  await redis?.quit().catch(() => {});
-  await directDb?.end().catch(() => {});
-
-  if (databaseUrl) {
-    const url = new URL(databaseUrl);
-    const databaseName = url.pathname.replace(/^\//, "");
-    url.pathname = "/postgres";
-    const admin = new Client({ connectionString: url.toString() });
-    await admin.connect().catch(() => {});
-    await admin.query("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1 AND pid <> pg_backend_pid()", [databaseName]).catch(() => {});
-    await admin.query(`DROP DATABASE IF EXISTS "${databaseName.replaceAll('"', '""')}"`).catch(() => {});
-    await admin.end().catch(() => {});
-  }
+  await runWithCleanup(async () => {}, [
+    () => Promise.all([
+      stopManaged(mailAProcess),
+      stopManaged(mailBProcess),
+      stopManaged(chatProcess),
+      stopManaged(gameAProcess),
+      stopManaged(gameBProcess)
+    ]),
+    () => Promise.all([gameAProxy?.stop(), gameBProxy?.stop(), dbProxy?.stop()]),
+    () => natsServer?.close(),
+    () => redisUrl && redisProcess ? cleanupAcceptanceRedisPrefix() : undefined,
+    () => redis?.disconnect(false),
+    () => stopManaged(redisProcess),
+    () => directDb?.end(),
+    () => acceptanceDatabase?.drop()
+  ], "mail reliability fault drill cleanup failed");
 });
 
 test("mail reliability fault drill with real PostgreSQL, game-server and chat-server", { timeout: 300000 }, async (t) => {
@@ -835,6 +907,71 @@ test("mail reliability fault drill with real PostgreSQL, game-server and chat-se
     assert.equal(await itemCount(1001), beforeItems + 5);
   });
 
+  await t.test("real inventory capacity block is atomic and the frozen claim resumes after space is freed", async () => {
+    const occupiedBeforeFill = (await inventorySlots()).filter(Boolean).length;
+    const fillCount = 47 - occupiedBeforeFill;
+    assert.ok(fillCount > 0, `expected fewer than 47 occupied slots, got ${occupiedBeforeFill}`);
+
+    const fillMailId = await createMail(mailAPort, "capacity-fill", 1001, fillCount);
+    const fillResult = await claimMail(mailAPort, fillMailId);
+    assert.equal(fillResult.response.status, 200, JSON.stringify(fillResult.payload));
+    await waitForWorkflow(fillMailId, "claimed", 30_000);
+    assert.equal(await grantCount(fillMailId), 1);
+
+    const fullSnapshot = await inventorySlots();
+    assert.equal(fullSnapshot.filter(Boolean).length, 47);
+    const itemUidToDiscard = (await exactInventoryItems()).find((item) => item.item_id === 1001)?.uid;
+    assert.ok(itemUidToDiscard, "capacity fixture did not produce a discardable real inventory item");
+
+    const blockedMailId = await createMail(mailAPort, "capacity-blocked", 1001, 2);
+    const blocked = await claimMail(mailAPort, blockedMailId);
+    assert.equal(
+      blocked.response.status,
+      409,
+      JSON.stringify({
+        payload: blocked.payload,
+        workflow: await claimDiagnostic(blockedMailId),
+        mailStdout: mailAProcess?.stdout.join("").slice(-4000),
+        mailStderr: mailAProcess?.stderr.join("").slice(-4000),
+        gameStdout: gameAProcess?.stdout.join("").slice(-4000),
+        gameStderr: gameAProcess?.stderr.join("").slice(-4000)
+      })
+    );
+    assert.equal(blocked.payload.claim_status, "blocked_capacity");
+    assert.equal(blocked.payload.player_retryable, true);
+    assert.equal(blocked.payload.error, "INVENTORY_CAPACITY_BLOCKED");
+
+    const blockedWorkflow = await waitForWorkflow(blockedMailId, "blocked_capacity");
+    assert.equal(blockedWorkflow.claim_request_id, `mail_claim:${blockedMailId}`);
+    assert.equal(await grantCount(blockedMailId), 0);
+    assert.deepEqual(await inventorySlots(), fullSnapshot, "capacity failure must not partially mutate inventory");
+
+    const repeatedBlocked = await claimMail(mailAPort, blockedMailId);
+    assert.equal(repeatedBlocked.response.status, 409, JSON.stringify(repeatedBlocked.payload));
+    assert.equal(repeatedBlocked.payload.request_id, blockedWorkflow.claim_request_id);
+    assert.equal(await grantCount(blockedMailId), 0);
+    assert.deepEqual(await inventorySlots(), fullSnapshot, "repeated capacity failure must remain atomic");
+
+    await discardInventoryItem(itemUidToDiscard, 1);
+    await waitFor(
+      () => inventorySlots().then((slots) => slots.filter(Boolean).length === 46),
+      { label: "real inventory space after discard" }
+    );
+
+    const recovered = await claimMail(mailAPort, blockedMailId);
+    assert.equal(recovered.response.status, 200, JSON.stringify(recovered.payload));
+    const recoveredWorkflow = await waitForWorkflow(blockedMailId, "claimed", 30_000);
+    assert.equal(recoveredWorkflow.claim_request_id, blockedWorkflow.claim_request_id);
+    assert.equal(await grantCount(blockedMailId), 1);
+    assert.equal((await inventorySlots()).filter(Boolean).length, 48);
+
+    while ((await inventorySlots()).filter(Boolean).length > 24) {
+      const [item] = await exactInventoryItems();
+      await discardInventoryItem(item.uid, item.count);
+    }
+    assert.equal((await inventorySlots()).filter(Boolean).length, 24);
+  });
+
   await t.test("two mail instances and game authority switch remain idempotent", async () => {
     mailBProcess = await startMail(randomId("mail-b"), mailBPort);
     gameClient.close();
@@ -847,7 +984,7 @@ test("mail reliability fault drill with real PostgreSQL, game-server and chat-se
       target_instance_id: gameAId,
       attachments: [{ type: "item", item_id: 9999, count: 999 }]
     });
-    assert.equal(malicious.response.status, 403);
+    assert.equal(malicious.response.status, 400);
     assert.equal(await grantCount(mailId), 0);
 
     const [first, second] = await Promise.all([
@@ -918,8 +1055,8 @@ test("mail reliability fault drill with real PostgreSQL, game-server and chat-se
     await stopManaged(redisProcess);
     redisProcess = null;
     const failed = await claimMail(mailAPort, mailId);
-    assert.equal(failed.response.status, 401, JSON.stringify(failed.payload));
-    assert.equal(failed.payload.error?.code || failed.payload.error || failed.payload.code, "AUTH_BACKEND_UNAVAILABLE");
+    assert.equal(failed.response.status, 503, JSON.stringify(failed.payload));
+    assert.equal(failed.payload.error?.code || failed.payload.error || failed.payload.code, "MAIL_AUTH_UNAVAILABLE");
     assert.equal(await grantCount(mailId), 0);
 
     gameClient.close();
