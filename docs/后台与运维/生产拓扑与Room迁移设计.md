@@ -233,7 +233,7 @@ TTL 摘除只作为异常退出兜底，不是正常下线流程。滚动发布�
 
 已有连接、旧绑定、room route、player route、rollout target 或其他 route store 状态不由 registry TTL 自动清理。异常退出后的旧连接断开、重连降级、房间迁移、route store 清理或故障标记，仍必须依赖各服务自身的降级、探活、清理和控制面策略；不能只靠 registry TTL 保证全链路摘除。
 
-`metrics-collector` 不参与 service registry heartbeat，也不注册为 service registry 实例。它写入的 `metrics:heartbeat:*` 只表示指标快照的新鲜度，不能作为服务发现实例是否存活、是否可被 discovery 返回或是否可接流量的依据。
+`metrics-collector` 不参与 service registry heartbeat，也不注册为 service registry 实例。它写入的 v2 latest `_reported_at` 只表示指标快照的新鲜度；legacy 兼容窗口可能写入的 `metrics:heartbeat:*` 同样不能作为服务发现实例是否存活、是否可被 discovery 返回或是否可接流量的依据。
 
 ### 5.8 Redis key prefix 环境隔离
 
@@ -245,7 +245,7 @@ TTL 摘除只作为异常退出兜底，不是正常下线流程。滚动发布�
 
 `REDIS_KEY_PREFIX` 是业务 Redis key 隔离前缀，可以与 `REGISTRY_KEY_PREFIX` 相同，也可以分开管理。如果两者分开，部署和运维文档需要同时说明 route store、session、ticket、metrics snapshot 等业务 key 的隔离策略，避免 service registry 已隔离但业务状态仍跨环境混用。
 
-`metrics-collector` 当前写入的 metrics key 固定为 `metrics:*` / `metrics:heartbeat:*`，不是 service registry prefix 使用者。共享 Redis 时，metrics key 是否需要按环境隔离应单独评估和配置，不能把 `REGISTRY_KEY_PREFIX` 视为 metrics snapshot 的自动隔离手段。
+`metrics-collector` 当前常态写入 `metrics:v2:*`；只有显式 legacy 兼容窗口才写 `metrics:<service>:<instance>:<bucket>` / `metrics:heartbeat:*`。这些都不是 service registry prefix 使用者。共享 Redis 时，metrics key 是否需要按环境隔离应单独评估和配置，不能把 `REGISTRY_KEY_PREFIX` 视为 metrics snapshot 的自动隔离手段。
 
 ## 6. game-proxy 单实例与多实例边界
 

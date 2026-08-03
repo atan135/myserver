@@ -134,6 +134,8 @@ late metrics 仍可在其 bucket 位于历史保留窗口时写入 history；但
 
 `metrics-collector` 必须用一个 versioned Lua 脚本或同等原子机制一次处理：payload 校验、latest 顺序比较、latest hash / index、history hash / index、过期时间、索引清理和容量判定。脚本版本应通过应用 metrics 暴露为 `metrics_storage_schema_version=2`。
 
+`METRICS_LEGACY_WRITE_ENABLED` 是 legacy 兼容写的唯一开关，接受 `true/false/1/0`，默认和生产目标值均为 `false`。只有经批准的迁移观察窗口可以显式设为 `true`；关闭时 Lua 不得创建或续期 `metrics:<service>:<instance>:<bucket>`、service heartbeat 或 instance heartbeat。collector 启动日志与存储计数器必须暴露 `metrics_legacy_write_enabled`、`metrics_legacy_writes_total` 和写入拒绝数，便于确认实际切换状态。
+
 Redis 命令或脚本失败时，collector 只记录失败和内部指标，继续处理后续 NATS 消息；不得重试到无限堆积，也不得把失败误报为已落库。NATS 的 at-least-once 重投必须保持幂等：相同 `service + instance + bucket` 最终只保留一份记录。
 
 ## 4. Registry 实例索引
@@ -245,11 +247,39 @@ Registry 实例应分别暴露 `registry_state` 与 `metrics_state`，不得把�
 3. **验证**：比较旧/新每 service 的活跃实例数、实例 ID 集合、最近 bucket 聚合结果、history index 连续性和归档幂等性；所有差异必须先处理。
 4. **切读**：发布 admin-api 与所有 Node/Rust consumers，使其只读 v2 metrics / registry index。此时任何正常请求路径均无 legacy scan fallback。
 5. **观察**：保持 metrics legacy 双写至少 24 小时且覆盖一个 archive 周期；保持 Registry legacy payload 兼容至少一个完整发布窗口，确认所有实例的 build version 都支持 index。
-6. **删除**：先停止 legacy metrics 双写，再等待 legacy metrics TTL 自然过期或用离线限速清理；确认所有消费者不再调用 legacy scan 后，删除 legacy Registry 扫描代码。完成前保留文档化回滚开关。
+6. **删除**：将 `METRICS_LEGACY_WRITE_ENABLED=false` 并至少观察两个上报周期；确认 legacy 最新 bucket 不再前移、key 数不再增长后，再等待 TTL 自然过期或用离线限速清理。确认所有消费者不再调用 legacy scan 后，删除 legacy Registry 扫描代码。完成前保留文档化回滚开关。
 
 旧 metrics key 的默认兼容期限为从切读成功起 7 天；不得因 Redis 空间压力直接 `FLUSHDB` 或批量无前缀删除。legacy 清理只允许对已验证的 `<MP>metrics:` 精确前缀执行，使用 `UNLINK`，每批有上限并记录删除数。
 
-### 8.2 回滚顺序
+### 8.2 Legacy 清理工具
+
+`tools/metrics-legacy-cleanup.js` 是唯一允许执行 legacy metrics 删除的仓库工具。它默认 dry-run，只接受精确的 `metrics:<service>:<instance>:<bucket>` 和经确认的旧 `metrics:<service>:<bucket>` Hash；`metrics:v2:*`、`metrics:heartbeat:*`、未知结构、非 Hash 和其他业务 key 一律排除。生产通过 metrics-collector 镜像在 Compose internal network 内执行，连接串从容器的 `REDIS_URL` 环境变量读取，不出现在命令参数或报告中。
+
+空生产前缀的 dry-run 示例：
+
+```bash
+mkdir -p /data/myserver/ops/metrics-legacy-cleanup
+docker compose --env-file ./compose.production.env -f ./compose.production.yml run --rm --no-deps \
+  -v /data/myserver/ops/metrics-legacy-cleanup:/ops \
+  metrics-collector node /app/tools/metrics-legacy-cleanup.js \
+  --redis-url-env REDIS_URL --key-prefix '' --allow-empty-prefix --pretty
+```
+
+实际清理还必须提供变更单或操作者标识、确认短语、checkpoint 和 NDJSON 审计文件，并使用经预发验证的批量与间隔：
+
+```bash
+docker compose --env-file ./compose.production.env -f ./compose.production.yml run --rm --no-deps \
+  -v /data/myserver/ops/metrics-legacy-cleanup:/ops \
+  metrics-collector node /app/tools/metrics-legacy-cleanup.js \
+  --redis-url-env REDIS_URL --key-prefix '' --allow-empty-prefix \
+  --apply --confirm legacy-metrics-unlink --operator '<change-id-or-operator>' \
+  --batch-size 100 --delay-ms 100 \
+  --checkpoint /ops/checkpoint.json --audit-log /ops/audit.ndjson --pretty
+```
+
+dry-run 的 `eligibleHashes` 必须与预期 legacy 数量相符，且 `excluded.v2`、`excluded.heartbeat`、`excluded.wrong_type` 和异常结构统计经过人工复核。中断后仅可使用同一 Redis 目标、前缀、模式和 checkpoint 加 `--resume` 继续；已完成 checkpoint 不可重复执行。
+
+### 8.3 回滚顺序
 
 - **切读前失败**：停止 bootstrap / backfill，保留 legacy 读写；v2 key 可自然过期，不影响线上路径。
 - **切读后、legacy 双写期内失败**：先把 consumers 切回已验证的 legacy 版本，再停止 v2 读取；collector 继续 legacy 双写，禁止执行 legacy 删除。

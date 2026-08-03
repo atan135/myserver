@@ -183,12 +183,27 @@ DISALLOW_LEGACY_DIRECT_CONFIG=true
 - 聊天实例容量门槛已加载：`CHAT_MAX_CONNECTIONS=500`、`CHAT_WS_HANDSHAKE_RATE_MAX=120` / 秒、`CHAT_WS_MAX_PENDING_HANDSHAKES=64`、每连接 `20` 条消息/秒、每连接 `32` 条出站队列和 `256MiB` 内存上限。接流量前确认 `connection_capacity_current`、握手拒绝、出站队列失败和 `chat_push_publish_queue_depth` 没有告警；具体阈值与处置见[聊天与邮件系统设计](../../周边服务/聊天与邮件系统设计.md)。
 - Node HTTP `/healthz`、后续 Rust readiness endpoint 和数据库 postflight 均通过；管理口仅能从受控网络访问。
 - 内存限制、Redis `noeviction`、PostgreSQL 参数、日志轮转和备份任务已实际加载，而非只存在于配置文件。
+- metrics-collector 的 `METRICS_LEGACY_WRITE_ENABLED=false` 已实际加载，启动日志显示 `metrics_legacy_write_enabled=0`；切读完成后不得因遗漏配置继续生成 7 天 TTL 的 legacy bucket。
 
 ### 3.5 Redis 持久化与全局 ID lease
 
 本单机部署中，Redis 是 session、ticket、route、registry 和 worker lease 的运行时存储，PostgreSQL 才是业务数据的权威持久化来源。`deploy/docker/config/redis.conf` 必须保留 `appendonly yes` 和 `appendfsync everysec`，并显式设置 `save ""` 禁用默认 RDB snapshot 规则。这样避免高频 RDB fork/save 与 AOF fsync 争抢磁盘 I/O，导致 worker lease 在 TTL 内无法续租。
 
 全局 ID worker lease 使用 90 秒 TTL、每 30 秒续租。任一续租 Redis 错误或 ownership 丢失都会令对应服务以非零状态退出；Compose 的 `restart: unless-stopped` 会在 Redis 恢复后重新启动服务并重新申请 lease。出现这类重启时，先检查 Redis AOF 延迟、磁盘空间和 I/O，再恢复或扩大流量；不要在运行中的旧进程里手工恢复发号。
+
+### 3.6 Redis `maxmemory` 与 legacy metrics 恢复
+
+Redis 保持 `maxmemory-policy noeviction`，因此达到 `maxmemory` 后会拒绝 registry heartbeat、全局 ID worker lease、session/ticket 和 route 等关键写入。若日志出现 `OOM command not allowed when used memory > 'maxmemory'`，先停止发布和接新流量，保存 `INFO memory`、`INFO keyspace`、`INFO stats`、`INFO commandstats`、容器状态、重启计数和相关服务日志；不得用批量重启掩盖故障。
+
+若 legacy metrics 是主要占用，恢复顺序固定为：
+
+1. 确认 admin-api 和归档任务只读 metrics v2，保存当前 v2 snapshot/history 连续性证据。
+2. 发布并确认 metrics-collector 启动日志为 `metrics_legacy_write_enabled=0`，观察至少两个 5 秒上报周期，确认 legacy 最新 bucket 不再前移。
+3. 按[Registry 监控读模型设计](../../../安全与监控/Registry监控读模型设计.md#82-legacy-清理工具)先执行 dry-run，复核目标、排除分类和数量。
+4. 获得明确线上变更授权后，用限速 `UNLINK` 工具释放 legacy Hash，持续观察 Redis CPU、延迟和 `used_memory/maxmemory`；内存降至 75% 以下后停止扩大删除速率。
+5. 验证 Redis OOM 错误不再增长，再按依赖顺序恢复 `game-server`、`match-service`、`chat-server` 和 `auth-http`，确认 worker lease、registry heartbeat、readiness/health 与重启计数稳定。
+
+只提高 Docker `mem_limit` 不会改变 Redis `maxmemory`。若确需调整容量，必须同时核对两层限制、memory-swap、4C8G 宿主机总预算和回退值；禁止 `FLUSHDB`、无前缀删除、直接删除 `metrics:v2:*` 或在 legacy producer 仍写入时循环清理。
 
 ## 4. 日常镜像更新
 
