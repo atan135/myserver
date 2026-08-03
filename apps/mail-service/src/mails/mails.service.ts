@@ -64,7 +64,7 @@ function publicAttachments(attachments: any) {
     .filter((attachment) => attachment && typeof attachment === "object")
     .map((attachment) => ({
       type: typeof attachment.type === "string" ? attachment.type : "item",
-      id: attachment.id ?? attachment.item_id ?? null,
+      id: attachment.id ?? attachment.item_id ?? attachment.itemId ?? null,
       count: Number.isInteger(attachment.count) ? attachment.count : Number.parseInt(String(attachment.count), 10) || 0,
       binded: attachment.binded === true
     }));

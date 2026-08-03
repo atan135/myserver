@@ -542,6 +542,7 @@ test("capacity blocked preserves the frozen mail claim for a player-only retry",
   assert.equal(blocked._http_status, 409);
   assert.equal(blocked.retryable, false);
   assert.equal(blocked.player_retryable, true);
+  assert.deepEqual(blocked.attachments, [{ type: "item", id: 1001, count: 2, binded: true }]);
   assert.equal(beforeRetry.status, "blocked_capacity");
   assert.equal(beforeRetry.claim_request_id, "mail_claim:mail-1");
   assert.deepEqual(beforeRetry.attachments_snapshot, [{ itemId: 1001, count: 2, binded: true }]);
