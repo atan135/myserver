@@ -359,11 +359,8 @@ impl Default for RoomPolicyRegistry {
 }
 
 impl RoomPolicyRegistry {
-    pub fn resolve(&self, policy_id: &str) -> RoomRuntimePolicy {
-        self.policies
-            .get(policy_id)
-            .cloned()
-            .unwrap_or_else(|| self.default_policy.clone())
+    pub fn resolve(&self, policy_id: &str) -> Option<RoomRuntimePolicy> {
+        self.policies.get(policy_id).cloned()
     }
 
     pub fn default_policy(&self) -> &RoomRuntimePolicy {
@@ -398,7 +395,7 @@ impl SharedRoomPolicyRegistry {
         *guard = registry;
     }
 
-    pub fn resolve(&self, policy_id: &str) -> RoomRuntimePolicy {
+    pub fn resolve(&self, policy_id: &str) -> Option<RoomRuntimePolicy> {
         self.snapshot().resolve(policy_id)
     }
 
@@ -420,7 +417,7 @@ mod tests {
     #[test]
     fn builtin_room_policy_defaults_cover_tick_input_and_capacity() {
         let registry = RoomPolicyRegistry::default();
-        let movement = registry.resolve("movement_demo");
+        let movement = registry.resolve("movement_demo").unwrap();
         assert_eq!(movement.max_members, 32);
         assert_eq!(movement.min_start_players, 1);
         assert_eq!(movement.active_room_fps, 20);
@@ -428,7 +425,7 @@ mod tests {
         assert_eq!(movement.wait_strategy, InputWaitStrategy::Optimistic);
         assert_eq!(movement.missing_input_strategy, MissingInputStrategy::Empty);
 
-        let combat = registry.resolve("combat_demo");
+        let combat = registry.resolve("combat_demo").unwrap();
         assert_eq!(combat.busy_room_fps, 30);
         assert_eq!(combat.snapshot_interval_frames, 10);
         assert_eq!(combat.wait_timeout_ms, 100);
@@ -437,7 +434,7 @@ mod tests {
     #[test]
     fn robot_sync_room_policy_resolves_to_explicit_runtime_settings() {
         let registry = RoomPolicyRegistry::default();
-        let robot_sync = registry.resolve("robot_sync_room");
+        let robot_sync = registry.resolve("robot_sync_room").unwrap();
 
         assert_eq!(robot_sync.policy_id, "robot_sync_room");
         assert_eq!(robot_sync.max_members, 32);
@@ -467,14 +464,13 @@ mod tests {
         assert_eq!(robot_sync.movement_aoi_radius, 0.0);
         assert_eq!(robot_sync.movement_control_stop_frames, 0);
 
-        let fallback = registry.resolve("unknown_robot_sync_room");
-        assert_eq!(fallback.policy_id, DEFAULT_ROOM_POLICY_ID);
+        assert!(registry.resolve("unknown_robot_sync_room").is_none());
     }
 
     #[test]
     fn lockstep_sim_demo_policy_resolves_to_demo_runtime_settings() {
         let registry = RoomPolicyRegistry::default();
-        let lockstep = registry.resolve("lockstep_sim_demo");
+        let lockstep = registry.resolve("lockstep_sim_demo").unwrap();
 
         assert_eq!(lockstep.policy_id, "lockstep_sim_demo");
         assert_eq!(lockstep.max_members, 32);
@@ -501,7 +497,7 @@ mod tests {
         assert_eq!(lockstep.movement_aoi_radius, 0.0);
         assert_eq!(lockstep.movement_control_stop_frames, 0);
 
-        let robot_sync = registry.resolve("robot_sync_room");
+        let robot_sync = registry.resolve("robot_sync_room").unwrap();
         assert_eq!(robot_sync.active_room_fps, 20);
         assert_eq!(robot_sync.busy_room_fps, 20);
         assert_eq!(robot_sync.snapshot_interval_frames, 20);
@@ -511,12 +507,12 @@ mod tests {
             MissingInputStrategy::Empty
         );
 
-        let movement = registry.resolve("movement_demo");
+        let movement = registry.resolve("movement_demo").unwrap();
         assert_eq!(movement.active_room_fps, 20);
         assert_eq!(movement.snapshot_interval_frames, 15);
         assert_eq!(movement.movement_correction_interval_frames, 3);
 
-        let combat = registry.resolve("combat_demo");
+        let combat = registry.resolve("combat_demo").unwrap();
         assert_eq!(combat.busy_room_fps, 30);
         assert_eq!(combat.snapshot_interval_frames, 10);
     }
@@ -524,7 +520,7 @@ mod tests {
     #[test]
     fn shared_room_policy_registry_can_replace_defaults_atomically() {
         let shared = SharedRoomPolicyRegistry::default();
-        assert_eq!(shared.resolve("default_match").active_room_fps, 10);
+        assert_eq!(shared.resolve("default_match").unwrap().active_room_fps, 10);
 
         let custom = RoomPolicyRegistry {
             default_policy: RoomRuntimePolicy {
@@ -536,6 +532,6 @@ mod tests {
         shared.replace(Arc::new(custom));
 
         assert_eq!(shared.default_policy().active_room_fps, 24);
-        assert_eq!(shared.resolve("unknown").active_room_fps, 24);
+        assert!(shared.resolve("unknown").is_none());
     }
 }

@@ -103,13 +103,13 @@ impl RoomLogicTransfer for RecordingRoomLogic {
 }
 
 impl RoomLogicFactory for RecordingRoomLogicFactory {
-    fn create(&self, _policy_id: &str) -> Box<dyn RoomLogic> {
-        Box::new(RecordingRoomLogic {
+    fn create(&self, _policy_id: &str) -> Result<Box<dyn RoomLogic>, &'static str> {
+        Ok(Box::new(RecordingRoomLogic {
             ticks: Arc::clone(&self.ticks),
             inputs: Arc::clone(&self.inputs),
             imported_transfer_states: Arc::clone(&self.imported_transfer_states),
             state: "recording-state-v1".to_string(),
-        })
+        }))
     }
 }
 
@@ -122,8 +122,8 @@ impl RoomLogic for UnsupportedTransferRoomLogic {}
 pub(super) struct UnsupportedTransferRoomLogicFactory;
 
 impl RoomLogicFactory for UnsupportedTransferRoomLogicFactory {
-    fn create(&self, _policy_id: &str) -> Box<dyn RoomLogic> {
-        Box::new(UnsupportedTransferRoomLogic)
+    fn create(&self, _policy_id: &str) -> Result<Box<dyn RoomLogic>, &'static str> {
+        Ok(Box::new(UnsupportedTransferRoomLogic))
     }
 }
 

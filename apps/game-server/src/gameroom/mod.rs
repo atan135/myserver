@@ -17,5 +17,4 @@ pub use movement_demo::MovementDemoLogic;
 pub use persistent_world::PersistentWorldLogic;
 pub use robot_sync_room::RobotSyncRoomLogic;
 pub use sandbox::SandboxLogic;
-pub use test_room::TestRoomLogic;
 pub use ui_touch_room::UITouchRoomLogic;

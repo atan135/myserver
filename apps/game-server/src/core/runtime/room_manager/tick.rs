@@ -99,7 +99,14 @@ impl RoomManager {
     }
 
     pub(super) fn compute_room_fps(&self, room: &Room) -> u16 {
-        let policy = self.policies.resolve(&room.policy_id);
+        let Some(policy) = self.policies.resolve(&room.policy_id) else {
+            warn!(
+                room_id = %room.room_id,
+                policy_id = %room.policy_id,
+                "room frame rate disabled because policy is unsupported"
+            );
+            return 1;
+        };
         let online_count = room.broadcast_members().len();
 
         if online_count == 0 {
@@ -141,7 +148,7 @@ impl RoomManager {
             return None;
         }
 
-        let policy = self.policies.resolve(&room.policy_id);
+        let policy = self.policies.resolve(&room.policy_id)?;
         let snapshot_interval = policy.snapshot_interval_frames;
         room.ensure_wait_started();
 

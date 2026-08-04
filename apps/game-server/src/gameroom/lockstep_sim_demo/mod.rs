@@ -1149,7 +1149,7 @@ mod tests {
     fn factory_creates_lockstep_sim_demo_without_replacing_old_demos() {
         let factory = GameRoomLogicFactory::new(config_tables());
 
-        let mut logic = factory.create(LOCKSTEP_SIM_DEMO_POLICY_ID);
+        let mut logic = factory.create(LOCKSTEP_SIM_DEMO_POLICY_ID).unwrap();
         logic.on_room_created("room-lockstep");
         logic.on_character_join("player-a");
         logic.on_game_started("room-lockstep");
@@ -1160,7 +1160,7 @@ mod tests {
         assert_eq!(state["worldFrame"], 1);
         assert_eq!(state["configVersion"], 1);
 
-        let robot = factory.create("robot_sync_room");
+        let robot = factory.create("robot_sync_room").unwrap();
         assert_eq!(
             robot.validate_character_input(
                 "player-a",
@@ -1171,13 +1171,13 @@ mod tests {
         );
 
         let movement_state = serde_json::from_str::<serde_json::Value>(
-            &factory.create("movement_demo").get_serialized_state(),
+            &factory.create("movement_demo").unwrap().get_serialized_state(),
         )
         .unwrap();
         assert!(movement_state.get("scene_id").is_some());
 
         let combat_state = serde_json::from_str::<serde_json::Value>(
-            &factory.create("combat_demo").get_serialized_state(),
+            &factory.create("combat_demo").unwrap().get_serialized_state(),
         )
         .unwrap();
         assert!(combat_state.get("snapshot").is_some());

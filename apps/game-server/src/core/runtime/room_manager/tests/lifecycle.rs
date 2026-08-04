@@ -75,6 +75,92 @@ async fn room_exists_reflects_room_creation() {
 }
 
 #[tokio::test]
+async fn join_room_rejects_unknown_policy_before_creating_room() {
+    let manager = RoomManager::with_match_client(
+        crate::match_client::create_match_client_shared(),
+        Arc::new(RecordingRoomLogicFactory::default()),
+    );
+
+    assert_eq!(
+        manager
+            .join_room(
+                "main-world-public",
+                PLAYER_A,
+                mpsc::channel(1024).0,
+                MemberRole::Player,
+                Some("unknown_policy"),
+            )
+            .await,
+        Err("ROOM_POLICY_UNSUPPORTED")
+    );
+    assert!(!manager.room_exists("main-world-public").await);
+}
+
+#[tokio::test]
+async fn join_room_rejects_policy_mismatch_for_existing_room() {
+    let manager = RoomManager::with_match_client(
+        crate::match_client::create_match_client_shared(),
+        Arc::new(RecordingRoomLogicFactory::default()),
+    );
+
+    manager
+        .join_room(
+            "main-world-public",
+            PLAYER_A,
+            mpsc::channel(1024).0,
+            MemberRole::Player,
+            Some(MOVEMENT_DEMO_POLICY),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        manager
+            .join_room(
+                "main-world-public",
+                PLAYER_B,
+                mpsc::channel(1024).0,
+                MemberRole::Player,
+                Some(DEFAULT_POLICY),
+            )
+            .await,
+        Err("ROOM_POLICY_MISMATCH")
+    );
+    with_room_for_test(&manager, "main-world-public", |room| {
+        assert_eq!(room.policy_id, MOVEMENT_DEMO_POLICY);
+        assert_eq!(room.members.len(), 1);
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn join_room_reuses_fixed_public_room_with_matching_policy() {
+    let manager = RoomManager::with_match_client(
+        crate::match_client::create_match_client_shared(),
+        Arc::new(RecordingRoomLogicFactory::default()),
+    );
+
+    for character_id in [PLAYER_A, PLAYER_B] {
+        manager
+            .join_room(
+                "main-world-public",
+                character_id,
+                mpsc::channel(1024).0,
+                MemberRole::Player,
+                Some(MOVEMENT_DEMO_POLICY),
+            )
+            .await
+            .unwrap();
+    }
+
+    with_room_for_test(&manager, "main-world-public", |room| {
+        assert_eq!(room.policy_id, MOVEMENT_DEMO_POLICY);
+        assert_eq!(room.members.len(), 2);
+    })
+    .await;
+}
+
+#[tokio::test]
 async fn new_room_publish_creates_runtime_before_room_is_observable() {
     let factory = RecordingRoomLogicFactory::default();
     let manager = RoomManager::with_match_client(

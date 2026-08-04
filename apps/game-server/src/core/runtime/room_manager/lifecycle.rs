@@ -19,7 +19,7 @@ impl RoomManager {
 
             (room.snapshot(), self.room_count().await)
         } else {
-            let mut logic = self.logic_factory.create(&default_policy.policy_id);
+            let mut logic = self.logic_factory.create(&default_policy.policy_id)?;
             logic.on_room_created(room_id);
             info!(
                 room_id = room_id,
@@ -64,7 +64,10 @@ impl RoomManager {
             return Err(room_mutation_error_code(room));
         }
 
-        let policy = self.policies.resolve(&room.policy_id);
+        let policy = self
+            .policies
+            .resolve(&room.policy_id)
+            .ok_or("ROOM_POLICY_UNSUPPORTED")?;
         if room.phase == RoomPhase::InGame
             && !policy.allow_join_in_game
             && !room.members.contains_key(character_id)
@@ -117,7 +120,10 @@ impl RoomManager {
             return Err(room_mutation_error_code(room));
         }
 
-        let policy = self.policies.resolve(&room.policy_id);
+        let policy = self
+            .policies
+            .resolve(&room.policy_id)
+            .ok_or("ROOM_POLICY_UNSUPPORTED")?;
         if room.members.len() >= policy.max_members && !room.members.contains_key(character_id) {
             return Err("ROOM_FULL");
         }
@@ -147,7 +153,11 @@ impl RoomManager {
         let recent_inputs = room_frame_inputs_from_history(room, current_frame_id);
         let waiting_frame_id = room.current_waiting_frame_id();
         let waiting_inputs = room_frame_inputs_from_pending(room, waiting_frame_id);
-        let input_delay_frames = self.policies.resolve(&room.policy_id).input_delay_frames;
+        let input_delay_frames = self
+            .policies
+            .resolve(&room.policy_id)
+            .ok_or("ROOM_POLICY_UNSUPPORTED")?
+            .input_delay_frames;
         let movement_recovery = room
             .logic
             .movement_recovery_state(None, MovementCorrectionReason::ObserverRecovery);
@@ -176,12 +186,18 @@ impl RoomManager {
             .filter(|value| !value.is_empty())
             .map(str::to_string)
             .unwrap_or_else(|| self.policies.default_policy().policy_id);
-        let selected_policy = self.policies.resolve(&requested_policy_id);
+        let selected_policy = self
+            .policies
+            .resolve(&requested_policy_id)
+            .ok_or("ROOM_POLICY_UNSUPPORTED")?;
         let mut outbound = Some(outbound);
         let (snapshot, match_id, room_count) = if let Some(room_entry) =
             self.get_room_entry(room_id).await
         {
             let mut room = room_entry.lock().await;
+            if room.policy_id != requested_policy_id {
+                return Err("ROOM_POLICY_MISMATCH");
+            }
             let (snapshot, match_id) = self.join_existing_room_locked(
                 &mut room,
                 character_id,
@@ -190,7 +206,7 @@ impl RoomManager {
             )?;
             (snapshot, match_id, self.room_count().await)
         } else {
-            let mut logic = self.logic_factory.create(&selected_policy.policy_id);
+            let mut logic = self.logic_factory.create(&selected_policy.policy_id)?;
             logic.on_room_created(room_id);
             info!(
                 room_id = room_id,
@@ -532,7 +548,11 @@ impl RoomManager {
             let recent_inputs = room_frame_inputs_from_history(&room, current_frame_id);
             let waiting_frame_id = room.current_waiting_frame_id();
             let waiting_inputs = room_frame_inputs_from_pending(&room, waiting_frame_id);
-            let input_delay_frames = self.policies.resolve(&room.policy_id).input_delay_frames;
+            let input_delay_frames = self
+                .policies
+                .resolve(&room.policy_id)
+                .ok_or("ROOM_POLICY_UNSUPPORTED")?
+                .input_delay_frames;
             let movement_recovery = room.logic.movement_recovery_state(
                 Some(character_id),
                 MovementCorrectionReason::ReconnectRecovery,
@@ -581,7 +601,7 @@ impl RoomManager {
             )?;
             (recovery, self.room_count().await)
         } else {
-            let mut logic = self.logic_factory.create(&default_policy.policy_id);
+            let mut logic = self.logic_factory.create(&default_policy.policy_id)?;
             logic.on_room_created(room_id);
             info!(
                 room_id = room_id,
@@ -641,7 +661,14 @@ impl RoomManager {
                 continue;
             }
 
-            let policy = self.policies.resolve(&room.policy_id);
+            let Some(policy) = self.policies.resolve(&room.policy_id) else {
+                warn!(
+                    room_id = %room_id,
+                    policy_id = %room.policy_id,
+                    "skipping expired-member cleanup for room with unsupported policy"
+                );
+                continue;
+            };
             let expired = room.collect_expired_offline_characters(policy.offline_ttl_secs);
 
             if !expired.is_empty() {
@@ -703,7 +730,10 @@ impl RoomManager {
         {
             let room_entry = self.get_room_entry(room_id).await.ok_or("ROOM_NOT_FOUND")?;
             let mut room = room_entry.lock().await;
-            let policy = self.policies.resolve(&room.policy_id);
+            let policy = self
+                .policies
+                .resolve(&room.policy_id)
+                .ok_or("ROOM_POLICY_UNSUPPORTED")?;
 
             if room_rejects_mutation(&room) {
                 return Err(room_mutation_error_code(&room));
@@ -738,7 +768,10 @@ impl RoomManager {
     ) -> Result<(), &'static str> {
         let room_entry = self.get_room_entry(room_id).await.ok_or("ROOM_NOT_FOUND")?;
         let mut room = room_entry.lock().await;
-        let policy = self.policies.resolve(&room.policy_id);
+        let policy = self
+            .policies
+            .resolve(&room.policy_id)
+            .ok_or("ROOM_POLICY_UNSUPPORTED")?;
 
         if room_rejects_mutation(&room) {
             return Err(room_mutation_error_code(&room));

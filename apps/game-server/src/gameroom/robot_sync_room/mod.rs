@@ -308,7 +308,7 @@ mod tests {
     fn factory_creates_robot_sync_room_logic() {
         let factory = GameRoomLogicFactory::new(config_tables());
 
-        let logic = factory.create("robot_sync_room");
+        let logic = factory.create("robot_sync_room").unwrap();
         assert_eq!(
             logic.validate_character_input("player-a", ROBOT_MOVE_ACTION, valid_payload()),
             Ok(())

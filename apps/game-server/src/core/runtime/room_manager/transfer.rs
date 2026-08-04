@@ -256,7 +256,10 @@ impl RoomManager {
             return Err("ROOM_TRANSFER_EPOCH_MISMATCH");
         }
 
-        let policy = self.policies.resolve(&room.policy_id);
+        let policy = self
+            .policies
+            .resolve(&room.policy_id)
+            .ok_or("ROOM_POLICY_UNSUPPORTED")?;
         let current_frame_id = room.current_frame;
         let last_applied_frame_id = room
             .last_applied_inputs
@@ -422,7 +425,7 @@ impl RoomManager {
             return Err("ROOM_TRANSFER_ROOM_CONFLICT");
         }
 
-        let mut logic = self.logic_factory.create(&payload.policy_id);
+        let mut logic = self.logic_factory.create(&payload.policy_id)?;
         logic.on_room_created(&room_id);
         if let Err(error_code) = logic.import_transfer_state(&transfer_state) {
             warn!(

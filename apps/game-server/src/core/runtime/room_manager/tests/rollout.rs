@@ -68,7 +68,7 @@ async fn rollout_drain_snapshot_counts_empty_owned_rooms_as_transferable() {
         "room-empty".to_string(),
         "owner".to_string(),
         DEFAULT_POLICY.to_string(),
-        factory.create(DEFAULT_POLICY),
+        factory.create(DEFAULT_POLICY).unwrap(),
     );
     insert_room_for_test(&manager, "room-empty", empty_room).await;
 
@@ -140,7 +140,7 @@ async fn rollout_drain_snapshot_counts_transfer_states_as_migrating() {
             room_id.to_string(),
             "owner".to_string(),
             DEFAULT_POLICY.to_string(),
-            factory.create(DEFAULT_POLICY),
+            factory.create(DEFAULT_POLICY).unwrap(),
         );
         room.mark_empty();
         room.transfer_state.rollout_epoch = Some(ROLLOUT_EPOCH.to_string());
@@ -199,7 +199,7 @@ async fn rollout_drain_snapshot_excludes_transferred_rooms_from_blockers_and_cou
             room_id.to_string(),
             "owner".to_string(),
             DEFAULT_POLICY.to_string(),
-            factory.create(DEFAULT_POLICY),
+            factory.create(DEFAULT_POLICY).unwrap(),
         );
         room.transfer_state.rollout_epoch = Some(ROLLOUT_EPOCH.to_string());
         room.transfer_state.status = status;

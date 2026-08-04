@@ -154,7 +154,14 @@ impl RoomManager {
                             continue;
                         }
 
-                        let policy = policies.resolve(&room.policy_id);
+                        let Some(policy) = policies.resolve(&room.policy_id) else {
+                            warn!(
+                                room_id = %room_id,
+                                policy_id = %room.policy_id,
+                                "skipping cleanup for room with unsupported policy"
+                            );
+                            continue;
+                        };
                         let expired_characters =
                             room.collect_expired_offline_characters(policy.offline_ttl_secs);
                         if !expired_characters.is_empty() {

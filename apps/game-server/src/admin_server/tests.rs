@@ -58,8 +58,8 @@ impl RoomLogicTransfer for NoopRoomLogic {}
 struct NoopRoomLogicFactory;
 
 impl RoomLogicFactory for NoopRoomLogicFactory {
-    fn create(&self, _policy_id: &str) -> Box<dyn RoomLogic> {
-        Box::new(NoopRoomLogic)
+    fn create(&self, _policy_id: &str) -> Result<Box<dyn RoomLogic>, &'static str> {
+        Ok(Box::new(NoopRoomLogic))
     }
 }
 
