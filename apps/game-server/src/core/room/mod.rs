@@ -256,6 +256,9 @@ pub enum RoomPhase {
     InGame,
 }
 
+pub const MAIN_WORLD_PUBLIC_ROOM_ID: &str = "main-world-public";
+pub const MAIN_WORLD_PUBLIC_POLICY_ID: &str = "movement_demo";
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MemberRole {
     Player,
@@ -465,6 +468,11 @@ impl Room {
         }
     }
 
+    /// The main world is a fixed public room rather than an owner-gated match.
+    pub fn is_persistent_public_world(&self) -> bool {
+        self.room_id == MAIN_WORLD_PUBLIC_ROOM_ID && self.policy_id == MAIN_WORLD_PUBLIC_POLICY_ID
+    }
+
     pub fn can_start_game(
         &self,
         character_id: &str,
@@ -472,6 +480,14 @@ impl Room {
     ) -> Result<(), &'static str> {
         if self.phase == RoomPhase::InGame {
             return Err("ROOM_ALREADY_IN_GAME");
+        }
+
+        if self.is_persistent_public_world() {
+            return self
+                .members
+                .contains_key(character_id)
+                .then_some(())
+                .ok_or("ROOM_MEMBER_NOT_FOUND");
         }
 
         if self.owner_character_id != character_id {

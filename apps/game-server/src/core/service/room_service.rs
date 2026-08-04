@@ -6,9 +6,10 @@ use tracing::{info, warn};
 use crate::core::character_push::queue_character_push;
 use crate::core::context::{ConnectionContext, ServiceContext};
 use crate::core::room::MemberRole;
-use crate::core::system::movement::player_input_from_move_req;
+use crate::core::system::movement::{correction_reason_label, player_input_from_move_req};
 use crate::pb::{
-    CreateMatchedRoomReq, CreateMatchedRoomRes, MoveInputReq, MoveInputRes, PlayerInputReq,
+    CreateMatchedRoomReq, CreateMatchedRoomRes, MoveInputReq, MoveInputRes,
+    MovementCorrectionReason, MovementRecoveryState, MovementSnapshotPush, PlayerInputReq,
     PlayerInputRes, RoomEndReq, RoomEndRes, RoomJoinAsObserverReq, RoomJoinAsObserverRes,
     RoomJoinReq, RoomJoinRes, RoomLeaveRes, RoomReadyReq, RoomReadyRes, RoomReconnectReq,
     RoomReconnectRes, RoomStartRes,
@@ -143,6 +144,32 @@ pub async fn handle_room_join(
                         snapshot: Some(snapshot.clone()),
                     },
                 )?;
+                if let Some(recovery) = services
+                    .room_manager
+                    .movement_recovery_state_for_character(
+                        &room_id,
+                        &character_id,
+                        MovementCorrectionReason::ReconnectRecovery,
+                    )
+                    .await
+                {
+                    info!(
+                        room_id = %room_id,
+                        frame_id = recovery.frame_id,
+                        entity_count = recovery.entities.len(),
+                        "sending movement recovery snapshot to in-game joiner"
+                    );
+                    connection.queue_message(
+                        MessageType::MovementSnapshotPush,
+                        0,
+                        movement_snapshot_for_join(&room_id, &character_id, recovery),
+                    )?;
+                } else {
+                    warn!(
+                        room_id = %room_id,
+                        "in-game joiner has no movement recovery snapshot"
+                    );
+                }
             }
             services
                 .db_store
@@ -216,6 +243,26 @@ pub async fn handle_room_join(
     }
 
     Ok(())
+}
+
+fn movement_snapshot_for_join(
+    room_id: &str,
+    character_id: &str,
+    recovery: MovementRecoveryState,
+) -> MovementSnapshotPush {
+    let reason = MovementCorrectionReason::try_from(recovery.reason_code)
+        .unwrap_or(MovementCorrectionReason::ReconnectRecovery);
+    MovementSnapshotPush {
+        room_id: room_id.to_string(),
+        frame_id: recovery.frame_id,
+        entities: recovery.entities,
+        full_sync: true,
+        reason: correction_reason_label(reason).to_string(),
+        correction_kind: recovery.correction_kind,
+        reason_code: recovery.reason_code,
+        target_character_ids: vec![character_id.to_string()],
+        reference_frame_id: recovery.reference_frame_id,
+    }
 }
 
 pub async fn handle_room_leave(
@@ -1970,6 +2017,40 @@ mod tests {
     use crate::core::player::{PgPlayerStore, PlayerManager};
     use crate::core::runtime::RoomManager;
     use crate::db_store::PgAuditStore;
+
+    #[test]
+    fn in_game_join_recovery_becomes_a_targeted_full_snapshot() {
+        let recovery = MovementRecoveryState {
+            frame_id: 42,
+            entities: vec![crate::pb::EntityTransform {
+                entity_id: 1001,
+                character_id: "character-a".to_string(),
+                scene_id: 1,
+                x: 8.0,
+                y: 8.0,
+                dir_x: 0.0,
+                dir_y: 1.0,
+                moving: false,
+                last_input_frame: 40,
+            }],
+            correction_kind: crate::pb::MovementCorrectionKind::Recovery as i32,
+            reason_code: MovementCorrectionReason::ReconnectRecovery as i32,
+            reference_frame_id: 40,
+            aoi_enabled: false,
+            aoi_radius: 0.0,
+        };
+
+        let snapshot = movement_snapshot_for_join("main-world-public", "character-a", recovery);
+
+        assert_eq!(snapshot.room_id, "main-world-public");
+        assert_eq!(snapshot.frame_id, 42);
+        assert!(snapshot.full_sync);
+        assert_eq!(snapshot.reason, "reconnect_recovery");
+        assert_eq!(snapshot.target_character_ids, ["character-a"]);
+        assert_eq!(snapshot.entities.len(), 1);
+        assert_eq!(snapshot.entities[0].scene_id, 1);
+        assert_eq!(snapshot.reference_frame_id, 40);
+    }
 
     struct NoopRoomLogic;
 

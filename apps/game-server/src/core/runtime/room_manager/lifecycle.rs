@@ -68,8 +68,9 @@ impl RoomManager {
             .policies
             .resolve(&room.policy_id)
             .ok_or("ROOM_POLICY_UNSUPPORTED")?;
+        let allows_in_game_join = policy.allow_join_in_game || room.is_persistent_public_world();
         if room.phase == RoomPhase::InGame
-            && !policy.allow_join_in_game
+            && !allows_in_game_join
             && !room.members.contains_key(character_id)
         {
             return Err("ROOM_ALREADY_IN_GAME");
@@ -82,7 +83,7 @@ impl RoomManager {
         let previous_role = room.members.get(character_id).map(|member| member.role);
         let is_new_member = previous_role.is_none();
         let sync_before_broadcast =
-            is_new_member && room.phase == RoomPhase::InGame && policy.allow_join_in_game;
+            is_new_member && room.phase == RoomPhase::InGame && allows_in_game_join;
         room.members.insert(
             character_id.to_string(),
             RoomMemberState {
@@ -290,6 +291,18 @@ impl RoomManager {
             .get(character_id)
             .map(|member| member.syncing)
             .unwrap_or(false)
+    }
+
+    pub async fn movement_recovery_state_for_character(
+        &self,
+        room_id: &str,
+        character_id: &str,
+        reason: MovementCorrectionReason,
+    ) -> Option<PbMovementRecoveryState> {
+        let room_entry = self.get_room_entry(room_id).await?;
+        let room = room_entry.lock().await;
+        room.logic
+            .movement_recovery_state(Some(character_id), reason)
     }
 
     pub async fn leave_room(&self, room_id: &str, character_id: &str) -> RoomLeaveResult {
@@ -710,7 +723,7 @@ impl RoomManager {
         if room_rejects_mutation(&room) {
             return Err(room_mutation_error_code(&room));
         }
-        if room.phase == RoomPhase::InGame {
+        if room.phase == RoomPhase::InGame && !room.is_persistent_public_world() {
             return Err("ROOM_ALREADY_IN_GAME");
         }
 
@@ -737,6 +750,9 @@ impl RoomManager {
 
             if room_rejects_mutation(&room) {
                 return Err(room_mutation_error_code(&room));
+            }
+            if room.phase == RoomPhase::InGame && room.is_persistent_public_world() {
+                return Ok(room.snapshot());
             }
             room.can_start_game(character_id, policy.min_start_players)?;
             room.phase = RoomPhase::InGame;

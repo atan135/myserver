@@ -161,6 +161,67 @@ async fn join_room_reuses_fixed_public_room_with_matching_policy() {
 }
 
 #[tokio::test]
+async fn public_main_world_starts_without_match_ready_gate_and_accepts_rejoins() {
+    let manager = RoomManager::with_match_client(
+        crate::match_client::create_match_client_shared(),
+        Arc::new(RecordingRoomLogicFactory::default()),
+    );
+
+    for character_id in [PLAYER_A, PLAYER_B] {
+        manager
+            .join_room(
+                "main-world-public",
+                character_id,
+                mpsc::channel(1024).0,
+                MemberRole::Player,
+                Some(MOVEMENT_DEMO_POLICY),
+            )
+            .await
+            .unwrap();
+    }
+
+    let started = manager
+        .start_game("main-world-public", PLAYER_B)
+        .await
+        .unwrap();
+    assert_eq!(started.state, "in_game");
+
+    let rejoined = manager
+        .join_room(
+            "main-world-public",
+            PLAYER_C,
+            mpsc::channel(1024).0,
+            MemberRole::Player,
+            Some(MOVEMENT_DEMO_POLICY),
+        )
+        .await
+        .unwrap();
+    assert_eq!(rejoined.state, "in_game");
+    assert!(
+        manager
+            .is_member_syncing("main-world-public", PLAYER_C)
+            .await,
+        "an in-game public-world join must stay isolated until its recovery snapshot is queued"
+    );
+    manager
+        .finish_member_sync("main-world-public", PLAYER_C)
+        .await;
+    assert!(
+        !manager
+            .is_member_syncing("main-world-public", PLAYER_C)
+            .await
+    );
+
+    let ready = manager
+        .set_ready_state("main-world-public", PLAYER_C, true)
+        .await
+        .unwrap();
+    assert_eq!(ready.state, "in_game");
+
+    stop_runtime_for_test(&manager, "main-world-public").await;
+}
+
+#[tokio::test]
 async fn new_room_publish_creates_runtime_before_room_is_observable() {
     let factory = RecordingRoomLogicFactory::default();
     let manager = RoomManager::with_match_client(
