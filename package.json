@@ -69,7 +69,7 @@
     "test:auth-http": "node tools/run-node-tests.js tests/auth/auth-http.test.mjs",
     "test:integration": "node tools/run-node-tests.js tests/integration/integration-flow.test.mjs",
     "test:mail:unit": "npm test --workspace mail-service && npx tsc --noEmit -p apps/mail-service/tsconfig.json && npm test --workspace mock-client && node tools/run-node-tests.js tests/deploy/mail-https-edge-config.test.mjs tests/deploy/chat-wss-edge-config.test.mjs tests/mock-client/mock-client-websocket.test.mjs",
-    "test:mail:core": "node tools/run-node-tests.js tests/mail/mail-runtime-cleanup.test.mjs tests/mail/mail-managed-process.test.mjs tests/mail/mail-internal-core-flow.test.mjs tests/mail/mail-notify-claim-drill.test.mjs",
+    "test:mail:core": "node tools/run-node-tests.js tests/mail/mail-runtime-cleanup.test.mjs tests/mail/mail-managed-process.test.mjs tests/mail/mail-internal-core-flow.test.mjs tests/mail/mail-notify-claim-drill.test.mjs tests/mail/mail-two-account-ownership-acceptance.test.mjs",
     "test:mail:reliability": "node tools/run-node-tests.js tests/mail/mail-reliability-fault-drill.test.mjs",
     "test:mail:server": "node tools/run-mail-server-tests.js",
     "smoke:security": "node tools/smoke-security-and-ticket.js",
