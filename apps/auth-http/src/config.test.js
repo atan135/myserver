@@ -13,6 +13,8 @@ const CONFIG_ENV_KEYS = [
   "AUTH_PUBLIC_CHAT_PORT",
   "AUTH_PUBLIC_MAIL_HOST",
   "AUTH_PUBLIC_MAIL_PORT",
+  "AUTH_LOCAL_MAIL_HTTP_HOST",
+  "AUTH_LOCAL_MAIL_HTTP_PORT",
   "AUTH_REGISTER_REQUIRE_REVIEW",
   "DISCOVERY_REQUIRED",
   "DISALLOW_LEGACY_DIRECT_CONFIG",
@@ -221,6 +223,46 @@ test("auth-http builds a stable public HTTPS mail descriptor from deployment con
       protocol: "https"
     });
   });
+});
+
+test("auth-http builds an explicit local HTTP mail descriptor outside production", async () => {
+  await withEnv({
+    NODE_ENV: "development",
+    AUTH_LOCAL_MAIL_HTTP_HOST: "127.0.0.1",
+    AUTH_LOCAL_MAIL_HTTP_PORT: "9003"
+  }, (config) => {
+    assert.deepEqual(config.localMailDescriptor, {
+      host: "127.0.0.1",
+      port: 9003,
+      protocol: "http"
+    });
+  });
+});
+
+test("auth-http rejects the local HTTP mail descriptor in production", async () => {
+  await assert.rejects(
+    () => withEnv({
+      NODE_ENV: "production",
+      REGISTRY_ENABLED: "true",
+      TICKET_SECRET: "prod-ticket-secret-with-enough-entropy",
+      GAME_ADMIN_TOKEN: "prod-game-admin-token-with-enough-entropy",
+      INTERNAL_API_TOKEN: "prod-internal-api-token-with-enough-entropy",
+      AUTH_LOCAL_MAIL_HTTP_HOST: "127.0.0.1",
+      AUTH_LOCAL_MAIL_HTTP_PORT: "9003"
+    }, () => {}),
+    /AUTH_LOCAL_MAIL_HTTP_HOST is forbidden in production/
+  );
+});
+
+test("auth-http rejects the local HTTP mail descriptor outside local development", async () => {
+  await assert.rejects(
+    () => withEnv({
+      NODE_ENV: "staging",
+      AUTH_LOCAL_MAIL_HTTP_HOST: "127.0.0.1",
+      AUTH_LOCAL_MAIL_HTTP_PORT: "9003"
+    }, () => {}),
+    /AUTH_LOCAL_MAIL_HTTP_HOST is allowed only in local development/
+  );
 });
 
 test("auth-http leaves the public chat descriptor unset when deployment config is absent", async () => {

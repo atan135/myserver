@@ -115,6 +115,39 @@ function parsePublicMailDescriptor() {
   });
 }
 
+function parseLocalMailDescriptor() {
+  const hostEnvName = "AUTH_LOCAL_MAIL_HTTP_HOST";
+  const portEnvName = "AUTH_LOCAL_MAIL_HTTP_PORT";
+  const configuredHost = process.env[hostEnvName];
+  if (configuredHost === undefined || configuredHost.trim() === "") {
+    return null;
+  }
+  if (isProductionEnv()) {
+    throw new Error(
+      `Invalid auth-http local mail config: ${hostEnvName} is forbidden in production`
+    );
+  }
+  if (!isLocalDiscoveryFallbackEnv()) {
+    throw new Error(
+      `Invalid auth-http local mail config: ${hostEnvName} is allowed only in local development`
+    );
+  }
+  if (configuredHost !== configuredHost.trim() || /[\s/:?#@\[\]\\]/.test(configuredHost)) {
+    throw new Error(
+      `Invalid auth-http local mail config: ${hostEnvName} must be a hostname without a scheme, port, path, query, or fragment`
+    );
+  }
+
+  const portValue = process.env[portEnvName];
+  const port = Number.parseInt(portValue ?? "", 10);
+  if (!/^\d+$/.test(portValue ?? "") || !Number.isSafeInteger(port) || port < 1 || port > 65535) {
+    throw new Error(
+      `Invalid auth-http local mail config: ${portEnvName} must be an integer between 1 and 65535`
+    );
+  }
+  return { host: configuredHost, port, protocol: "http" };
+}
+
 const DEFAULT_TICKET_SECRETS = new Set([
   "dev-only-change-this-ticket-secret",
   "replace-with-a-long-random-string",
@@ -434,6 +467,7 @@ export function getConfig() {
       parseBoolean(process.env.AUTH_EXPOSE_INTERNAL_SERVICE_ENDPOINTS, false),
     publicChatDescriptor: parsePublicChatDescriptor(),
     publicMailDescriptor: parsePublicMailDescriptor(),
+    localMailDescriptor: parseLocalMailDescriptor(),
     authRequireTls: parseBoolean(process.env.AUTH_REQUIRE_TLS, isProductionEnv()),
     trustProxy: parseBoolean(process.env.TRUST_PROXY, false),
     trustedProxies: parseCsv(process.env.TRUSTED_PROXIES),

@@ -81,6 +81,7 @@ function createConfig(overrides = {}) {
     authExposeInternalServiceEndpoints: false,
     publicChatDescriptor: null,
     publicMailDescriptor: null,
+    localMailDescriptor: null,
     ...overrides
   };
 }
@@ -448,6 +449,28 @@ test("ServiceDiscovery returns a configured public mail descriptor without regis
     host: "api.game.zergzerg.cn",
     port: 443,
     protocol: "https"
+  });
+});
+
+test("ServiceDiscovery returns an explicitly configured local HTTP mail descriptor without registry discovery", async () => {
+  const discovery = new ServiceDiscovery(
+    createRedis({}),
+    createConfig({
+      registryDiscoveryEnabled: false,
+      localMailDescriptor: {
+        host: "127.0.0.1",
+        port: 9003,
+        protocol: "http"
+      }
+    })
+  );
+
+  const services = await discovery.discoverClientServices();
+
+  assert.deepEqual(services.mail, {
+    host: "127.0.0.1",
+    port: 9003,
+    protocol: "http"
   });
 });
 

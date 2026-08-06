@@ -53,7 +53,7 @@ export class ServiceDiscovery {
     const services = {
       game: createGameService(this.config),
       chat: this.config.publicChatDescriptor || null,
-      mail: this.config.publicMailDescriptor || null,
+      mail: this.config.publicMailDescriptor || this.config.localMailDescriptor || null,
       announce: null
     };
 

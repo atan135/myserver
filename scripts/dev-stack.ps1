@@ -6,6 +6,12 @@ param(
     [switch]$Restart,
 
     [Parameter(Mandatory=$false)]
+    [switch]$RestartMail,
+
+    [Parameter(Mandatory=$false)]
+    [switch]$RestartGameAndMail,
+
+    [Parameter(Mandatory=$false)]
     [switch]$StopExistingProjectProcesses,
 
     [Parameter(Mandatory=$false)]
@@ -475,21 +481,36 @@ function Start-ManagedProcess {
         [string[]]$Arguments = @(),
 
         [Parameter(Mandatory=$false)]
-        [string]$WorkingDirectory = $ProjectRoot
+        [string]$WorkingDirectory = $ProjectRoot,
+
+        [Parameter(Mandatory=$false)]
+        [hashtable]$EnvironmentOverrides = @{}
     )
 
     New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
     $stdout = Join-Path $LogDir "$Name.out.log"
     $stderr = Join-Path $LogDir "$Name.err.log"
 
-    $process = Start-Process `
-        -FilePath $FilePath `
-        -ArgumentList $Arguments `
-        -WorkingDirectory $WorkingDirectory `
-        -WindowStyle Hidden `
-        -RedirectStandardOutput $stdout `
-        -RedirectStandardError $stderr `
-        -PassThru
+    $previousEnvironment = @{}
+    foreach ($entry in $EnvironmentOverrides.GetEnumerator()) {
+        $previousEnvironment[$entry.Key] = [Environment]::GetEnvironmentVariable($entry.Key, "Process")
+        [Environment]::SetEnvironmentVariable($entry.Key, [string]$entry.Value, "Process")
+    }
+
+    try {
+        $process = Start-Process `
+            -FilePath $FilePath `
+            -ArgumentList $Arguments `
+            -WorkingDirectory $WorkingDirectory `
+            -WindowStyle Hidden `
+            -RedirectStandardOutput $stdout `
+            -RedirectStandardError $stderr `
+            -PassThru
+    } finally {
+        foreach ($entry in $previousEnvironment.GetEnumerator()) {
+            [Environment]::SetEnvironmentVariable($entry.Key, $entry.Value, "Process")
+        }
+    }
 
     Write-Host ("Started {0,-20} PID={1}" -f $Name, $process.Id) -ForegroundColor Cyan
 
@@ -514,7 +535,10 @@ function Start-PowerShellScript {
         [string]$ScriptPath,
 
         [Parameter(Mandatory=$false)]
-        [string[]]$ScriptArguments = @()
+        [string[]]$ScriptArguments = @(),
+
+        [Parameter(Mandatory=$false)]
+        [hashtable]$EnvironmentOverrides = @{}
     )
 
     $arguments = @(
@@ -525,7 +549,12 @@ function Start-PowerShellScript {
         $ScriptPath
     ) + $ScriptArguments
 
-    return Start-ManagedProcess -Name $Name -FilePath $PowerShellHost -Arguments $arguments -WorkingDirectory $ProjectRoot
+    return Start-ManagedProcess `
+        -Name $Name `
+        -FilePath $PowerShellHost `
+        -Arguments $arguments `
+        -WorkingDirectory $ProjectRoot `
+        -EnvironmentOverrides $EnvironmentOverrides
 }
 
 function Start-NpmScriptIfNeeded {
@@ -540,7 +569,10 @@ function Start-NpmScriptIfNeeded {
         [string]$HostName = "127.0.0.1",
 
         [Parameter(Mandatory=$true)]
-        [int[]]$RequiredTcpPorts
+        [int[]]$RequiredTcpPorts,
+
+        [Parameter(Mandatory=$false)]
+        [hashtable]$EnvironmentOverrides = @{}
     )
 
     $readyPorts = @()
@@ -570,7 +602,8 @@ function Start-NpmScriptIfNeeded {
         -Name $Name `
         -FilePath "cmd.exe" `
         -Arguments @("/d", "/s", "/c", "npm", "run", $ScriptName) `
-        -WorkingDirectory $ProjectRoot
+        -WorkingDirectory $ProjectRoot `
+        -EnvironmentOverrides $EnvironmentOverrides
 }
 
 function Start-ServiceScriptIfNeeded {
@@ -588,7 +621,10 @@ function Start-ServiceScriptIfNeeded {
         [int[]]$ConflictPorts = @(),
 
         [Parameter(Mandatory=$false)]
-        [string[]]$ScriptArguments = @()
+        [string[]]$ScriptArguments = @(),
+
+        [Parameter(Mandatory=$false)]
+        [hashtable]$EnvironmentOverrides = @{}
     )
 
     $readyPorts = @()
@@ -614,7 +650,11 @@ function Start-ServiceScriptIfNeeded {
         throw "$Name has partial or conflicting listening port(s): $($blockingPorts -join ', '). Stop stale processes or rerun with -Restart."
     }
 
-    return Start-PowerShellScript -Name $Name -ScriptPath $ScriptPath -ScriptArguments $ScriptArguments
+    return Start-PowerShellScript `
+        -Name $Name `
+        -ScriptPath $ScriptPath `
+        -ScriptArguments $ScriptArguments `
+        -EnvironmentOverrides $EnvironmentOverrides
 }
 
 function Start-InfraIfNeeded {
@@ -706,11 +746,15 @@ if ($Restart) {
     $StopExistingProjectProcesses = $true
 }
 
+if ($RestartMail -and $RestartGameAndMail) {
+    throw "RestartMail and RestartGameAndMail cannot be used together."
+}
+
 $existingItems = Read-DevStackPids | Where-Object {
     Get-Process -Id $_.pid -ErrorAction SilentlyContinue
 }
 
-if ($existingItems.Count -gt 0) {
+if (-not $RestartMail -and -not $RestartGameAndMail -and $existingItems.Count -gt 0) {
     Write-Error "Dev stack processes are already running. Use -Status, -Stop, or -Restart."
 }
 
@@ -720,6 +764,81 @@ $gameEnv = Join-Path $ProjectRoot "apps\game-server\.env"
 $proxyEnv = Join-Path $ProjectRoot "apps\game-proxy\.env"
 $chatEnv = Join-Path $ProjectRoot "apps\chat-server\.env"
 $mailEnv = Join-Path $ProjectRoot "apps\mail-service\.env"
+$authTicketSecret = if ($env:TICKET_SECRET) {
+    $env:TICKET_SECRET
+} else {
+    Get-EnvValue -Path $authEnv -Name "TICKET_SECRET" -Default ""
+}
+$mailGrantEnvironment = @{}
+$gameMailGrantEnvironment = @{}
+$mailGrantPrivateConfigured = -not [string]::IsNullOrWhiteSpace($env:MAIL_GRANT_ASSERTION_PRIVATE_KEY) `
+    -or -not [string]::IsNullOrWhiteSpace($env:MAIL_GRANT_ASSERTION_PRIVATE_KEY_BASE64) `
+    -or -not [string]::IsNullOrWhiteSpace((Get-EnvValue -Path $mailEnv -Name "MAIL_GRANT_ASSERTION_PRIVATE_KEY" -Default "")) `
+    -or -not [string]::IsNullOrWhiteSpace((Get-EnvValue -Path $mailEnv -Name "MAIL_GRANT_ASSERTION_PRIVATE_KEY_BASE64" -Default ""))
+
+function New-LocalMailGrantEnvironments {
+    $node = Get-Command node.exe -ErrorAction SilentlyContinue
+    if (-not $node) {
+        $node = Get-Command node -ErrorAction Stop
+    }
+
+    # The private key is emitted only to this launcher process, then inherited by mail-service.
+    # It is never persisted to .env, a log, process arguments, or dev-stack PID metadata.
+    $generator = @'
+const crypto = require('crypto');
+const pair = crypto.generateKeyPairSync('ed25519');
+const publicKey = pair.publicKey.export({ format: 'jwk' });
+process.stdout.write(JSON.stringify({
+  privateKey: pair.privateKey.export({ format: 'pem', type: 'pkcs8' }),
+  publicKey: publicKey.x
+}));
+'@
+    $pair = (& $node.Source -e $generator | ConvertFrom-Json)
+    if ($LASTEXITCODE -ne 0 -or -not $pair.privateKey -or -not $pair.publicKey) {
+        throw "Failed to generate an ephemeral local mail grant key pair."
+    }
+
+    $keyId = "mail-service-local-ephemeral-v1"
+    $issuer = "mail-service"
+    $publicKeysJson = @{ $keyId = [string]$pair.publicKey } | ConvertTo-Json -Compress
+    return [pscustomobject]@{
+        Mail = @{
+            "MAIL_GRANT_ASSERTION_PRIVATE_KEY" = [string]$pair.privateKey
+            "MAIL_GRANT_ASSERTION_KEY_ID" = $keyId
+            "MAIL_GRANT_ASSERTION_ISSUER" = $issuer
+        }
+        Game = @{
+            "MAIL_GRANT_ASSERTION_PUBLIC_KEYS_JSON" = $publicKeysJson
+            "MAIL_GRANT_ASSERTION_ISSUER" = $issuer
+        }
+    }
+}
+
+if ($WithMail -or $RestartGameAndMail) {
+    $mailGrantPair = New-LocalMailGrantEnvironments
+    $mailGrantEnvironment = $mailGrantPair.Mail
+    $gameMailGrantEnvironment = $mailGrantPair.Game
+}
+
+function Get-MailStartEnvironment {
+    $environment = @{
+        "APP_ENV" = "local"
+        "NODE_ENV" = "development"
+        "REGISTRY_ENABLED" = "true"
+    }
+    if ($authTicketSecret) {
+        # Player mail validates auth-issued game tickets, so local mail must use the same signing key.
+        $environment["TICKET_SECRET"] = $authTicketSecret
+    }
+    foreach ($entry in $mailGrantEnvironment.GetEnumerator()) {
+        $environment[$entry.Key] = $entry.Value
+    }
+    return $environment
+}
+
+function Get-GameStartEnvironment {
+    return $gameMailGrantEnvironment
+}
 
 # dev-stack is a manual local launcher. These ports are startup/probe defaults for local processes,
 # not test/production service discovery inputs.
@@ -738,6 +857,78 @@ if ($chatBindAddr -notmatch ':(\d+)$') {
 $chatPort = [int]$Matches[1]
 $mailPort = [int](Get-EnvValue -Path $mailEnv -Name "MAIL_PORT" -Default "9003")
 $announcePort = 9004
+
+if ($RestartMail) {
+    if (-not $mailGrantPrivateConfigured) {
+        throw "RestartMail cannot restore an ephemeral mail grant signing key. Use RestartGameAndMail to rotate the local key pair safely."
+    }
+
+    $items = Read-DevStackPids
+    $mailItems = @($items | Where-Object { $_.name -eq "mail-service" })
+    if ($mailItems.Count -ne 1) {
+        throw "RestartMail requires exactly one managed mail-service entry in $PidFile."
+    }
+
+    $mailItem = $mailItems[0]
+    $mailProcess = Get-Process -Id ([int]$mailItem.pid) -ErrorAction SilentlyContinue
+    if ($mailProcess) {
+        Write-Host "Stopping mail-service (PID $($mailItem.pid))" -ForegroundColor Cyan
+        Stop-ProcessTree -ProcessId ([int]$mailItem.pid)
+    }
+
+    $replacement = Start-NpmScriptIfNeeded `
+        -Name "mail-service" `
+        -ScriptName "dev:mail" `
+        -RequiredTcpPorts @($mailPort) `
+        -EnvironmentOverrides (Get-MailStartEnvironment)
+    Assert-TcpPort -Name "mail-service" -HostName "127.0.0.1" -Port $mailPort -ProcessId ([int]$replacement.pid) -TimeoutSeconds $WaitTimeoutSeconds
+
+    @($items | Where-Object { $_.name -ne "mail-service" }) + @($replacement) |
+        ConvertTo-Json -Depth 5 |
+        Set-Content -Path $PidFile -Encoding UTF8
+    exit 0
+}
+
+if ($RestartGameAndMail) {
+    $items = Read-DevStackPids
+    $gameItems = @($items | Where-Object { $_.name -eq "game-server" })
+    $mailItems = @($items | Where-Object { $_.name -eq "mail-service" })
+    if ($gameItems.Count -ne 1 -or $mailItems.Count -ne 1) {
+        throw "RestartGameAndMail requires exactly one managed game-server and mail-service entry in $PidFile."
+    }
+
+    foreach ($item in @($mailItems[0], $gameItems[0])) {
+        if (Get-Process -Id ([int]$item.pid) -ErrorAction SilentlyContinue) {
+            Write-Host "Stopping $($item.name) (PID $($item.pid))" -ForegroundColor Cyan
+            Stop-ProcessTree -ProcessId ([int]$item.pid)
+        }
+    }
+
+    $gameReplacement = Start-ServiceScriptIfNeeded `
+        -Name "game-server" `
+        -ScriptPath (Join-Path $ServiceScriptDir "dev-game.ps1") `
+        -RequiredTcpPorts @($GamePort, $GameAdminPort) `
+        -ScriptArguments @(
+            "-InstanceId", $GameInstanceId,
+            "-Port", [string]$GamePort,
+            "-AdminPort", [string]$GameAdminPort
+        ) `
+        -EnvironmentOverrides (Get-GameStartEnvironment)
+    Assert-TcpPort -Name "game-server" -HostName "127.0.0.1" -Port $GamePort -ProcessId ([int]$gameReplacement.pid) -TimeoutSeconds $WaitTimeoutSeconds
+    Assert-TcpPort -Name "game-server admin" -HostName "127.0.0.1" -Port $GameAdminPort -ProcessId ([int]$gameReplacement.pid) -TimeoutSeconds 30
+
+    $mailReplacement = Start-NpmScriptIfNeeded `
+        -Name "mail-service" `
+        -ScriptName "dev:mail" `
+        -RequiredTcpPorts @($mailPort) `
+        -EnvironmentOverrides (Get-MailStartEnvironment)
+    Assert-TcpPort -Name "mail-service" -HostName "127.0.0.1" -Port $mailPort -ProcessId ([int]$mailReplacement.pid) -TimeoutSeconds $WaitTimeoutSeconds
+
+    @($items | Where-Object { $_.name -notin @("game-server", "mail-service") }) + @($gameReplacement, $mailReplacement) |
+        ConvertTo-Json -Depth 5 |
+        Set-Content -Path $PidFile -Encoding UTF8
+    exit 0
+}
 
 if ($StopExistingProjectProcesses) {
     Stop-ExistingProjectProcesses
@@ -840,7 +1031,8 @@ try {
                 "-InstanceId", $GameInstanceId,
                 "-Port", [string]$GamePort,
                 "-AdminPort", [string]$GameAdminPort
-            )
+            ) `
+            -EnvironmentOverrides (Get-GameStartEnvironment)
         if ($gameProcess) {
             $started += $gameProcess
             $serviceProcesses["game-server"] = $gameProcess
@@ -909,7 +1101,8 @@ try {
         $mailProcess = Start-NpmScriptIfNeeded `
             -Name "mail-service" `
             -ScriptName "dev:mail" `
-            -RequiredTcpPorts @($mailPort)
+            -RequiredTcpPorts @($mailPort) `
+            -EnvironmentOverrides (Get-MailStartEnvironment)
         if ($mailProcess) {
             $started += $mailProcess
             $serviceProcesses["mail-service"] = $mailProcess
