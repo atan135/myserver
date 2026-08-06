@@ -8,9 +8,11 @@ const testFiles = [
   "src/game-admin-client.test.js",
   "src/internal/internal.controller.test.js",
   "src/characters/characters.service.test.js",
+  "src/auth/auth.service.test.ts",
   "src/auth-store.register.test.js",
   "src/auth-store.ban-expiry.test.js",
   "src/common/client-ip.test.js",
+  "src/common/redis-blocklist.middleware.test.ts",
   "src/common/tls-required.middleware.test.js"
 ];
 
