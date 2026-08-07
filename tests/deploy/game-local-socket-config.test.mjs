@@ -15,6 +15,7 @@ function serviceBlock(compose, serviceName) {
 
 test("production game services share absolute local socket paths", async () => {
   const compose = await read("deploy/docker/compose.production.yml");
+  const socketInit = serviceBlock(compose, "game-socket-init");
   const gameServer = serviceBlock(compose, "game-server");
   const gameProxy = serviceBlock(compose, "game-proxy");
   const matchService = serviceBlock(compose, "match-service");
@@ -26,6 +27,16 @@ test("production game services share absolute local socket paths", async () => {
   assert.match(
     gameServer,
     /^      GAME_INTERNAL_SOCKET_NAME: \/run\/myserver\/myserver-game-server-internal\.sock$/m
+  );
+  assert.match(socketInit, /^    user: "0:0"$/m);
+  assert.match(
+    socketInit,
+    /^    command: \["install -d -o 10001 -g 10001 -m 0770 \/run\/myserver"\]$/m
+  );
+  assert.match(socketInit, /^      - game-sockets:\/run\/myserver$/m);
+  assert.match(
+    gameServer,
+    /^      game-socket-init:\r?\n        condition: service_completed_successfully$/m
   );
 
   for (const service of [gameServer, gameProxy, matchService]) {

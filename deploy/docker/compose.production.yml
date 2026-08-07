@@ -71,6 +71,17 @@ services:
     stop_grace_period: 30s
     mem_limit: 128m
 
+  game-socket-init:
+    image: ${IMAGE_GAME_SERVER:?set IMAGE_GAME_SERVER from images.lock.json}
+    user: "0:0"
+    entrypoint: ["/bin/sh", "-ec"]
+    command: ["install -d -o 10001 -g 10001 -m 0770 /run/myserver"]
+    restart: "no"
+    volumes:
+      - game-sockets:/run/myserver
+    networks:
+      - internal
+
   game-server:
     <<: *runtime
     image: ${IMAGE_GAME_SERVER:?set IMAGE_GAME_SERVER from images.lock.json}
@@ -100,6 +111,8 @@ services:
       - game-sockets:/run/myserver
       - game-audit:/var/log/myserver
     depends_on:
+      game-socket-init:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
       redis:
