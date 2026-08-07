@@ -82,6 +82,8 @@ services:
       SERVICE_PUBLIC_HOST: game-server
       SERVICE_ADMIN_BIND_HOST: 0.0.0.0
       SERVICE_ADMIN_ADVERTISED_HOST: game-server
+      GAME_LOCAL_SOCKET_NAME: /run/myserver/myserver-game-server.sock
+      GAME_INTERNAL_SOCKET_NAME: /run/myserver/myserver-game-server-internal.sock
       CSV_DIR: /app/csv
       CSV_RELOAD_ENABLED: "true"
       DB_ENABLED: "true"
