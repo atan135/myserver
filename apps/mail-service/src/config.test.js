@@ -9,6 +9,8 @@ const TEST_MAIL_GRANT_PRIVATE_KEY = testMailGrantPrivateKey.export({ type: "pkcs
 const CONFIG_ENV_NAMES = [
   "NODE_ENV",
   "APP_ENV",
+  "DB_ENABLED",
+  "DATABASE_URL",
   "MAIL_GRANT_ASSERTION_ISSUER",
   "MAIL_GRANT_ASSERTION_KEY_ID",
   "MAIL_GRANT_ASSERTION_PRIVATE_KEY",
@@ -516,6 +518,7 @@ test("mail-service production environment ignores DISCOVERY_REQUIRED=false overr
   await assert.rejects(
     () => withEnv({
       NODE_ENV: "production",
+      DB_ENABLED: "true",
       DISCOVERY_REQUIRED: "false",
       REGISTRY_ENABLED: "false",
       TICKET_SECRET: "prod-ticket-secret-with-enough-entropy",
@@ -554,6 +557,7 @@ test("mail-service reads bounded operations retention and alert policy", async (
 test("mail-service production requires distinct operations and high-risk credentials", async () => {
   const base = {
     NODE_ENV: "production",
+    DB_ENABLED: "true",
     REGISTRY_ENABLED: "true",
     TICKET_SECRET: "prod-ticket-secret-with-enough-entropy",
     MAIL_SERVICE_TOKEN: "prod-mail-service-token-with-enough-entropy",
@@ -581,6 +585,7 @@ test("mail-service production requires distinct operations and high-risk credent
 test("mail-service production requires player authentication, trusted Caddy CIDRs, and public rate limiting", async () => {
   const base = {
     NODE_ENV: "production",
+    DB_ENABLED: "true",
     REGISTRY_ENABLED: "true",
     TICKET_SECRET: "prod-ticket-secret-with-enough-entropy",
     MAIL_SERVICE_TOKEN: "prod-mail-service-token-with-enough-entropy",
@@ -605,6 +610,10 @@ test("mail-service production requires player authentication, trusted Caddy CIDR
     /MAIL_PUBLIC_RATE_LIMIT_ENABLED must be true in production/
   );
   await assert.rejects(
+    () => withEnv({ ...base, DB_ENABLED: "false" }, (getConfig) => getConfig()),
+    /DB_ENABLED must be true in production/
+  );
+  await assert.rejects(
     () => withEnv({ ...base, MAIL_TRUSTED_PROXY_CIDRS: "invalid" }, (getConfig) => getConfig()),
     /MAIL_TRUSTED_PROXY_CIDRS must contain valid IPv4 addresses or CIDRs/
   );
@@ -614,6 +623,7 @@ test("mail-service accepts a one-line base64 PKCS8 assertion key", async () => {
   const encoded = Buffer.from(TEST_MAIL_GRANT_PRIVATE_KEY).toString("base64");
   await withEnv({
     NODE_ENV: "production",
+    DB_ENABLED: "true",
     REGISTRY_ENABLED: "true",
     TICKET_SECRET: "prod-ticket-secret-with-enough-entropy",
     MAIL_SERVICE_TOKEN: "prod-mail-service-token-with-enough-entropy",

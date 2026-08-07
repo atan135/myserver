@@ -206,6 +206,9 @@ function validateProductionConfig(config) {
   if (!config.mailPublicRateLimitEnabled) {
     errors.push("MAIL_PUBLIC_RATE_LIMIT_ENABLED must be true in production");
   }
+  if (!config.dbEnabled) {
+    errors.push("DB_ENABLED must be true in production");
+  }
 
   if (!ticketSecret || DEFAULT_TICKET_SECRETS.has(ticketSecret) || isWeakSecret(ticketSecret)) {
     errors.push("TICKET_SECRET must be set to a non-default value in production");
