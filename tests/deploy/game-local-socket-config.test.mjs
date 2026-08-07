@@ -31,7 +31,7 @@ test("production game services share absolute local socket paths", async () => {
   assert.match(socketInit, /^    user: "0:0"$/m);
   assert.match(
     socketInit,
-    /^    command: \["install -d -o 10001 -g 10001 -m 0770 \/run\/myserver"\]$/m
+    /^    command: \["install -d -o 10001 -g 10001 -m 0770 \/run\/myserver && rm -f \/run\/myserver\/myserver-game-server\.sock \/run\/myserver\/myserver-game-server-internal\.sock"\]$/m
   );
   assert.match(socketInit, /^      - game-sockets:\/run\/myserver$/m);
   assert.match(

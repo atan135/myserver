@@ -75,7 +75,7 @@ services:
     image: ${IMAGE_GAME_SERVER:?set IMAGE_GAME_SERVER from images.lock.json}
     user: "0:0"
     entrypoint: ["/bin/sh", "-ec"]
-    command: ["install -d -o 10001 -g 10001 -m 0770 /run/myserver"]
+    command: ["install -d -o 10001 -g 10001 -m 0770 /run/myserver && rm -f /run/myserver/myserver-game-server.sock /run/myserver/myserver-game-server-internal.sock"]
     restart: "no"
     volumes:
       - game-sockets:/run/myserver
