@@ -1619,10 +1619,10 @@ export class AdminStore {
       const nextOperationStatus = status === "approved" ? "approved" : "cancelled";
       const next = await client.query(
         `UPDATE admin_operation_requests
-         SET approval_status = $2,
-             status = $3,
-             completed_at = CASE WHEN $3 = 'cancelled' THEN $4::timestamptz ELSE NULL END,
-             error_summary_json = CASE WHEN $3 = 'cancelled' THEN $5::jsonb ELSE NULL END,
+         SET approval_status = $2::varchar,
+             status = $3::varchar,
+             completed_at = CASE WHEN $3::varchar = 'cancelled' THEN $4::timestamptz ELSE NULL END,
+             error_summary_json = CASE WHEN $3::varchar = 'cancelled' THEN $5::jsonb ELSE NULL END,
              updated_at = $4::timestamptz
          WHERE operation_id = $1::uuid
          RETURNING *`,
@@ -1636,7 +1636,7 @@ export class AdminStore {
       );
       await client.query(
         `UPDATE admin_operation_approvals
-         SET status = $2,
+         SET status = $2::varchar,
              decided_at = $3::timestamptz,
              decided_by_admin_id = $4,
              decided_by_subject = $5,

@@ -113,6 +113,21 @@ class OperationTransactionPool {
       preview.consumed_at = params[1];
       return { rows: [], rowCount: 1 };
     }
+    if (sql.includes("UPDATE admin_operation_requests") && sql.includes("SET approval_status")) {
+      const operation = [...this.operations.values()].find((entry) => entry.operation_id === params[0]);
+      if (!operation) return { rows: [], rowCount: 0 };
+      operation.approval_status = params[1];
+      operation.status = params[2];
+      operation.completed_at = params[2] === "cancelled" ? params[3] : null;
+      operation.error_summary_json = params[2] === "cancelled" ? JSON.parse(params[4]) : null;
+      operation.updated_at = params[3];
+      return { rows: [operation], rowCount: 1 };
+    }
+    if (sql.includes("UPDATE admin_operation_approvals")) {
+      if (this.approvals.get(params[0]) !== "pending") return { rows: [], rowCount: 0 };
+      this.approvals.set(params[0], params[1]);
+      return { rows: [], rowCount: 1 };
+    }
     if (sql.includes("UPDATE admin_operation_requests") && sql.includes("SET status = 'executing'")) {
       const operation = [...this.operations.values()].find((entry) => entry.operation_id === params[0]);
       if (!operation || !["preflighted", "approved"].includes(operation.status)) return { rows: [], rowCount: 0 };
@@ -286,6 +301,77 @@ test("AdminStore execution claim locks request, preview and approval, consumes n
 
   const conflict = await store.reserveAdminOperationPreflight(preflightInput({ semanticSha256: NEXT_HASH }));
   assert.equal(conflict.kind, "conflict");
+});
+
+test("AdminStore approval decisions use explicitly typed PostgreSQL status parameters and remain idempotent", async () => {
+  const pool = new OperationTransactionPool();
+  const store = new AdminStore(pool);
+  await store.reserveAdminOperationPreflight(preflightInput({ approvalStatus: "pending" }));
+
+  const decidedAt = new Date("2026-07-19T10:06:00.000Z");
+  const approved = await store.decideAdminOperationApproval({
+    requestId: "request-transaction-1",
+    status: "approved",
+    decidedByAdminId: 8,
+    decidedBySubject: "admin:approver-8",
+    evidenceSummary: { ticket: "change-42" },
+    now: decidedAt
+  });
+
+  assert.equal(approved.kind, "approved");
+  assert.equal(approved.operation.status, "approved");
+  assert.equal(approved.operation.approvalStatus, "approved");
+  assert.equal(approved.operation.completedAt, null);
+  const requestUpdate = pool.calls.find((call) => call.sql.includes("UPDATE admin_operation_requests") && call.sql.includes("SET approval_status"));
+  assert.match(requestUpdate.sql, /approval_status = \$2::varchar/);
+  assert.match(requestUpdate.sql, /status = \$3::varchar/);
+  assert.match(requestUpdate.sql, /CASE WHEN \$3::varchar = 'cancelled'/);
+  const approvalUpdate = pool.calls.find((call) => call.sql.includes("UPDATE admin_operation_approvals"));
+  assert.match(approvalUpdate.sql, /status = \$2::varchar/);
+  assert.ok(pool.calls.some((call) => call.sql.includes("INSERT INTO admin_operation_audit_events") && call.params[2] === "approval_approved"));
+
+  const requestUpdateCount = pool.calls.filter((call) => call.sql.includes("UPDATE admin_operation_requests") && call.sql.includes("SET approval_status")).length;
+  const retried = await store.decideAdminOperationApproval({
+    requestId: "request-transaction-1",
+    status: "approved",
+    decidedByAdminId: 8,
+    decidedBySubject: "admin:approver-8",
+    evidenceSummary: { ticket: "change-42" },
+    now: decidedAt
+  });
+  assert.equal(retried.kind, "state_conflict");
+  assert.equal(
+    pool.calls.filter((call) => call.sql.includes("UPDATE admin_operation_requests") && call.sql.includes("SET approval_status")).length,
+    requestUpdateCount
+  );
+});
+
+test("AdminStore rejection cancels the operation and persists a bounded rejection summary atomically", async () => {
+  const pool = new OperationTransactionPool();
+  const store = new AdminStore(pool);
+  await store.reserveAdminOperationPreflight(preflightInput({ approvalStatus: "pending" }));
+
+  const rejected = await store.decideAdminOperationApproval({
+    requestId: "request-transaction-1",
+    status: "rejected",
+    decidedByAdminId: 8,
+    decidedBySubject: "admin:approver-8",
+    evidenceSummary: { ticket: "change-43" },
+    rejectionReason: "maintenance window closed",
+    now: new Date("2026-07-19T10:07:00.000Z")
+  });
+
+  assert.equal(rejected.kind, "rejected");
+  assert.equal(rejected.operation.status, "cancelled");
+  assert.equal(rejected.operation.approvalStatus, "rejected");
+  assert.equal(rejected.operation.completedAt, "2026-07-19T10:07:00.000Z");
+  assert.deepEqual(rejected.operation.errorSummary, {
+    code: "ADMIN_OPERATION_APPROVAL_REJECTED",
+    reason: "maintenance window closed"
+  });
+  assert.ok(pool.calls.some((call) => call.sql.includes("INSERT INTO admin_operation_audit_events") && call.params[2] === "approval_rejected"));
+  assert.equal(pool.calls.filter((call) => call.sql === "COMMIT").length, 2);
+  assert.equal(pool.calls.filter((call) => call.sql === "ROLLBACK").length, 0);
 });
 
 test("AdminStore operation audit queries are parameterized, keyset ordered, and redact sensitive summaries", async () => {
