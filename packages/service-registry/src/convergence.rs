@@ -47,6 +47,13 @@ impl ConvergenceConfig {
             jitter_percent: self.jitter_percent.min(50),
         }
     }
+
+    pub fn maximum_success_refresh_interval(self) -> Duration {
+        let config = self.normalized();
+        config
+            .steady_interval
+            .saturating_add(config.attempt_timeout)
+    }
 }
 
 fn nonzero_duration(duration: Duration) -> Duration {
@@ -354,6 +361,20 @@ mod tests {
         assert_eq!(
             scale_duration(Duration::from_secs(10), 120, maximum),
             maximum
+        );
+    }
+
+    #[test]
+    fn maximum_success_refresh_interval_includes_attempt_timeout() {
+        let config = ConvergenceConfig {
+            steady_interval: Duration::from_secs(30),
+            attempt_timeout: Duration::from_secs(5),
+            ..ConvergenceConfig::default()
+        };
+
+        assert_eq!(
+            config.maximum_success_refresh_interval(),
+            Duration::from_secs(35)
         );
     }
 

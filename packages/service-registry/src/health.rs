@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
@@ -73,6 +74,20 @@ impl HealthConfig {
             ready_stability_window_ms: stability_ms,
             dependency_stale_window_ms: stale_ms.max(1),
         }
+    }
+
+    pub fn validate_dependency_refresh_cadence(
+        &self,
+        refresh_variable: &'static str,
+        maximum_refresh_interval: Duration,
+    ) -> Result<(), HealthConfigError> {
+        if u128::from(self.dependency_stale_window_ms) <= maximum_refresh_interval.as_millis() {
+            return Err(HealthConfigError {
+                variable: refresh_variable,
+                reason: "refresh interval plus attempt timeout must be less than the dependency stale window",
+            });
+        }
+        Ok(())
     }
 
     fn try_from_values(
@@ -914,5 +929,29 @@ mod tests {
         assert!(
             HealthConfig::try_from_values(|name| Ok(values.get(name).cloned())).is_err()
         );
+    }
+
+    #[test]
+    fn dependency_stale_window_must_cover_normal_refresh_and_timeout() {
+        let config = HealthConfig::for_tests(120_000, 10_000, 36_000);
+        config
+            .validate_dependency_refresh_cadence(
+                "MATCH_SERVICE_REDISCOVERY_INTERVAL_SECS",
+                Duration::from_secs(35),
+            )
+            .unwrap();
+
+        let error = HealthConfig::for_tests(120_000, 10_000, 35_000)
+            .validate_dependency_refresh_cadence(
+                "MATCH_SERVICE_REDISCOVERY_INTERVAL_SECS",
+                Duration::from_secs(35),
+            )
+            .unwrap_err();
+        assert_eq!(error.variable, "MATCH_SERVICE_REDISCOVERY_INTERVAL_SECS");
+        let message = error.to_string();
+        assert!(message.contains("dependency stale window"));
+        for forbidden in ["url", "host", "port", "socket", "token", "password"] {
+            assert!(!message.to_ascii_lowercase().contains(forbidden));
+        }
     }
 }

@@ -37,7 +37,7 @@ use route_store::{
     UpstreamRoute, run_redis_route_store_update_listener,
 };
 use service_registry::{
-    ConvergenceConfig, DependencySpec, HealthState, RegistryClient, ServiceEndpoint,
+    ConvergenceConfig, DependencySpec, HealthConfig, HealthState, RegistryClient, ServiceEndpoint,
     ServiceInstance, spawn_registry_publication,
 };
 use tokio::sync::RwLock;
@@ -90,6 +90,21 @@ fn init_logging(config: &Config) {
         .init();
 }
 
+fn validate_upstream_refresh_cadence(
+    registry_enabled: bool,
+    discover_interval_secs: u64,
+    health_config: &HealthConfig,
+) -> Result<(), service_registry::HealthConfigError> {
+    if registry_enabled {
+        let discovery = proxy_server::upstream_discovery_convergence_config(discover_interval_secs);
+        health_config.validate_dependency_refresh_cadence(
+            "REGISTRY_DISCOVER_INTERVAL_SECS",
+            discovery.maximum_success_refresh_interval(),
+        )?;
+    }
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = dotenvy::dotenv();
@@ -115,11 +130,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "self-registration",
         ));
     }
-    let health_state = HealthState::try_from_env(
+    let health_config = HealthConfig::try_from_env()?;
+    validate_upstream_refresh_cadence(
+        config.registry_enabled,
+        config.registry_discover_interval_secs,
+        &health_config,
+    )?;
+    let health_state = HealthState::new(
         &config.service_name,
         &config.service_instance_id,
+        health_config,
         health_dependencies,
-    )?;
+    );
     let health_task =
         service_registry::readiness::spawn_health_from_env(health_state.clone()).await?;
 
@@ -421,6 +443,19 @@ fn published_host(host: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn upstream_refresh_cadence_is_rejected_before_frontend_bind() {
+        let health_config = HealthConfig::for_tests(8_000, 2_000, 10_000);
+        let error = validate_upstream_refresh_cadence(true, 5, &health_config).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("REGISTRY_DISCOVER_INTERVAL_SECS")
+        );
+        validate_upstream_refresh_cadence(false, 5, &health_config).unwrap();
+        validate_upstream_refresh_cadence(true, 5, &HealthConfig::default()).unwrap();
+    }
     use crate::config::RouteStoreBackend;
     use crate::connection_limits::{ConnectionLimitConfig, IpDenyList};
     use crate::rollout_drain_status::RolloutDrainStatusCheckConfig;

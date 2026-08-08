@@ -390,6 +390,15 @@ pub async fn run(
     }
 }
 
+pub(crate) fn upstream_discovery_convergence_config(
+    discover_interval_secs: u64,
+) -> ConvergenceConfig {
+    ConvergenceConfig {
+        steady_interval: tokio::time::Duration::from_secs(discover_interval_secs.max(1)),
+        ..ConvergenceConfig::default()
+    }
+}
+
 fn spawn_upstream_discovery(
     registry_url: String,
     registry_key_prefix: String,
@@ -402,10 +411,7 @@ fn spawn_upstream_discovery(
         RegistryClient::new_lazy(&registry_url, "proxy", "proxy-static")?
             .with_key_prefix(registry_key_prefix),
     );
-    let config = ConvergenceConfig {
-        steady_interval: tokio::time::Duration::from_secs(discover_interval_secs.max(1)),
-        ..ConvergenceConfig::default()
-    };
+    let config = upstream_discovery_convergence_config(discover_interval_secs);
     Ok(spawn_convergence(config, move || {
         let client = Arc::clone(&client);
         let service_name = service_name.clone();
@@ -1504,6 +1510,7 @@ mod tests {
         PreauthDecision, discover_proxy_local_routes, preauth_decision,
         refresh_routes_from_discovery_snapshot, replay_auth_to_upstream,
         restore_authenticated_after_local_routing_error, select_route_for_packet,
+        upstream_discovery_convergence_config,
     };
     use crate::pb::{RoomJoinReq, RoomReconnectReq};
     use crate::protocol::{
@@ -1518,6 +1525,14 @@ mod tests {
     use service_registry::{DiscoverySnapshot, ServiceEndpoint, ServiceInstance};
     use std::time::{Duration, Instant};
     use tokio::io::{AsyncWriteExt, duplex};
+
+    #[test]
+    fn upstream_refresh_bound_includes_discovery_attempt_timeout() {
+        assert_eq!(
+            upstream_discovery_convergence_config(5).maximum_success_refresh_interval(),
+            Duration::from_secs(10)
+        );
+    }
 
     fn packet(msg_type: u16) -> Packet {
         Packet::new(

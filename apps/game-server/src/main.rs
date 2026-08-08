@@ -37,7 +37,9 @@ use std::path::Path;
 
 use config::Config;
 use core::config_table::ConfigTableRuntime;
-use service_registry::{DependencySpec, HealthState, ServiceEndpoint, ServiceInstance};
+use service_registry::{
+    DependencySpec, HealthConfig, HealthState, ServiceEndpoint, ServiceInstance,
+};
 use tracing_appender::rolling;
 use tracing_subscriber::fmt;
 use tracing_subscriber::layer::SubscriberExt;
@@ -87,6 +89,21 @@ fn init_logging(config: &Config) {
         .init();
 }
 
+fn validate_match_refresh_cadence(
+    registry_enabled: bool,
+    rediscovery_interval_secs: u64,
+    health_config: &HealthConfig,
+) -> Result<(), service_registry::HealthConfigError> {
+    if registry_enabled {
+        let rediscovery = match_client::rediscovery_convergence_config(rediscovery_interval_secs);
+        health_config.validate_dependency_refresh_cadence(
+            "MATCH_SERVICE_REDISCOVERY_INTERVAL_SECS",
+            rediscovery.maximum_success_refresh_interval(),
+        )?;
+    }
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = dotenvy::dotenv();
@@ -129,11 +146,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "self-registration",
         ));
     }
-    let health_state = HealthState::try_from_env(
+    let health_config = HealthConfig::try_from_env()?;
+    validate_match_refresh_cadence(
+        config.registry_enabled,
+        match_client::MatchClientConfig::rediscovery_interval_secs_from_env(),
+        &health_config,
+    )?;
+    let health_state = HealthState::new(
         &config.service_name,
         &config.service_instance_id,
+        health_config,
         health_dependencies,
-    )?;
+    );
     let config_table_runtime = ConfigTableRuntime::load(Path::new(&config.csv_dir))?;
     let initial_config = config_table_runtime.snapshot().await;
     let initial_tables = initial_config.tables.clone();
@@ -236,6 +260,19 @@ fn published_host(host: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn match_refresh_cadence_is_rejected_before_server_startup() {
+        let health_config = HealthConfig::for_tests(8_000, 2_000, 35_000);
+        let error = validate_match_refresh_cadence(true, 30, &health_config).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("MATCH_SERVICE_REDISCOVERY_INTERVAL_SECS")
+        );
+        validate_match_refresh_cadence(false, 30, &health_config).unwrap();
+        validate_match_refresh_cadence(true, 30, &HealthConfig::default()).unwrap();
+    }
 
     fn test_config() -> Config {
         Config {

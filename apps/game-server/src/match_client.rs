@@ -38,6 +38,14 @@ pub struct MatchClientConfig {
 }
 
 impl MatchClientConfig {
+    pub fn rediscovery_interval_secs_from_env() -> u64 {
+        env_u64(
+            "MATCH_SERVICE_REDISCOVERY_INTERVAL_SECS",
+            DEFAULT_MATCH_REDISCOVERY_INTERVAL_SECS,
+        )
+        .max(1)
+    }
+
     pub async fn from_env() -> Self {
         validate_legacy_direct_config(&["MATCH_SERVICE_ADDR"]);
         let local_discovery_fallback_enabled = is_local_discovery_fallback_env();
@@ -57,10 +65,7 @@ impl MatchClientConfig {
             .unwrap_or_default();
         let service_name =
             std::env::var("MATCH_SERVICE_NAME").unwrap_or_else(|_| "match-service".to_string());
-        let rediscovery_interval_secs = env_u64(
-            "MATCH_SERVICE_REDISCOVERY_INTERVAL_SECS",
-            DEFAULT_MATCH_REDISCOVERY_INTERVAL_SECS,
-        );
+        let rediscovery_interval_secs = Self::rediscovery_interval_secs_from_env();
 
         if !registry_enabled {
             if discovery_required || !local_discovery_fallback_enabled {
@@ -109,6 +114,13 @@ impl MatchClientConfig {
 
     pub fn rediscovery_enabled(&self) -> bool {
         self.registry_enabled
+    }
+}
+
+pub fn rediscovery_convergence_config(interval_secs: u64) -> ConvergenceConfig {
+    ConvergenceConfig {
+        steady_interval: Duration::from_secs(interval_secs.max(1)),
+        ..ConvergenceConfig::default()
     }
 }
 
@@ -354,10 +366,7 @@ pub fn spawn_match_client_rediscovery(
         "match-service rediscovery task started"
     );
 
-    let convergence_config = ConvergenceConfig {
-        steady_interval: interval,
-        ..ConvergenceConfig::default()
-    };
+    let convergence_config = rediscovery_convergence_config(interval.as_secs());
     Some(spawn_convergence(convergence_config, move || {
         let client = client.clone();
         let config = config.clone();
@@ -863,6 +872,14 @@ mod tests {
 
         assert_eq!(config.rediscovery_interval_secs, 7);
         assert_eq!(config.addr, "http://127.0.0.1:19002");
+    }
+
+    #[test]
+    fn rediscovery_refresh_bound_includes_connection_attempt_timeout() {
+        assert_eq!(
+            rediscovery_convergence_config(30).maximum_success_refresh_interval(),
+            Duration::from_secs(35)
+        );
     }
 
     #[tokio::test]
