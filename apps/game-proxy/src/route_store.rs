@@ -669,6 +669,14 @@ impl ProxyRouteStore {
             route.health_state = UpstreamHealthState::Unavailable;
         }
 
+        let mut routes = routes;
+        routes.sort_by(|left, right| {
+            left.server_id
+                .cmp(&right.server_id)
+                .then_with(|| left.local_socket_name.cmp(&right.local_socket_name))
+        });
+        routes.dedup_by(|left, right| left.server_id == right.server_id);
+
         for route in routes {
             match state.routes.get_mut(&route.server_id) {
                 Some(existing) => {
@@ -679,6 +687,13 @@ impl ProxyRouteStore {
                     state.routes.insert(route.server_id.clone(), route);
                 }
             }
+        }
+    }
+
+    pub async fn mark_discovered_routes_unavailable(&self) {
+        let mut state = self.state.write().await;
+        for route in state.routes.values_mut() {
+            route.health_state = UpstreamHealthState::Unavailable;
         }
     }
 

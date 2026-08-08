@@ -13,11 +13,13 @@ mod service;
 mod state;
 
 use std::fs;
+use std::sync::Arc;
+use std::time::Duration;
 
 use serde_json::{Value, json};
 use service_registry::{
-    DependencySpec, HealthState, HeartbeatOutcome, RegistryClient, ServiceEndpoint,
-    ServiceInstance, StartupErrorCode,
+    ConvergenceConfig, DependencySpec, HealthState, RegistryClient, ServiceEndpoint,
+    ServiceInstance, spawn_registry_publication,
 };
 use tracing_appender::rolling;
 use tracing_subscriber::fmt;
@@ -102,73 +104,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let health_task =
         service_registry::readiness::spawn_health_from_env(health_state.clone()).await?;
 
-    let registry_client: Option<RegistryClient> = if config.registry_enabled {
-        match RegistryClient::new(
+    let registry_client: Option<Arc<RegistryClient>> = if config.registry_enabled {
+        let client = RegistryClient::new_lazy(
             &config.registry_url,
             &config.service_name,
             &config.service_instance_id,
         )
-        .await
-        {
-            Ok(client) => {
-                let client = client
-                    .with_key_prefix(config.registry_key_prefix.clone())
-                    .with_heartbeat_interval(config.registry_heartbeat_interval_secs);
-                let instance = build_service_instance(&config);
-
-                if let Err(e) = client.register(&instance).await {
-                    health_state.mark_degraded(
-                        "service-registry",
-                        "self-registration",
-                        StartupErrorCode::RegistryUnavailable,
-                    );
-                    tracing::error!(error = %e, "failed to register service");
-                    if registry_failure_is_fatal() {
-                        return Err(std::io::Error::other(e.to_string()).into());
-                    }
-                } else {
-                    health_state.mark_ready("service-registry", "self-registration");
-                    tracing::info!(
-                        service = %config.service_name,
-                        instance = %config.service_instance_id,
-                        "service registered to registry"
-                    );
-                }
-
-                Some(client)
-            }
-            Err(e) => {
-                health_state.mark_degraded(
-                    "service-registry",
-                    "self-registration",
-                    StartupErrorCode::RegistryUnavailable,
-                );
-                tracing::error!(error = %e, "failed to create registry client");
-                if registry_failure_is_fatal() {
-                    return Err(std::io::Error::other(e.to_string()).into());
-                }
-                None
-            }
-        }
+        .map_err(|error| std::io::Error::other(error.to_string()))?
+        .with_key_prefix(config.registry_key_prefix.clone())
+        .with_heartbeat_interval(config.registry_heartbeat_interval_secs);
+        Some(Arc::new(client))
     } else {
         tracing::info!("service registry disabled");
         None
     };
 
-    let heartbeat_health = health_state.clone();
-    let heartbeat_handle = registry_client.as_ref().map(|client| {
-        client.start_heartbeat_task_with_observer(move |outcome| match outcome {
-            HeartbeatOutcome::Succeeded => {
-                heartbeat_health.mark_ready("service-registry", "self-registration");
-            }
-            HeartbeatOutcome::Failed => {
-                heartbeat_health.mark_degraded(
-                    "service-registry",
-                    "self-registration",
-                    StartupErrorCode::RegistryUnavailable,
-                );
-            }
-        })
+    let registry_publication_task = registry_client.as_ref().map(|client| {
+        spawn_registry_publication(
+            Arc::clone(client),
+            build_service_instance(&config),
+            health_state.clone(),
+            ConvergenceConfig {
+                steady_interval: Duration::from_secs(1),
+                ..ConvergenceConfig::default()
+            },
+        )
     });
 
     // 启动 metrics 上报任务
@@ -184,10 +144,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     health_state.mark_shutting_down();
 
+    if let Some(task) = registry_publication_task {
+        task.stop_and_wait().await;
+    }
     if let Some(client) = registry_client {
-        if let Some(handle) = heartbeat_handle {
-            handle.abort();
-        }
         if let Err(e) = client.deregister().await {
             tracing::error!(error = %e, "failed to deregister service");
         } else {
@@ -200,34 +160,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     result
-}
-
-fn registry_failure_is_fatal() -> bool {
-    env_flag("DISCOVERY_REQUIRED")
-        || env_name_is("NODE_ENV", "production")
-        || env_name_is("APP_ENV", "production")
-        || env_name_is("NODE_ENV", "prod")
-        || env_name_is("APP_ENV", "prod")
-        || env_name_is("NODE_ENV", "staging")
-        || env_name_is("APP_ENV", "staging")
-        || env_name_is("NODE_ENV", "stage")
-        || env_name_is("APP_ENV", "stage")
-        || env_name_is("NODE_ENV", "test")
-        || env_name_is("APP_ENV", "test")
-        || env_name_is("NODE_ENV", "testing")
-        || env_name_is("APP_ENV", "testing")
-}
-
-fn env_flag(name: &str) -> bool {
-    std::env::var(name)
-        .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "True"))
-        .unwrap_or(false)
-}
-
-fn env_name_is(name: &str, expected: &str) -> bool {
-    std::env::var(name)
-        .ok()
-        .is_some_and(|value| value.trim().eq_ignore_ascii_case(expected))
 }
 
 fn build_match_service_metadata(config: &Config) -> Value {

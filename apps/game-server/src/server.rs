@@ -484,9 +484,11 @@ pub async fn run(
     // Initialize MatchClient for communicating with MatchService
     let match_client = crate::match_client::create_match_client_shared();
     let match_client_config = MatchClientConfig::from_env().await;
-    if let Err(e) = init_match_client(&match_client, match_client_config.clone()).await {
+    if match_client_config.registry_enabled {
+        health_state.mark_pending("match-service", "grpc", StartupErrorCode::DependencyPending);
+    } else if let Err(e) = init_match_client(&match_client, match_client_config.clone()).await {
         health_state.mark_degraded("match-service", "grpc", StartupErrorCode::DependencyPending);
-        tracing::error!(error = %e, "failed to connect to match-service, match notifications will be disabled");
+        tracing::error!(error = %e, "failed to connect to local match-service fallback, match notifications will be disabled");
     } else {
         health_state.mark_ready("match-service", "grpc");
     }
@@ -696,8 +698,7 @@ pub async fn run(
     gm_broadcast_task.abort();
     let _ = gm_broadcast_task.await;
     if let Some(task) = match_client_rediscovery_task {
-        task.abort();
-        let _ = task.await;
+        task.stop_and_wait().await;
     }
     lease_renew_task.abort();
     let _ = lease_renew_task.await;

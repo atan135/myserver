@@ -54,22 +54,29 @@ impl GameServerClient {
         mode: &str,
     ) -> Result<String, MatchError> {
         let socket_name = self.resolve_internal_socket_name(match_id, mode).await?;
-        let mut stream = connect_local_socket(&socket_name).await.map_err(|error| {
-            self.mark_internal_degraded(StartupErrorCode::DependencyPending);
-            MatchError::RoomCreateFailed(format!(
-                "connect internal socket {socket_name} failed: {error}"
-            ))
-        })?;
+        let mut stream = match connect_local_socket(&socket_name).await {
+            Ok(stream) => stream,
+            Err(error) => {
+                self.discovery.invalidate_cache().await;
+                self.mark_internal_degraded(StartupErrorCode::DependencyPending);
+                return Err(MatchError::RoomCreateFailed(format!(
+                    "connect internal socket {socket_name} failed: {error}"
+                )));
+            }
+        };
 
         let auth_packet = encode_packet(
             INTERNAL_AUTH_REQ,
             0,
             self.config.game_internal_token.as_bytes(),
         );
-        stream.write_all(&auth_packet).await.map_err(|error| {
+        if let Err(error) = stream.write_all(&auth_packet).await {
+            self.discovery.invalidate_cache().await;
             self.mark_internal_degraded(StartupErrorCode::StartupPhaseFailure);
-            MatchError::RoomCreateFailed(format!("write InternalAuthReq failed: {error}"))
-        })?;
+            return Err(MatchError::RoomCreateFailed(format!(
+                "write InternalAuthReq failed: {error}"
+            )));
+        }
 
         let request = CreateMatchedRoomReq {
             match_id: match_id.to_string(),
@@ -80,15 +87,22 @@ impl GameServerClient {
         let body = encode_body(&request);
         let packet = encode_packet(CREATE_MATCHED_ROOM_REQ, 1, &body);
 
-        stream.write_all(&packet).await.map_err(|error| {
+        if let Err(error) = stream.write_all(&packet).await {
+            self.discovery.invalidate_cache().await;
             self.mark_internal_degraded(StartupErrorCode::StartupPhaseFailure);
-            MatchError::RoomCreateFailed(format!("write CreateMatchedRoomReq failed: {error}"))
-        })?;
+            return Err(MatchError::RoomCreateFailed(format!(
+                "write CreateMatchedRoomReq failed: {error}"
+            )));
+        }
 
-        let response_packet = read_packet(&mut stream).await.map_err(|error| {
-            self.mark_internal_degraded(StartupErrorCode::StartupPhaseFailure);
-            error
-        })?;
+        let response_packet = match read_packet(&mut stream).await {
+            Ok(response) => response,
+            Err(error) => {
+                self.discovery.invalidate_cache().await;
+                self.mark_internal_degraded(StartupErrorCode::StartupPhaseFailure);
+                return Err(error);
+            }
+        };
         self.handle_create_room_response(response_packet)
     }
 
@@ -329,12 +343,11 @@ impl GameServerDiscovery {
             return Ok(client.clone());
         }
 
-        let client = RegistryClient::new(
+        let client = RegistryClient::new_lazy(
             &self.registry_url,
             &self.registry_service_name,
             &self.registry_instance_id,
         )
-        .await
         .map_err(|error| {
             self.mark_internal_degraded(StartupErrorCode::RegistryUnavailable);
             record_discovery_metric(
@@ -350,6 +363,10 @@ impl GameServerDiscovery {
         let client = Arc::new(client.with_key_prefix(self.registry_key_prefix.clone()));
         *guard = Some(client.clone());
         Ok(client)
+    }
+
+    async fn invalidate_cache(&self) {
+        self.cache.lock().await.invalidate();
     }
 
     fn mark_internal_degraded(&self, error_code: StartupErrorCode) {
@@ -391,6 +408,11 @@ impl DiscoveryCache {
         sort_candidates(&mut candidates);
         self.candidates = candidates;
         self.expires_at = Some(now + ttl);
+    }
+
+    fn invalidate(&mut self) {
+        self.candidates.clear();
+        self.expires_at = None;
     }
 }
 
@@ -845,6 +867,68 @@ mod tests {
 
         assert_eq!(cache.get(now + Duration::from_secs(4)), Some(candidates));
         assert!(cache.get(now + Duration::from_secs(5)).is_none());
+    }
+
+    #[test]
+    fn discovery_cache_invalidation_forces_refresh_before_ttl_expires() {
+        let now = Instant::now();
+        let mut cache = DiscoveryCache::default();
+        cache.store(
+            vec![candidate("game-old", "old.sock", &[], None)],
+            now,
+            Duration::from_secs(30),
+        );
+
+        assert!(cache.get(now + Duration::from_secs(1)).is_some());
+
+        cache.invalidate();
+
+        assert!(cache.get(now + Duration::from_secs(1)).is_none());
+        assert!(cache.candidates.is_empty());
+        assert!(cache.expires_at.is_none());
+    }
+
+    #[test]
+    fn invalidated_cache_selects_switched_endpoint_on_next_store() {
+        let now = Instant::now();
+        let mut cache = DiscoveryCache::default();
+        cache.store(
+            vec![candidate(
+                "game-old",
+                "old.sock",
+                &["ranked"],
+                Some("zone-a"),
+            )],
+            now,
+            Duration::from_secs(30),
+        );
+        let old = cache
+            .get(now + Duration::from_secs(1))
+            .expect("old endpoint should initially be cached");
+        assert_eq!(
+            select_socket(&old, "match-switch", "ranked", "zone-a").unwrap(),
+            "old.sock"
+        );
+
+        cache.invalidate();
+        cache.store(
+            vec![candidate(
+                "game-new",
+                "new.sock",
+                &["ranked"],
+                Some("zone-a"),
+            )],
+            now + Duration::from_secs(1),
+            Duration::from_secs(30),
+        );
+
+        let refreshed = cache
+            .get(now + Duration::from_secs(2))
+            .expect("next discovery should populate the switched endpoint");
+        assert_eq!(
+            select_socket(&refreshed, "match-switch", "ranked", "zone-a").unwrap(),
+            "new.sock"
+        );
     }
 
     #[test]

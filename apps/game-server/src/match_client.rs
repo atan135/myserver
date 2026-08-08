@@ -2,13 +2,15 @@
 //!
 //! GameServer 通过此客户端调用 MatchService 的内部接口
 
-use service_registry::{HealthState, RegistryClient, StartupErrorCode, record_discovery_metric};
+use service_registry::{
+    ConvergenceAttempt, ConvergenceConfig, ConvergenceTask, HealthState, RegistryClient,
+    StartupErrorCode, record_discovery_metric, spawn_convergence,
+};
 use std::error::Error;
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
-use tokio::task::JoinHandle;
 use tonic::transport::Channel;
 
 use crate::proto::myserver::matchservice::match_internal_client::MatchInternalClient;
@@ -90,19 +92,10 @@ impl MatchClientConfig {
             };
         }
 
-        let initial_discovery = resolve_match_service_addr(
-            &registry_url,
-            &registry_key_prefix,
-            &service_name,
-            &fallback_addr,
-            discovery_required,
-            local_discovery_fallback_enabled,
-        )
-        .await;
-        let addr = require_initial_match_discovery(&service_name, initial_discovery).addr;
-
         Self {
-            addr,
+            // Registry discovery is performed by the convergence task. Keeping the
+            // fallback here preserves the existing connector configuration shape.
+            addr: fallback_addr.clone(),
             fallback_addr,
             local_discovery_fallback_enabled,
             registry_enabled,
@@ -117,18 +110,6 @@ impl MatchClientConfig {
     pub fn rediscovery_enabled(&self) -> bool {
         self.registry_enabled
     }
-}
-
-fn require_initial_match_discovery(
-    service_name: &str,
-    result: Result<ResolvedMatchServiceAddr, Box<dyn Error + Send + Sync>>,
-) -> ResolvedMatchServiceAddr {
-    result.unwrap_or_else(|error| {
-        panic!(
-            "required registry discovery failed for {}.grpc: {}",
-            service_name, error
-        )
-    })
 }
 
 /// MatchClient
@@ -349,7 +330,7 @@ pub fn spawn_match_client_rediscovery(
     client: SharedMatchClient,
     config: MatchClientConfig,
     health_state: HealthState,
-) -> Option<JoinHandle<()>> {
+) -> Option<ConvergenceTask> {
     if !config.rediscovery_enabled() {
         tracing::info!(
             service = %config.service_name,
@@ -373,13 +354,15 @@ pub fn spawn_match_client_rediscovery(
         "match-service rediscovery task started"
     );
 
-    Some(tokio::spawn(async move {
-        let mut ticker = tokio::time::interval(interval);
-        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-
-        loop {
-            ticker.tick().await;
-
+    let convergence_config = ConvergenceConfig {
+        steady_interval: interval,
+        ..ConvergenceConfig::default()
+    };
+    Some(spawn_convergence(convergence_config, move || {
+        let client = client.clone();
+        let config = config.clone();
+        let health_state = health_state.clone();
+        async move {
             let discovered_addr = match resolve_match_service_addr(
                 &config.registry_url,
                 &config.registry_key_prefix,
@@ -392,11 +375,8 @@ pub fn spawn_match_client_rediscovery(
             {
                 Ok(resolved) => resolved.addr,
                 Err(error) => {
-                    health_state.mark_degraded(
-                        "match-service",
-                        "grpc",
-                        StartupErrorCode::RegistryUnavailable,
-                    );
+                    clear_match_client(&client).await;
+                    mark_match_dependency_retry(&health_state, error.error_code);
                     tracing::warn!(
                         service = %config.service_name,
                         endpoint = "grpc",
@@ -404,9 +384,9 @@ pub fn spawn_match_client_rediscovery(
                         source = "registry",
                         reason = "registry_error",
                         error = %error,
-                        "match-service rediscovery failed; keeping existing client and retrying next tick"
+                        "match-service discovery convergence attempt failed"
                     );
-                    continue;
+                    return ConvergenceAttempt::Retry(error.error_code);
                 }
             };
 
@@ -420,33 +400,48 @@ pub fn spawn_match_client_rediscovery(
             {
                 Ok(true) => {
                     health_state.mark_ready("match-service", "grpc");
-                    tracing::info!(addr = %discovered_addr, "match-service rediscovery reconnected");
+                    tracing::info!(addr = %discovered_addr, "match-service discovery converged");
+                    ConvergenceAttempt::Converged
                 }
                 Ok(false) => {
                     let current = current_match_client_state(&client).await;
                     if current.addr.is_some() && !current.reconnect_required {
                         health_state.mark_ready("match-service", "grpc");
+                        ConvergenceAttempt::Converged
+                    } else {
+                        clear_match_client(&client).await;
+                        mark_match_dependency_retry(
+                            &health_state,
+                            StartupErrorCode::DependencyPending,
+                        );
+                        ConvergenceAttempt::Retry(StartupErrorCode::DependencyPending)
                     }
-                    tracing::debug!(
-                        addr = %discovered_addr,
-                        "match-service rediscovery kept existing client"
-                    );
                 }
                 Err(error) => {
-                    health_state.mark_degraded(
-                        "match-service",
-                        "grpc",
-                        StartupErrorCode::DependencyPending,
-                    );
+                    clear_match_client(&client).await;
+                    mark_match_dependency_retry(&health_state, StartupErrorCode::DependencyPending);
                     tracing::warn!(
                         addr = %discovered_addr,
                         error = %error,
-                        "match-service rediscovery reconnect failed; keeping existing client"
+                        "match-service connection convergence attempt failed"
                     );
+                    ConvergenceAttempt::Retry(StartupErrorCode::DependencyPending)
                 }
             }
         }
     }))
+}
+
+fn mark_match_dependency_retry(health_state: &HealthState, error_code: StartupErrorCode) {
+    if error_code == StartupErrorCode::DependencyPending {
+        health_state.mark_pending("match-service", "grpc", error_code);
+    } else {
+        health_state.mark_degraded("match-service", "grpc", error_code);
+    }
+}
+
+async fn clear_match_client(client: &SharedMatchClient) {
+    *client.lock().await = None;
 }
 
 async fn rebuild_match_client_if_needed_with_connector<Connect, ConnectFuture>(
@@ -579,8 +574,8 @@ async fn resolve_match_service_addr(
     fallback_addr: &str,
     discovery_required: bool,
     local_discovery_fallback_enabled: bool,
-) -> Result<ResolvedMatchServiceAddr, Box<dyn Error + Send + Sync>> {
-    let outcome = match RegistryClient::new(registry_url, "game-server", "match-discovery").await {
+) -> Result<ResolvedMatchServiceAddr, MatchDiscoveryFailure> {
+    let outcome = match RegistryClient::new_lazy(registry_url, "game-server", "match-discovery") {
         Ok(client) => match client
             .with_key_prefix(registry_key_prefix.to_string())
             .discover_endpoint(service_name, "grpc")
@@ -620,6 +615,11 @@ async fn resolve_match_service_addr(
         }
     };
 
+    let error_code = match &outcome {
+        DiscoveryOutcome::NotFound => StartupErrorCode::DependencyPending,
+        DiscoveryOutcome::Error(_) => StartupErrorCode::RegistryUnavailable,
+        DiscoveryOutcome::Found(_) => StartupErrorCode::DependencyPending,
+    };
     match resolve_discovery_outcome(
         outcome,
         fallback_addr,
@@ -640,9 +640,26 @@ async fn resolve_match_service_addr(
             }
             Ok(resolved)
         }
-        Err(error) => Err(std::io::Error::other(error).into()),
+        Err(message) => Err(MatchDiscoveryFailure {
+            error_code,
+            message,
+        }),
     }
 }
+
+#[derive(Debug)]
+struct MatchDiscoveryFailure {
+    error_code: StartupErrorCode,
+    message: String,
+}
+
+impl std::fmt::Display for MatchDiscoveryFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl Error for MatchDiscoveryFailure {}
 
 fn env_flag(name: &str, default: bool) -> bool {
     std::env::var(name)
@@ -849,27 +866,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn missing_initial_match_discovery_panics_before_client_initialization() {
-        let task = tokio::spawn(async {
-            let error: Box<dyn Error + Send + Sync> =
-                std::io::Error::other("match-service grpc endpoint not found").into();
-            require_initial_match_discovery("match-service", Err(error))
-        });
+    async fn strict_registry_config_does_not_perform_initial_discovery() {
+        let _lock = env_lock().lock().unwrap();
+        let _env = EnvGuard::capture(MATCH_CLIENT_ENV_NAMES);
+        for name in MATCH_CLIENT_ENV_NAMES {
+            unsafe {
+                env::remove_var(name);
+            }
+        }
+        unsafe {
+            env::set_var("APP_ENV", "production");
+            env::set_var("REGISTRY_ENABLED", "true");
+            env::set_var("REGISTRY_URL", "redis://127.0.0.1:1");
+        }
 
-        let join_error = task
-            .await
-            .expect_err("missing initial match endpoint currently terminates startup");
-        assert!(join_error.is_panic());
-        let payload = join_error.into_panic();
-        let message = payload
-            .downcast_ref::<String>()
-            .map(String::as_str)
-            .or_else(|| payload.downcast_ref::<&str>().copied())
-            .unwrap_or("");
-        assert_eq!(
-            message,
-            "required registry discovery failed for match-service.grpc: match-service grpc endpoint not found"
-        );
+        let config = MatchClientConfig::from_env().await;
+
+        assert!(config.registry_enabled);
+        assert!(config.discovery_required);
+        assert!(!config.local_discovery_fallback_enabled);
     }
 
     #[tokio::test]
@@ -1054,6 +1069,34 @@ mod tests {
         assert!(rebuilt);
         let state = shared_client_state(&client).await;
         assert_eq!(state.addr.as_deref(), Some("http://127.0.0.1:9002"));
+        assert!(!state.reconnect_required);
+    }
+
+    #[tokio::test]
+    async fn rediscovery_connects_empty_client_after_endpoint_arrives() {
+        let client = create_match_client_shared();
+
+        let missing_endpoint = resolve_discovery_outcome(
+            DiscoveryOutcome::NotFound,
+            "http://127.0.0.1:9002",
+            true,
+            false,
+        );
+        assert!(missing_endpoint.is_err());
+        assert!(shared_client_state(&client).await.addr.is_none());
+
+        let rebuilt = rebuild_match_client_if_needed_with_connector(
+            &client,
+            &test_config("http://127.0.0.1:9002"),
+            "http://127.0.0.1:19002",
+            test_connect_match_client,
+        )
+        .await
+        .expect("late endpoint should connect without restarting game-server");
+
+        assert!(rebuilt);
+        let state = shared_client_state(&client).await;
+        assert_eq!(state.addr.as_deref(), Some("http://127.0.0.1:19002"));
         assert!(!state.reconnect_required);
     }
 

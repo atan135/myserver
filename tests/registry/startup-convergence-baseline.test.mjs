@@ -97,20 +97,22 @@ test("startup fixture covers the four reproducible baseline failures", () => {
   }
 });
 
-test("source order places initial match discovery after socket pair and lease acquisition", () => {
+test("game-server starts match convergence after local resources without initial discovery panic", () => {
   const server = source("apps/game-server/src/server.rs");
   const matchClient = source("apps/game-server/src/match_client.rs");
   const entry = scenario("game-server-match-not-registered");
 
   const socketPair = indexOfOrFail(server, "create_listener_pair(", "local socket pair bind");
   const lease = indexOfOrFail(server, "WorkerLease::acquire_redis(", "worker lease acquisition");
-  const initialMatchConfig = indexOfOrFail(server, "MatchClientConfig::from_env().await", "initial match discovery");
-  const caughtConnectError = indexOfOrFail(server, "if let Err(e) = init_match_client", "non-fatal match connection error");
+  const matchConfig = indexOfOrFail(server, "MatchClientConfig::from_env().await", "match config parsing");
+  const convergence = indexOfOrFail(server, "spawn_match_client_rediscovery(", "match convergence task");
 
   assert.ok(socketPair < lease);
-  assert.ok(lease < initialMatchConfig);
-  assert.ok(initialMatchConfig < caughtConnectError);
-  assert.match(matchClient, /fn require_initial_match_discovery[\s\S]+?result\.unwrap_or_else\(\|error\|\s*\{\s*panic!\(/);
+  assert.ok(lease < matchConfig);
+  assert.ok(matchConfig < convergence);
+  assert.doesNotMatch(matchClient, /fn require_initial_match_discovery/);
+  assert.match(matchClient, /spawn_convergence\(convergence_config/);
+  assert.match(matchClient, /RegistryClient::new_lazy/);
   assert.match(matchClient, /match-service grpc endpoint not found/);
   assert.equal(entry.currentBehavior.processOutcome, "panic");
   assert.deepEqual(entry.currentBehavior.resourceStateAtFailure, [
@@ -146,13 +148,17 @@ test("socket pair source preserves local-before-internal bootstrap order", () =>
   assert.equal(entry.currentBehavior.createMode, "create_without_reclaim");
 });
 
-test("proxy source routes initial endpoint count through the tested validator", () => {
+test("proxy binds frontends before starting recoverable upstream convergence", () => {
   const proxy = source("apps/game-proxy/src/proxy_server.rs");
   const entry = scenario("game-proxy-upstream-endpoint-missing");
 
-  assert.match(proxy, /validate_initial_upstream_routes\(&service_name, initial_routes\)\?/);
-  assert.match(proxy, /fn validate_initial_upstream_routes[\s\S]+?if initial_routes == 0/);
-  assert.match(proxy, /required upstream discovery failed: \{\}\.proxy-local endpoint not found/);
+  const kcpBind = indexOfOrFail(proxy, "KcpFrontend::bind", "KCP frontend bind");
+  const tcpBind = indexOfOrFail(proxy, "TcpFrontend::bind", "TCP frontend bind");
+  const convergence = indexOfOrFail(proxy, "spawn_upstream_discovery(", "upstream convergence");
+  assert.ok(kcpBind < convergence);
+  assert.ok(tcpBind < convergence);
+  assert.doesNotMatch(proxy, /fn validate_initial_upstream_routes/);
+  assert.match(proxy, /ConvergenceAttempt::Retry\(StartupErrorCode::DependencyPending\)/);
   assert.equal(entry.currentBehavior.processOutcome, "error_return");
   assert.deepEqual(entry.condition.eligibleEndpoints, []);
 });
@@ -191,10 +197,16 @@ test("production config gives all dependency-aware services bounded health windo
   }
 });
 
-test("target services observe heartbeat outcomes without exposing raw errors", () => {
+test("target services publish unhealthy until stable readiness and recover registration", () => {
   const registry = source("packages/service-registry/src/client.rs");
-  assert.match(registry, /pub enum HeartbeatOutcome\s*\{\s*Succeeded,\s*Failed/);
-  assert.match(registry, /pub fn start_heartbeat_task\(&self\)[\s\S]+?start_heartbeat_task_with_observer/);
+  const publication = source("packages/service-registry/src/publication.rs");
+  const convergence = source("packages/service-registry/src/convergence.rs");
+  assert.match(registry, /pub fn new_lazy/);
+  assert.match(publication, /PublicationAction::Register\(false\)/);
+  assert.match(publication, /let desired_healthy = health_state\.snapshot\(\)\.ready/);
+  assert.match(publication, /StartupErrorCode::RegistryUnavailable/);
+  assert.match(convergence, /bounded_exponential_delay/);
+  assert.match(convergence, /jitter\s*\.apply/);
 
   for (const entry of [
     "apps/game-server/src/main.rs",
@@ -202,9 +214,9 @@ test("target services observe heartbeat outcomes without exposing raw errors", (
     "apps/match-service/src/main.rs"
   ]) {
     const contents = source(entry);
-    assert.match(contents, /start_heartbeat_task_with_observer/);
-    assert.match(contents, /HeartbeatOutcome::Failed[\s\S]+?StartupErrorCode::RegistryUnavailable/);
-    assert.match(contents, /HeartbeatOutcome::Succeeded[\s\S]+?mark_ready\("service-registry", "self-registration"\)/);
+    assert.match(contents, /RegistryClient::new_lazy/);
+    assert.match(contents, /spawn_registry_publication/);
+    assert.doesNotMatch(contents, /start_heartbeat_task_with_observer/);
     assert.match(contents, /HealthState::try_from_env/);
   }
 });

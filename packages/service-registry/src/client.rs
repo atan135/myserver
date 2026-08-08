@@ -165,16 +165,13 @@ impl Drop for DiscoveryWatch {
 }
 
 impl RegistryClient {
-    /// 创建新的注册中心客户端
-    pub async fn new(
+    /// Creates a registry client without opening a Redis connection.
+    pub fn new_lazy(
         redis_url: &str,
         service_name: &str,
         instance_id: &str,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let redis = redis::Client::open(redis_url)?;
-        // 测试连接
-        let _conn = redis.get_multiplexed_async_connection().await?;
-
         Ok(Self {
             redis,
             instance_id: instance_id.to_string(),
@@ -188,6 +185,18 @@ impl RegistryClient {
             discovery_cache_ttl: default_discovery_cache_ttl(),
             discovery_cache: Mutex::new(DiscoveryCache::default()),
         })
+    }
+
+    /// 创建新的注册中心客户端
+    pub async fn new(
+        redis_url: &str,
+        service_name: &str,
+        instance_id: &str,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        let client = Self::new_lazy(redis_url, service_name, instance_id)?;
+        // 测试连接
+        let _conn = client.redis.get_multiplexed_async_connection().await?;
+        Ok(client)
     }
 
     /// 设置注册中心 Redis key 前缀
@@ -213,6 +222,10 @@ impl RegistryClient {
     pub fn with_heartbeat_interval(mut self, secs: u64) -> Self {
         self.heartbeat_interval_secs = secs;
         self
+    }
+
+    pub(crate) fn heartbeat_interval(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.heartbeat_interval_secs.max(1))
     }
 
     /// 注册服务实例
@@ -1346,6 +1359,16 @@ impl DiscoveryCacheKey {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lazy_client_does_not_require_a_live_redis_connection() {
+        let client = RegistryClient::new_lazy(
+            "redis://192.0.2.1:1",
+            "game-server",
+            "game-server-lazy-test",
+        );
+        assert!(client.is_ok());
+    }
 
     #[test]
     fn heartbeat_outcome_exposes_only_success_or_failure() {

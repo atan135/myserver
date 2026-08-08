@@ -33,8 +33,9 @@ use crate::route_store::{
 use crate::session::{ProxySession, ProxySessionState};
 use crate::upstream::connect_upstream;
 use service_registry::{
-    DiscoverySnapshot, DiscoveryWatchConfig, HealthState, RegistryClient, ServiceEndpoint,
-    ServiceInstance, StartupErrorCode, record_discovery_metric,
+    ConvergenceAttempt, ConvergenceConfig, ConvergenceTask, DiscoverySnapshot, HealthState,
+    RegistryClient, ServiceEndpoint, ServiceInstance, StartupErrorCode, record_discovery_metric,
+    spawn_convergence,
 };
 
 const MAX_PROXY_BODY_LEN: usize = 1024 * 1024;
@@ -243,75 +244,32 @@ pub async fn run(
         .validate_upstream_discovery()
         .map_err(std::io::Error::other)?;
 
-    if config.registry_enabled {
+    let mut kcp_frontend =
+        crate::transport::kcp_frontend::KcpFrontend::bind(&config.bind_addr()).await?;
+    info!(addr = %config.bind_addr(), protocol = "kcp", "game-proxy frontend listening");
+
+    let tcp_addr = config.tcp_fallback_addr();
+    let mut tcp_frontend = crate::transport::tcp_frontend::TcpFrontend::bind(&tcp_addr).await?;
+    info!(addr = %tcp_addr, protocol = "tcp", "game-proxy tcp fallback frontend listening");
+    health_state.mark_ready("local-runtime", "frontends");
+
+    let _upstream_discovery_task = if config.registry_enabled {
         let registry_url = config.registry_url.clone();
         let registry_key_prefix = config.registry_key_prefix.clone();
         let service_name = config.upstream_service_name.clone();
         let discover_interval = config.registry_discover_interval_secs;
         let route_store_clone = route_store.clone();
-        let initial_client =
-            match RegistryClient::new(&registry_url, "proxy", "proxy-initial").await {
-                Ok(client) => client.with_key_prefix(registry_key_prefix.clone()),
-                Err(error) => {
-                    health_state.mark_degraded(
-                        "game-server",
-                        "proxy-local",
-                        StartupErrorCode::RegistryUnavailable,
-                    );
-                    return Err(std::io::Error::other(error.to_string()).into());
-                }
-            };
-        let initial_routes =
-            match discover_and_update_routes(&initial_client, &service_name, &route_store).await {
-                Ok(routes) => routes,
-                Err(error) => {
-                    health_state.mark_degraded(
-                        "game-server",
-                        "proxy-local",
-                        StartupErrorCode::RegistryUnavailable,
-                    );
-                    return Err(std::io::Error::other(error.to_string()).into());
-                }
-            };
-        if initial_routes == 0 {
-            health_state.mark_pending(
-                "game-server",
-                "proxy-local",
-                StartupErrorCode::DependencyPending,
-            );
-        } else {
-            health_state.mark_ready("game-server", "proxy-local");
-        }
-        validate_initial_upstream_routes(&service_name, initial_routes)?;
-
-        let discovery_health_state = health_state.clone();
-        tokio::spawn(async move {
-            if let Err(error) = run_upstream_discovery(
+        Some(
+            spawn_upstream_discovery(
                 registry_url,
                 registry_key_prefix,
-                service_name.clone(),
+                service_name,
                 discover_interval,
                 route_store_clone,
-                discovery_health_state.clone(),
+                health_state.clone(),
             )
-            .await
-            {
-                discovery_health_state.mark_degraded(
-                    "game-server",
-                    "proxy-local",
-                    StartupErrorCode::RegistryUnavailable,
-                );
-                tracing::error!(
-                    service = %service_name,
-                    endpoint = "proxy-local",
-                    instance_id = "",
-                    source = "registry",
-                    reason = "registry_error",
-                    error = %error,
-                    "upstream discovery stopped"
-                );
-            }
-        });
+            .map_err(|error| std::io::Error::other(error.to_string()))?,
+        )
     } else {
         record_discovery_metric(
             &config.upstream_service_name,
@@ -330,16 +288,8 @@ pub async fn run(
             "using static upstream config"
         );
         health_state.mark_ready("game-server", "proxy-local");
-    }
-
-    let mut kcp_frontend =
-        crate::transport::kcp_frontend::KcpFrontend::bind(&config.bind_addr()).await?;
-    info!(addr = %config.bind_addr(), protocol = "kcp", "game-proxy frontend listening");
-
-    let tcp_addr = config.tcp_fallback_addr();
-    let mut tcp_frontend = crate::transport::tcp_frontend::TcpFrontend::bind(&tcp_addr).await?;
-    info!(addr = %tcp_addr, protocol = "tcp", "game-proxy tcp fallback frontend listening");
-    health_state.mark_ready("local-runtime", "frontends");
+        None
+    };
 
     let mut next_session_id = 1u64;
     let connection_limiter = ConnectionLimiter::new(config.connection_limits.clone());
@@ -440,74 +390,60 @@ pub async fn run(
     }
 }
 
-fn validate_initial_upstream_routes(
-    service_name: &str,
-    initial_routes: usize,
-) -> Result<(), Box<dyn std::error::Error>> {
-    if initial_routes == 0 {
-        return Err(format!(
-            "required upstream discovery failed: {}.proxy-local endpoint not found",
-            service_name
-        )
-        .into());
-    }
-    Ok(())
-}
-
-async fn run_upstream_discovery(
+fn spawn_upstream_discovery(
     registry_url: String,
     registry_key_prefix: String,
     service_name: String,
     discover_interval_secs: u64,
     route_store: ProxyRouteStore,
     health_state: HealthState,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let client = RegistryClient::new(&registry_url, "proxy", "proxy-static")
-        .await?
-        .with_key_prefix(registry_key_prefix);
-    let interval = tokio::time::Duration::from_secs(discover_interval_secs.max(1));
-    let watch = client.watch_discovery(
-        service_name.clone(),
-        DiscoveryWatchConfig::new(interval),
-        move |snapshot| {
-            let route_store = route_store.clone();
-            let health_state = health_state.clone();
-            async move {
-                let registry_failed = snapshot.error.is_some();
-                let endpoint_count =
-                    refresh_routes_from_discovery_snapshot(snapshot, &route_store).await;
-                if registry_failed {
-                    health_state.mark_degraded(
-                        "game-server",
-                        "proxy-local",
-                        StartupErrorCode::RegistryUnavailable,
-                    );
-                } else if endpoint_count == 0 {
-                    health_state.mark_degraded(
-                        "game-server",
-                        "proxy-local",
-                        StartupErrorCode::DependencyPending,
-                    );
-                } else {
-                    health_state.mark_ready("game-server", "proxy-local");
-                }
-            }
-        },
+) -> Result<ConvergenceTask, Box<dyn std::error::Error + Send + Sync>> {
+    let client = Arc::new(
+        RegistryClient::new_lazy(&registry_url, "proxy", "proxy-static")?
+            .with_key_prefix(registry_key_prefix),
     );
-
-    loop {
-        tokio::time::sleep(tokio::time::Duration::from_secs(3600)).await;
-        let _ = watch.snapshot().await;
-    }
-}
-
-async fn discover_and_update_routes(
-    client: &RegistryClient,
-    service_name: &str,
-    route_store: &ProxyRouteStore,
-) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
-    let snapshot = client.refresh_discovery_snapshot(service_name).await?;
-    Ok(refresh_routes_from_discovery_snapshot(snapshot, route_store).await)
+    let config = ConvergenceConfig {
+        steady_interval: tokio::time::Duration::from_secs(discover_interval_secs.max(1)),
+        ..ConvergenceConfig::default()
+    };
+    Ok(spawn_convergence(config, move || {
+        let client = Arc::clone(&client);
+        let service_name = service_name.clone();
+        let route_store = route_store.clone();
+        let health_state = health_state.clone();
+        async move {
+            let snapshot = match client.refresh_discovery_snapshot(&service_name).await {
+                Ok(snapshot) => snapshot,
+                Err(error) => DiscoverySnapshot::failure(
+                    service_name.clone(),
+                    Vec::new(),
+                    None,
+                    error.to_string(),
+                ),
+            };
+            let registry_failed = snapshot.error.is_some();
+            let endpoint_count =
+                refresh_routes_from_discovery_snapshot(snapshot, &route_store).await;
+            if registry_failed {
+                health_state.mark_degraded(
+                    "game-server",
+                    "proxy-local",
+                    StartupErrorCode::RegistryUnavailable,
+                );
+                ConvergenceAttempt::Retry(StartupErrorCode::RegistryUnavailable)
+            } else if endpoint_count == 0 {
+                health_state.mark_pending(
+                    "game-server",
+                    "proxy-local",
+                    StartupErrorCode::DependencyPending,
+                );
+                ConvergenceAttempt::Retry(StartupErrorCode::DependencyPending)
+            } else {
+                health_state.mark_ready("game-server", "proxy-local");
+                ConvergenceAttempt::Converged
+            }
+        }
+    }))
 }
 
 async fn refresh_routes_from_discovery_snapshot(
@@ -515,7 +451,7 @@ async fn refresh_routes_from_discovery_snapshot(
     route_store: &ProxyRouteStore,
 ) -> usize {
     if let Some(error) = snapshot.error {
-        route_store.sync_discovered_routes(Vec::new()).await;
+        route_store.mark_discovered_routes_unavailable().await;
         record_discovery_metric(
             &snapshot.service_name,
             "proxy-local",
@@ -534,8 +470,8 @@ async fn refresh_routes_from_discovery_snapshot(
         return 0;
     }
 
-    let endpoint_count = count_proxy_local_endpoints(&snapshot.instances);
     let routes = discover_proxy_local_routes(snapshot.instances);
+    let endpoint_count = routes.len();
 
     route_store.sync_discovered_routes(routes).await;
 
@@ -573,43 +509,49 @@ async fn refresh_routes_from_discovery_snapshot(
 }
 
 fn discover_proxy_local_routes(instances: Vec<ServiceInstance>) -> Vec<UpstreamRoute> {
-    instances
+    let mut routes: Vec<_> = instances
         .into_iter()
         .filter_map(proxy_local_route_from_instance)
-        .collect()
-}
-
-fn count_proxy_local_endpoints(instances: &[ServiceInstance]) -> usize {
-    instances
-        .iter()
-        .filter(|instance| {
-            instance.endpoints.iter().any(|endpoint| {
-                endpoint.name == "proxy-local" && endpoint.healthy && endpoint.is_valid()
-            })
-        })
-        .count()
+        .collect();
+    routes.sort_by(|left, right| {
+        left.server_id
+            .cmp(&right.server_id)
+            .then_with(|| left.local_socket_name.cmp(&right.local_socket_name))
+    });
+    routes.dedup_by(|left, right| left.server_id == right.server_id);
+    routes
 }
 
 fn proxy_local_route_from_instance(instance: ServiceInstance) -> Option<UpstreamRoute> {
-    let endpoint = instance.endpoints.iter().find(|endpoint| {
-        endpoint.name == "proxy-local" && endpoint.healthy && endpoint.is_valid()
-    })?;
-    let local_socket_name = local_socket_endpoint_name(endpoint)?;
-    let server_id = endpoint
-        .metadata
-        .get("instance_id")
-        .or_else(|| endpoint.metadata.get("server_id"))
-        .and_then(|value| value.as_str())
-        .filter(|value| !value.is_empty())
-        .unwrap_or(&instance.id)
-        .to_string();
+    instance
+        .endpoints
+        .iter()
+        .filter(|endpoint| {
+            endpoint.name == "proxy-local" && endpoint.healthy && endpoint.is_valid()
+        })
+        .filter_map(|endpoint| {
+            let local_socket_name = local_socket_endpoint_name(endpoint)?;
+            let server_id = endpoint
+                .metadata
+                .get("instance_id")
+                .or_else(|| endpoint.metadata.get("server_id"))
+                .and_then(|value| value.as_str())
+                .filter(|value| !value.is_empty())
+                .unwrap_or(&instance.id)
+                .to_string();
 
-    Some(UpstreamRoute {
-        server_id,
-        local_socket_name,
-        operation_state: UpstreamOperationState::Active,
-        health_state: UpstreamHealthState::Healthy,
-    })
+            Some(UpstreamRoute {
+                server_id,
+                local_socket_name,
+                operation_state: UpstreamOperationState::Active,
+                health_state: UpstreamHealthState::Healthy,
+            })
+        })
+        .min_by(|left, right| {
+            left.server_id
+                .cmp(&right.server_id)
+                .then_with(|| left.local_socket_name.cmp(&right.local_socket_name))
+        })
 }
 
 fn local_socket_endpoint_name(endpoint: &ServiceEndpoint) -> Option<String> {
@@ -1562,7 +1504,6 @@ mod tests {
         PreauthDecision, discover_proxy_local_routes, preauth_decision,
         refresh_routes_from_discovery_snapshot, replay_auth_to_upstream,
         restore_authenticated_after_local_routing_error, select_route_for_packet,
-        validate_initial_upstream_routes,
     };
     use crate::pb::{RoomJoinReq, RoomReconnectReq};
     use crate::protocol::{
@@ -1930,15 +1871,85 @@ mod tests {
         assert!(routes.is_empty());
     }
 
-    #[test]
-    fn zero_initial_routes_reproduce_required_upstream_startup_error() {
-        let error = validate_initial_upstream_routes("game-server", 0)
-            .expect_err("missing proxy-local endpoint must fail current startup");
+    #[tokio::test]
+    async fn discovery_zero_route_snapshot_remains_recoverable_when_endpoint_arrives() {
+        let store = ProxyRouteStore::default();
 
+        let endpoint_count = refresh_routes_from_discovery_snapshot(
+            DiscoverySnapshot::ok("game-server", Vec::new()),
+            &store,
+        )
+        .await;
+
+        assert_eq!(endpoint_count, 0);
+        assert!(store.select_default_upstream().await.is_none());
+
+        let instance =
+            service_instance_with_endpoint("game-001", socket_endpoint("proxy-local", "late.sock"));
+        let endpoint_count = refresh_routes_from_discovery_snapshot(
+            DiscoverySnapshot::ok("game-server", vec![instance]),
+            &store,
+        )
+        .await;
+
+        assert_eq!(endpoint_count, 1);
         assert_eq!(
-            error.to_string(),
-            "required upstream discovery failed: game-server.proxy-local endpoint not found"
+            store
+                .select_default_upstream()
+                .await
+                .expect("late endpoint should become selectable")
+                .local_socket_name,
+            "late.sock"
         );
+    }
+
+    #[test]
+    fn discovery_duplicate_server_routes_are_deterministic_across_snapshot_order() {
+        let first = service_instance_with_endpoint(
+            "registry-a",
+            socket_endpoint("proxy-local", "z-route.sock"),
+        );
+        let second = service_instance_with_endpoint(
+            "registry-b",
+            socket_endpoint("proxy-local", "a-route.sock"),
+        );
+
+        let forward = discover_proxy_local_routes(vec![first.clone(), second.clone()]);
+        let reversed = discover_proxy_local_routes(vec![second, first]);
+
+        assert_eq!(forward.len(), 1);
+        assert_eq!(reversed.len(), 1);
+        assert_eq!(forward[0].server_id, reversed[0].server_id);
+        assert_eq!(forward[0].local_socket_name, "a-route.sock");
+        assert_eq!(forward[0].local_socket_name, reversed[0].local_socket_name);
+    }
+
+    #[test]
+    fn discovery_duplicate_proxy_local_endpoints_are_deterministic_across_endpoint_order() {
+        let first = socket_endpoint("proxy-local", "z-route.sock");
+        let second = socket_endpoint("proxy-local", "a-route.sock");
+        let forward = ServiceInstance::new(
+            "game-001".to_string(),
+            "game-server".to_string(),
+            "127.0.0.1".to_string(),
+            7000,
+        )
+        .with_endpoints(vec![first.clone(), second.clone()]);
+        let reversed = ServiceInstance::new(
+            "game-001".to_string(),
+            "game-server".to_string(),
+            "127.0.0.1".to_string(),
+            7000,
+        )
+        .with_endpoints(vec![second, first]);
+
+        let forward = discover_proxy_local_routes(vec![forward]);
+        let reversed = discover_proxy_local_routes(vec![reversed]);
+
+        assert_eq!(forward.len(), 1);
+        assert_eq!(reversed.len(), 1);
+        assert_eq!(forward[0].local_socket_name, "a-route.sock");
+        assert_eq!(forward[0].local_socket_name, reversed[0].local_socket_name);
     }
 
     #[tokio::test]
@@ -2013,10 +2024,11 @@ mod tests {
 
         assert_eq!(endpoint_count, 0);
         assert!(store.select_default_upstream().await.is_none());
-        assert_eq!(
-            store.list_routes().await[0].health_state,
-            UpstreamHealthState::Unavailable
-        );
+        let routes = store.list_routes().await;
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].local_socket_name, "game-001.sock");
+        assert_eq!(routes[0].operation_state, UpstreamOperationState::Active);
+        assert_eq!(routes[0].health_state, UpstreamHealthState::Unavailable);
     }
 
     #[tokio::test]
@@ -2040,6 +2052,42 @@ mod tests {
         assert_eq!(
             store.list_routes().await[0].health_state,
             UpstreamHealthState::Unavailable
+        );
+    }
+
+    #[tokio::test]
+    async fn authoritative_snapshot_adds_new_route_and_freezes_disappeared_route() {
+        let store = ProxyRouteStore::default();
+        store
+            .set_static_routes(vec![upstream_route(
+                "game-001",
+                UpstreamOperationState::Active,
+            )])
+            .await;
+        let mut endpoint = socket_endpoint("proxy-local", "game-002.sock");
+        endpoint.metadata = serde_json::json!({ "instance_id": "game-002" });
+        let instance = service_instance_with_endpoint("game-002", endpoint);
+
+        let endpoint_count = refresh_routes_from_discovery_snapshot(
+            DiscoverySnapshot::ok("game-server", vec![instance]),
+            &store,
+        )
+        .await;
+
+        assert_eq!(endpoint_count, 1);
+        let routes = store.list_routes().await;
+        assert_eq!(routes.len(), 2);
+        assert_eq!(routes[0].server_id, "game-001");
+        assert_eq!(routes[0].health_state, UpstreamHealthState::Unavailable);
+        assert_eq!(routes[1].server_id, "game-002");
+        assert_eq!(routes[1].health_state, UpstreamHealthState::Healthy);
+        assert_eq!(
+            store
+                .select_default_upstream()
+                .await
+                .expect("new route should be selectable")
+                .server_id,
+            "game-002"
         );
     }
 

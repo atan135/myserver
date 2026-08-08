@@ -37,8 +37,8 @@ use route_store::{
     UpstreamRoute, run_redis_route_store_update_listener,
 };
 use service_registry::{
-    DependencySpec, HealthState, HeartbeatOutcome, RegistryClient, ServiceEndpoint,
-    ServiceInstance, StartupErrorCode,
+    ConvergenceConfig, DependencySpec, HealthState, RegistryClient, ServiceEndpoint,
+    ServiceInstance, spawn_registry_publication,
 };
 use tokio::sync::RwLock;
 use tracing_appender::rolling;
@@ -231,72 +231,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let connection_count = Arc::new(AtomicU64::new(0));
     let maintenance = Arc::new(RwLock::new(false));
 
-    let registry_client: Option<RegistryClient> = if config.registry_enabled {
-        match RegistryClient::new(
+    let registry_client: Option<Arc<RegistryClient>> = if config.registry_enabled {
+        let client = RegistryClient::new_lazy(
             &config.registry_url,
             &config.service_name,
             &config.service_instance_id,
         )
-        .await
-        {
-            Ok(client) => {
-                let client = client.with_key_prefix(config.registry_key_prefix.clone());
-                let route_store_backend = config.route_store_backend_name();
-                let instance = build_service_instance(&config);
-
-                if let Err(error) = client.register(&instance).await {
-                    health_state.mark_degraded(
-                        "service-registry",
-                        "self-registration",
-                        StartupErrorCode::RegistryUnavailable,
-                    );
-                    tracing::error!(error = %error, "failed to register game-proxy service");
-                    if registry_failure_is_fatal() {
-                        return Err(std::io::Error::other(error.to_string()).into());
-                    }
-                } else {
-                    health_state.mark_ready("service-registry", "self-registration");
-                    tracing::info!(
-                        service = %config.service_name,
-                        instance = %config.service_instance_id,
-                        route_store_backend,
-                        "game-proxy service registered to registry"
-                    );
-                }
-
-                Some(client)
-            }
-            Err(error) => {
-                health_state.mark_degraded(
-                    "service-registry",
-                    "self-registration",
-                    StartupErrorCode::RegistryUnavailable,
-                );
-                tracing::error!(error = %error, "failed to create registry client");
-                if registry_failure_is_fatal() {
-                    return Err(std::io::Error::other(error.to_string()).into());
-                }
-                None
-            }
-        }
+        .map_err(|error| std::io::Error::other(error.to_string()))?
+        .with_key_prefix(config.registry_key_prefix.clone());
+        Some(Arc::new(client))
     } else {
         tracing::info!("service registry disabled; using local static upstream fallback");
         None
     };
-    let heartbeat_health = health_state.clone();
-    let heartbeat_handle = registry_client.as_ref().map(|client| {
-        client.start_heartbeat_task_with_observer(move |outcome| match outcome {
-            HeartbeatOutcome::Succeeded => {
-                heartbeat_health.mark_ready("service-registry", "self-registration");
-            }
-            HeartbeatOutcome::Failed => {
-                heartbeat_health.mark_degraded(
-                    "service-registry",
-                    "self-registration",
-                    StartupErrorCode::RegistryUnavailable,
-                );
-            }
-        })
+    let registry_publication_task = registry_client.as_ref().map(|client| {
+        spawn_registry_publication(
+            Arc::clone(client),
+            build_service_instance(&config),
+            health_state.clone(),
+            ConvergenceConfig {
+                steady_interval: Duration::from_secs(1),
+                ..ConvergenceConfig::default()
+            },
+        )
     });
 
     let admin_bind_addr = config.admin_bind_addr();
@@ -366,10 +323,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         route_store_update_task.abort();
         let _ = route_store_update_task.await;
     }
+    if let Some(task) = registry_publication_task {
+        task.stop_and_wait().await;
+    }
     if let Some(client) = registry_client {
-        if let Some(handle) = heartbeat_handle {
-            handle.abort();
-        }
         if let Err(error) = client.deregister().await {
             tracing::error!(error = %error, "failed to deregister game-proxy service");
         } else {
@@ -459,10 +416,6 @@ fn published_host(host: &str) -> String {
     } else {
         host.to_string()
     }
-}
-
-fn registry_failure_is_fatal() -> bool {
-    config::discovery_required_from_env()
 }
 
 #[cfg(test)]
