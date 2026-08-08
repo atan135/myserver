@@ -95,7 +95,6 @@ wait_healthy nats
 "${compose[@]}" --profile ops run --rm migration-runner apply --environment production --actor "$actor"
 
 "${compose[@]}" stop game-server
-"${compose[@]}" --profile ops run --rm --no-deps game-socket-clean
 "${compose[@]}" up -d game-server match-service chat-server mail-service announce-service metrics-collector
 assert_chat_server_replica_count 1
 "${compose[@]}" up -d game-proxy auth-http admin-api

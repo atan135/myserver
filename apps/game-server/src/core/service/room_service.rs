@@ -2085,6 +2085,8 @@ mod tests {
             drain_mode_entered_at_ms: None,
             drain_mode_reason: DEFAULT_DRAIN_MODE_REASON.to_string(),
             drain_mode_source: DEFAULT_DRAIN_MODE_SOURCE.to_string(),
+            drain_state_tx: tokio::sync::watch::channel(false).0,
+            drain_shutdown: crate::server::DrainShutdownControl::channel().0,
         }
     }
 

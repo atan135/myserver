@@ -798,6 +798,10 @@ pub struct RequestServerShutdownRes {
     pub drain_mode_enabled: bool,
     #[prost(uint64, tag = "7")]
     pub retired_room_count: u64,
+    /// True when this authenticated request either triggers immediate graceful shutdown
+    /// (ok=true) or arms bounded drain completion while blockers remain (ok=false).
+    #[prost(bool, tag = "8")]
+    pub shutdown_armed: bool,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct RoomMemberOfflinePush {

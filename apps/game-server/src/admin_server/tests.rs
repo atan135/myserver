@@ -41,8 +41,8 @@ use crate::gm_broadcast::{
     GM_BROADCAST_TITLE_MAX_LEN, GmBroadcastCommand, broadcast_gm_message_to_online_players,
 };
 use crate::pb::{
-    GameMessagePush, RequestServerShutdownReq,
-    TriggerRolloutDrainNoticeReq, TriggerServerRedirectReq,
+    GameMessagePush, RequestServerShutdownReq, TriggerRolloutDrainNoticeReq,
+    TriggerServerRedirectReq,
 };
 use crate::protocol::{
     HEADER_LEN, MessageType, Packet, PacketHeader, encode_body, encode_packet, parse_header,
@@ -79,6 +79,8 @@ fn runtime_config_fixture() -> SharedRuntimeConfig {
         drain_mode_entered_at_ms: None,
         drain_mode_reason: DEFAULT_DRAIN_MODE_REASON.to_string(),
         drain_mode_source: DEFAULT_DRAIN_MODE_SOURCE.to_string(),
+        drain_state_tx: tokio::sync::watch::channel(false).0,
+        drain_shutdown: crate::server::DrainShutdownControl::channel().0,
     }))
 }
 
@@ -162,8 +164,8 @@ fn signed_mail_assertion_body(payload: &[u8]) -> (Vec<u8>, HashMap<String, Strin
     use sha2::Digest as _;
 
     let signing_key = SigningKey::from_bytes(&[29u8; 32]);
-    let payload_sha256 = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .encode(sha2::Sha256::digest(payload));
+    let payload_sha256 =
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sha2::Sha256::digest(payload));
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
@@ -202,8 +204,13 @@ fn signed_mail_assertion_body(payload: &[u8]) -> (Vec<u8>, HashMap<String, Strin
         assertion["expiresAtMs"],
         assertion["payloadSha256"],
     ]);
-    assertion["signature"] = json!(base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .encode(signing_key.sign(canonical.to_string().as_bytes()).to_bytes()));
+    assertion["signature"] = json!(
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
+            signing_key
+                .sign(canonical.to_string().as_bytes())
+                .to_bytes()
+        )
+    );
     let mut keys = HashMap::new();
     keys.insert(
         "mail-v1".to_string(),
@@ -578,7 +585,11 @@ async fn admin_shutdown_request_rejects_legacy_token_only_write() {
                 "game-server-test".to_string(),
                 "secret-admin-token".to_string(),
                 AdminAssertionVerifier::new("admin-api".to_string(), &HashMap::new(), 60_000),
-                MailGrantAssertionVerifier::new("mail-service".to_string(), &HashMap::new(), 60_000),
+                MailGrantAssertionVerifier::new(
+                    "mail-service".to_string(),
+                    &HashMap::new(),
+                    60_000,
+                ),
                 AdminAuditLogger::new(AdminAuditConfig::new(false, "", false)),
                 handler_shutdown_signal,
             )
@@ -1118,10 +1129,13 @@ async fn broadcast_gm_message_queues_game_message_for_online_players() {
 #[tokio::test]
 async fn apply_runtime_config_updates_drain_mode() {
     let runtime_config = runtime_config_fixture();
+    let mut drain_state_rx = runtime_config.read().await.drain_state_tx.subscribe();
 
     apply_runtime_config(&runtime_config, "drain_mode", "on")
         .await
         .unwrap();
+    drain_state_rx.changed().await.unwrap();
+    assert!(*drain_state_rx.borrow_and_update());
 
     let enabled = runtime_config.read().await.clone();
     assert!(enabled.drain_mode_enabled);
@@ -1130,6 +1144,8 @@ async fn apply_runtime_config_updates_drain_mode() {
     apply_runtime_config(&runtime_config, "drain_mode_enabled", "off")
         .await
         .unwrap();
+    drain_state_rx.changed().await.unwrap();
+    assert!(!*drain_state_rx.borrow_and_update());
 
     let disabled = runtime_config.read().await.clone();
     assert!(!disabled.drain_mode_enabled);

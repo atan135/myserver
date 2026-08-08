@@ -82,18 +82,6 @@ services:
     networks:
       - internal
 
-  game-socket-clean:
-    image: ${IMAGE_GAME_SERVER:?set IMAGE_GAME_SERVER from images.lock.json}
-    user: "0:0"
-    entrypoint: ["/bin/sh", "-ec"]
-    command: ["rm -f /run/myserver/myserver-game-server.sock /run/myserver/myserver-game-server-internal.sock"]
-    restart: "no"
-    profiles: ["ops"]
-    volumes:
-      - game-sockets:/run/myserver
-    networks:
-      - internal
-
   game-server:
     <<: *runtime
     image: ${IMAGE_GAME_SERVER:?set IMAGE_GAME_SERVER from images.lock.json}
@@ -105,8 +93,13 @@ services:
       SERVICE_PUBLIC_HOST: game-server
       SERVICE_ADMIN_BIND_HOST: 0.0.0.0
       SERVICE_ADMIN_ADVERTISED_HOST: game-server
-      GAME_LOCAL_SOCKET_NAME: /run/myserver/myserver-game-server.sock
-      GAME_INTERNAL_SOCKET_NAME: /run/myserver/myserver-game-server-internal.sock
+      GAME_SOCKET_ROOT: /run/myserver
+      GAME_SOCKET_BASENAME: game-server
+      GAME_SOCKET_RECLAIM_TIMEOUT_MS: "2000"
+      GAME_SOCKET_RECLAIM_SPIN_MS: "25"
+      GAME_SOCKET_PROBE_TIMEOUT_MS: "100"
+      GAME_DRAIN_SHUTDOWN_TIMEOUT_SECS: "300"
+      GAME_DRAIN_SHUTDOWN_POLL_MS: "250"
       CSV_DIR: /app/csv
       CSV_RELOAD_ENABLED: "true"
       DB_ENABLED: "true"
@@ -114,7 +107,8 @@ services:
       REGISTRY_ENABLED: "true"
       DISCOVERY_REQUIRED: "true"
       DISALLOW_LEGACY_DIRECT_CONFIG: "true"
-      SERVICE_INSTANCE_ID: game-server-1
+      SERVICE_INSTANCE_ID: ${GAME_SERVER_INSTANCE_ID:-game-server-1}
+      GLOBAL_ID_WORKER_ID: ${GAME_SERVER_WORKER_ID:-5}
       SERVICE_BUILD_VERSION: ${RELEASE_ID:?set RELEASE_ID}
       MYSERVER_HEALTH_BIND_ADDR: 0.0.0.0:7600
       MYSERVER_STARTUP_CONVERGENCE_WINDOW_SECS: "120"

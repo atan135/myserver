@@ -88,5 +88,6 @@ pub(super) async fn build_server_shutdown_response(
         migrating_room_count: snapshot.migrating_room_count,
         drain_mode_enabled: runtime.drain_mode_enabled,
         retired_room_count: snapshot.retired_room_count,
+        shutdown_armed: false,
     }
 }

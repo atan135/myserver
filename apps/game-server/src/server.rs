@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use global_id::{
@@ -60,6 +60,126 @@ use crate::startup::{
 pub const DEFAULT_DRAIN_MODE_REASON: &str = "rollout";
 pub const DEFAULT_DRAIN_MODE_SOURCE: &str = "admin";
 const CLEANUP_OPERATION_TIMEOUT: Duration = Duration::from_secs(5);
+const DEFAULT_DRAIN_SHUTDOWN_TIMEOUT_SECS: u64 = 300;
+const DEFAULT_DRAIN_SHUTDOWN_POLL_MS: u64 = 250;
+
+#[derive(Clone, Copy, Debug)]
+struct DrainShutdownConfig {
+    timeout: Duration,
+    poll_interval: Duration,
+}
+
+#[derive(Debug)]
+pub struct DrainShutdownControl {
+    arm_tx: mpsc::Sender<()>,
+    armed: AtomicBool,
+}
+
+impl DrainShutdownControl {
+    pub(crate) fn channel() -> (Arc<Self>, mpsc::Receiver<()>) {
+        let (arm_tx, arm_rx) = mpsc::channel(1);
+        (
+            Arc::new(Self {
+                arm_tx,
+                armed: AtomicBool::new(false),
+            }),
+            arm_rx,
+        )
+    }
+
+    pub fn try_arm(&self) -> bool {
+        if self
+            .armed
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return false;
+        }
+        if self.arm_tx.try_send(()).is_err() {
+            self.armed.store(false, Ordering::Release);
+            return false;
+        }
+        true
+    }
+
+    pub fn is_armed(&self) -> bool {
+        self.armed.load(Ordering::Acquire)
+    }
+
+    fn disarm(&self) {
+        self.armed.store(false, Ordering::Release);
+    }
+}
+
+impl DrainShutdownConfig {
+    fn try_from_env() -> std::io::Result<Self> {
+        Ok(Self {
+            timeout: strict_duration_env(
+                "GAME_DRAIN_SHUTDOWN_TIMEOUT_SECS",
+                DEFAULT_DRAIN_SHUTDOWN_TIMEOUT_SECS,
+                1,
+                3_600,
+                Duration::from_secs,
+            )?,
+            poll_interval: strict_duration_env(
+                "GAME_DRAIN_SHUTDOWN_POLL_MS",
+                DEFAULT_DRAIN_SHUTDOWN_POLL_MS,
+                10,
+                10_000,
+                Duration::from_millis,
+            )?,
+        })
+    }
+}
+
+fn strict_duration_env(
+    name: &str,
+    default: u64,
+    minimum: u64,
+    maximum: u64,
+    convert: fn(u64) -> Duration,
+) -> std::io::Result<Duration> {
+    let value = match std::env::var(name) {
+        Ok(value) => value
+            .trim()
+            .parse::<u64>()
+            .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, name))?,
+        Err(std::env::VarError::NotPresent) => default,
+        Err(error @ std::env::VarError::NotUnicode(_)) => {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, error));
+        }
+    };
+    if !(minimum..=maximum).contains(&value) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("{name} must be in {minimum}..={maximum}"),
+        ));
+    }
+    Ok(convert(value))
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DrainShutdownDecision {
+    Wait,
+    Shutdown,
+    TimedOut,
+}
+
+fn drain_shutdown_decision(
+    connection_count: u64,
+    owned_room_count: u64,
+    migrating_room_count: u64,
+    elapsed: Duration,
+    timeout: Duration,
+) -> DrainShutdownDecision {
+    if connection_count == 0 && owned_room_count == 0 && migrating_room_count == 0 {
+        DrainShutdownDecision::Shutdown
+    } else if elapsed >= timeout {
+        DrainShutdownDecision::TimedOut
+    } else {
+        DrainShutdownDecision::Wait
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct RuntimeConfig {
@@ -77,6 +197,8 @@ pub struct RuntimeConfig {
     pub drain_mode_entered_at_ms: Option<u64>,
     pub drain_mode_reason: String,
     pub drain_mode_source: String,
+    pub drain_state_tx: watch::Sender<bool>,
+    pub drain_shutdown: Arc<DrainShutdownControl>,
 }
 
 impl RuntimeConfig {
@@ -403,7 +525,7 @@ struct GameServerResources {
     worker_lease: Option<WorkerLease>,
     registry_client: Option<Arc<RegistryClient>>,
     registry_started: bool,
-    socket_names: Vec<String>,
+    socket_names: Vec<crate::local_socket::OwnedSocketPath>,
     tasks: Vec<JoinHandle<()>>,
     connection_tasks: Arc<tokio::sync::Mutex<Vec<JoinHandle<()>>>>,
     convergence_tasks: Vec<ConvergenceTask>,
@@ -431,6 +553,41 @@ impl GameServerResources {
             character_store: None,
             discipline_store: None,
             title_store: None,
+        }
+    }
+
+    async fn verify_worker_lease_ownership(&self) -> Result<(), String> {
+        let lease = self
+            .worker_lease
+            .as_ref()
+            .ok_or_else(|| "worker lease unavailable during destructive cleanup".to_string())?;
+        let client = self
+            .redis_client
+            .as_ref()
+            .ok_or_else(|| "redis client unavailable during ownership verification".to_string())?;
+        match timeout(CLEANUP_OPERATION_TIMEOUT, async {
+            let mut redis = client
+                .get_multiplexed_async_connection()
+                .await
+                .map_err(|error| error.to_string())?;
+            lease
+                .owns_redis(&mut redis)
+                .await
+                .map_err(|error| error.to_string())
+        })
+        .await
+        {
+            Ok(Ok(true)) => Ok(()),
+            Ok(Ok(false)) => Err(
+                "worker lease token no longer owns key; destructive cleanup skipped".to_string(),
+            ),
+            Ok(Err(error)) => Err(format!(
+                "worker lease ownership verification failed; destructive cleanup skipped: {error}"
+            )),
+            Err(_) => Err(
+                "worker lease ownership verification timed out; destructive cleanup skipped"
+                    .to_string(),
+            ),
         }
     }
 }
@@ -488,10 +645,14 @@ impl CleanupExecutor for GameServerResources {
                 }
             }
             CleanupStep::ReleaseListenersAndSockets => {
+                if self.socket_names.is_empty() {
+                    return Ok(());
+                }
+                self.verify_worker_lease_ownership().await?;
                 let mut errors = Vec::new();
-                for socket_name in self.socket_names.drain(..) {
-                    if let Err(error) = crate::local_socket::remove_socket_path(&socket_name) {
-                        errors.push(format!("failed to remove socket {socket_name}: {error}"));
+                for socket in self.socket_names.drain(..) {
+                    if let Err(error) = crate::local_socket::remove_owned_socket_path(&socket) {
+                        errors.push(format!("failed to remove socket {}: {error}", socket.name));
                     }
                 }
                 if errors.is_empty() {
@@ -504,6 +665,7 @@ impl CleanupExecutor for GameServerResources {
                 if !self.registry_started {
                     return Ok(());
                 }
+                self.verify_worker_lease_ownership().await?;
                 self.registry_started = false;
                 let Some(client) = &self.registry_client else {
                     return Ok(());
@@ -574,6 +736,8 @@ pub async fn run(
     let mut resources = GameServerResources::new(health_state.clone());
     let run_result: Result<(), Box<dyn std::error::Error>> = async {
         let lease_wait = LeaseWaitConfig::try_from_env()?;
+        let socket_reclaim = crate::local_socket::SocketReclaimConfig::try_from_env()?;
+        let drain_shutdown_config = DrainShutdownConfig::try_from_env()?;
         let global_id_origin_id = u16::try_from(config.global_id_origin_id).map_err(|_| {
             std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
@@ -719,16 +883,35 @@ pub async fn run(
         let tcp_listener = TcpListener::bind(config.bind_addr()).await?;
         let admin_listener = TcpListener::bind(config.admin_bind_addr()).await?;
         ownership.claim(OwnedResource::LocalSockets)?;
-        let local_socket_listener =
-            crate::local_socket::create_listener(&config.local_socket_name)?;
+        let owned_socket_targets = vec![
+            config.local_socket_name.clone(),
+            config.internal_socket_name.clone(),
+        ];
+        crate::local_socket::prepare_owned_socket_root(&owned_socket_targets, true)?;
+        let local_socket_listener = crate::local_socket::create_owned_listener(
+            &config.local_socket_name,
+            &owned_socket_targets,
+            true,
+            socket_reclaim,
+        )
+        .await?;
         resources
             .socket_names
-            .push(config.local_socket_name.clone());
-        let internal_socket_listener =
-            crate::local_socket::create_listener(&config.internal_socket_name)?;
+            .push(crate::local_socket::capture_owned_socket(
+                &config.local_socket_name,
+            )?);
+        let internal_socket_listener = crate::local_socket::create_owned_listener(
+            &config.internal_socket_name,
+            &owned_socket_targets,
+            true,
+            socket_reclaim,
+        )
+        .await?;
         resources
             .socket_names
-            .push(config.internal_socket_name.clone());
+            .push(crate::local_socket::capture_owned_socket(
+                &config.internal_socket_name,
+            )?);
         health_state.mark_ready("local-runtime", "server-listeners");
 
     // Initialize MatchClient for communicating with MatchService
@@ -755,6 +938,8 @@ pub async fn run(
 
     let room_logic_factory: SharedRoomLogicFactory =
         Arc::new(GameRoomLogicFactory::new(config_tables.clone()));
+    let (drain_state_tx, mut drain_state_rx) = watch::channel(false);
+    let (drain_shutdown, drain_shutdown_arm_rx) = DrainShutdownControl::channel();
     let shared_state = ServerSharedState {
         room_manager: Arc::new(RoomManager::with_policy_registry_and_cleanup_interval(
             match_client,
@@ -777,6 +962,8 @@ pub async fn run(
             drain_mode_entered_at_ms: None,
             drain_mode_reason: DEFAULT_DRAIN_MODE_REASON.to_string(),
             drain_mode_source: DEFAULT_DRAIN_MODE_SOURCE.to_string(),
+            drain_state_tx,
+            drain_shutdown: drain_shutdown.clone(),
         })),
         connection_count: Arc::new(AtomicU64::new(0)),
         online_player_count: Arc::new(AtomicU64::new(0)),
@@ -786,6 +973,17 @@ pub async fn run(
         )),
         shutdown_signal: Arc::new(Notify::new()),
     };
+
+    resources.tasks.push(tokio::spawn(run_drain_shutdown_monitor(
+        shared_state.runtime_config.read().await.drain_state_tx.subscribe(),
+        drain_shutdown_arm_rx,
+        drain_shutdown,
+        shared_state.connection_count.clone(),
+        shared_state.room_manager.clone(),
+        config.service_instance_id.clone(),
+        shared_state.shutdown_signal.clone(),
+        drain_shutdown_config,
+    )));
 
     let character_element_facade =
         CharacterElementFacade::new(Arc::new(character_element_store.clone()));
@@ -934,6 +1132,7 @@ pub async fn run(
         let local_redis_client = resources.redis_client.as_ref().unwrap().clone();
         let local_services = services.clone();
         let local_runtime_config = shared_state.runtime_config.clone();
+        let local_drain_state_rx = local_runtime_config.read().await.drain_state_tx.subscribe();
         let local_connection_count = shared_state.connection_count.clone();
         let local_connection_tasks = Arc::clone(&resources.connection_tasks);
         resources.tasks.push(tokio::spawn(async move {
@@ -942,6 +1141,7 @@ pub async fn run(
                 local_redis_client,
                 local_services,
                 local_runtime_config,
+                local_drain_state_rx,
                 local_connection_count,
                 local_connection_tasks,
             )
@@ -982,8 +1182,19 @@ pub async fn run(
     let mut fatal_task_error = None;
 
     loop {
+        let mut drain_state_changed = false;
+        let draining = *drain_state_rx.borrow();
         let accept_result = tokio::select! {
-            result = tcp_listener.accept() => Some(result),
+            biased;
+            changed = drain_state_rx.changed() => {
+                if changed.is_err() {
+                    fatal_task_error = Some("drain state channel closed".to_string());
+                } else {
+                    drain_state_changed = true;
+                }
+                None
+            },
+            result = tcp_listener.accept(), if !draining => Some(result),
             _ = shared_state.shutdown_signal.notified() => None,
             _ = shutdown_signal() => None,
             fatal = fatal_task_rx.recv() => {
@@ -997,6 +1208,21 @@ pub async fn run(
                 None
             },
         };
+
+        if drain_state_changed {
+            if *drain_state_rx.borrow_and_update() {
+                health_state.mark_degraded(
+                    "local-runtime",
+                    "server-listeners",
+                    StartupErrorCode::DependencyPending,
+                );
+                info!("drain mode active; player listeners stopped accepting new connections");
+            } else {
+                health_state.mark_ready("local-runtime", "server-listeners");
+                info!("drain mode disabled; player listeners resumed accepting connections");
+            }
+            continue;
+        }
 
         let Some((socket, peer_addr)) = accept_result.transpose()? else {
             if lease_lost {
@@ -1060,12 +1286,21 @@ async fn run_local_socket_listener(
     redis_client: redis::Client,
     services: ServiceContext,
     runtime_config: Arc<RwLock<RuntimeConfig>>,
+    mut drain_state_rx: watch::Receiver<bool>,
     connection_count: Arc<AtomicU64>,
     connection_tasks: Arc<tokio::sync::Mutex<Vec<JoinHandle<()>>>>,
 ) -> Result<(), std::io::Error> {
     let mut next_session_id = 1_000_000u64;
     loop {
-        let socket = listener.accept().await?;
+        let draining = *drain_state_rx.borrow_and_update();
+        let socket = tokio::select! {
+            biased;
+            changed = drain_state_rx.changed() => {
+                changed.map_err(|_| std::io::Error::other("drain state channel closed"))?;
+                continue;
+            }
+            socket = listener.accept(), if !draining => socket?,
+        };
         let session_id = next_session_id;
         next_session_id = next_session_id.saturating_add(1);
         spawn_connection_task(
@@ -1080,6 +1315,70 @@ async fn run_local_socket_listener(
             Arc::clone(&connection_tasks),
         )
         .await;
+    }
+}
+
+async fn run_drain_shutdown_monitor(
+    mut drain_state_rx: watch::Receiver<bool>,
+    mut arm_rx: mpsc::Receiver<()>,
+    control: Arc<DrainShutdownControl>,
+    connection_count: Arc<AtomicU64>,
+    room_manager: Arc<RoomManager>,
+    owner_server_id: String,
+    shutdown_signal: Arc<Notify>,
+    config: DrainShutdownConfig,
+) {
+    while arm_rx.recv().await.is_some() {
+        if !*drain_state_rx.borrow() {
+            control.disarm();
+            continue;
+        }
+        let started_at = tokio::time::Instant::now();
+        loop {
+            if !*drain_state_rx.borrow() {
+                control.disarm();
+                break;
+            }
+            let snapshot = room_manager
+                .rollout_drain_snapshot(
+                    &owner_server_id,
+                    crate::core::runtime::room_manager::ROLLOUT_DRAIN_STATUS_ROUTE_SAMPLE_LIMIT,
+                )
+                .await;
+            match drain_shutdown_decision(
+                connection_count.load(Ordering::Relaxed),
+                snapshot.owned_room_count,
+                snapshot.migrating_room_count,
+                started_at.elapsed(),
+                config.timeout,
+            ) {
+                DrainShutdownDecision::Shutdown => {
+                    info!("drain completed within bounded window; requesting graceful shutdown");
+                    shutdown_signal.notify_one();
+                    return;
+                }
+                DrainShutdownDecision::TimedOut => {
+                    warn!(
+                        connection_count = connection_count.load(Ordering::Relaxed),
+                        owned_room_count = snapshot.owned_room_count,
+                        migrating_room_count = snapshot.migrating_room_count,
+                        "drain shutdown window expired; active sessions and rooms remain protected"
+                    );
+                    control.disarm();
+                    break;
+                }
+                DrainShutdownDecision::Wait => {}
+            }
+            tokio::select! {
+                biased;
+                changed = drain_state_rx.changed() => {
+                    if changed.is_err() {
+                        return;
+                    }
+                }
+                _ = tokio::time::sleep(config.poll_interval) => {}
+            }
+        }
     }
 }
 
@@ -1861,6 +2160,127 @@ pub fn current_unix_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct MonitorRoomLogic;
+    impl crate::core::logic::RoomLogic for MonitorRoomLogic {}
+    impl crate::core::logic::RoomLogicTransfer for MonitorRoomLogic {}
+    struct MonitorRoomLogicFactory;
+    impl crate::core::logic::RoomLogicFactory for MonitorRoomLogicFactory {
+        fn create(
+            &self,
+            _policy_id: &str,
+        ) -> Result<Box<dyn crate::core::logic::RoomLogic>, &'static str> {
+            Ok(Box::new(MonitorRoomLogic))
+        }
+    }
+
+    fn monitor_room_manager() -> Arc<RoomManager> {
+        Arc::new(RoomManager::new(Arc::new(MonitorRoomLogicFactory)))
+    }
+
+    fn spawn_test_drain_monitor(
+        draining: bool,
+        connection_count: Arc<AtomicU64>,
+        timeout_duration: Duration,
+    ) -> (
+        Arc<DrainShutdownControl>,
+        Arc<Notify>,
+        watch::Sender<bool>,
+        JoinHandle<()>,
+    ) {
+        let (drain_tx, drain_rx) = watch::channel(draining);
+        let (control, arm_rx) = DrainShutdownControl::channel();
+        let shutdown = Arc::new(Notify::new());
+        let task = tokio::spawn(run_drain_shutdown_monitor(
+            drain_rx,
+            arm_rx,
+            control.clone(),
+            connection_count,
+            monitor_room_manager(),
+            "game-server-test".to_string(),
+            shutdown.clone(),
+            DrainShutdownConfig {
+                timeout: timeout_duration,
+                poll_interval: Duration::from_millis(5),
+            },
+        ));
+        (control, shutdown, drain_tx, task)
+    }
+
+    #[test]
+    fn drain_shutdown_decision_waits_shuts_down_and_never_forces_timeout() {
+        let timeout = Duration::from_secs(30);
+        assert_eq!(
+            drain_shutdown_decision(1, 0, 0, Duration::from_secs(1), timeout),
+            DrainShutdownDecision::Wait
+        );
+        assert_eq!(
+            drain_shutdown_decision(0, 1, 0, Duration::from_secs(1), timeout),
+            DrainShutdownDecision::Wait
+        );
+        assert_eq!(
+            drain_shutdown_decision(0, 0, 1, Duration::from_secs(1), timeout),
+            DrainShutdownDecision::Wait
+        );
+        assert_eq!(
+            drain_shutdown_decision(0, 0, 0, Duration::from_secs(1), timeout),
+            DrainShutdownDecision::Shutdown
+        );
+        assert_eq!(
+            drain_shutdown_decision(1, 0, 0, timeout, timeout),
+            DrainShutdownDecision::TimedOut
+        );
+    }
+
+    #[tokio::test]
+    async fn ordinary_drain_does_not_request_shutdown_without_explicit_arm() {
+        let (_control, shutdown, _drain_tx, task) =
+            spawn_test_drain_monitor(true, Arc::new(AtomicU64::new(0)), Duration::from_millis(20));
+        assert!(
+            timeout(Duration::from_millis(30), shutdown.notified())
+                .await
+                .is_err()
+        );
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn explicit_arm_with_zero_blockers_requests_shutdown() {
+        let (control, shutdown, _drain_tx, task) =
+            spawn_test_drain_monitor(true, Arc::new(AtomicU64::new(0)), Duration::from_millis(50));
+        assert!(control.try_arm());
+        timeout(Duration::from_millis(50), shutdown.notified())
+            .await
+            .expect("explicit zero-blocker request should trigger shutdown");
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn drain_timeout_protects_sessions_and_later_request_can_rearm() {
+        let connections = Arc::new(AtomicU64::new(1));
+        let (control, shutdown, _drain_tx, task) =
+            spawn_test_drain_monitor(true, connections.clone(), Duration::from_millis(20));
+        assert!(control.try_arm());
+        assert!(!control.try_arm());
+        assert!(
+            timeout(Duration::from_millis(35), shutdown.notified())
+                .await
+                .is_err()
+        );
+        assert!(!control.is_armed());
+
+        connections.store(0, Ordering::Relaxed);
+        assert!(
+            timeout(Duration::from_millis(15), shutdown.notified())
+                .await
+                .is_err()
+        );
+        assert!(control.try_arm());
+        timeout(Duration::from_millis(50), shutdown.notified())
+            .await
+            .expect("new explicit request after timeout should rearm");
+        task.await.unwrap();
+    }
 
     #[tokio::test]
     async fn background_task_panic_is_reported_without_skipping_later_cleanup_steps() {

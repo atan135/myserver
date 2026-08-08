@@ -102,7 +102,7 @@ test("game-server owns its worker lease before listeners and keeps match converg
   const matchClient = source("apps/game-server/src/match_client.rs");
   const entry = scenario("game-server-match-not-registered");
 
-  const socketPair = indexOfOrFail(server, "create_listener(&config.local_socket_name)", "first local socket bind");
+  const socketPair = indexOfOrFail(server, "let local_socket_listener = crate::local_socket::create_owned_listener(", "first owned local socket bind");
   const lease = indexOfOrFail(server, "WorkerLease::acquire_redis(", "worker lease acquisition");
   const matchConfig = indexOfOrFail(server, "MatchClientConfig::from_env().await", "match config parsing");
   const convergence = indexOfOrFail(server, "spawn_match_client_rediscovery(", "match convergence task");
@@ -148,7 +148,7 @@ test("game-server lease wait and cleanup are bounded, cancellable, and ownership
   assert.match(server, /match \(run_result, cleanup_report\.failures\.is_empty\(\)\)/);
 });
 
-test("socket pair source preserves local-before-internal bootstrap order", () => {
+test("socket pair source preserves lease-first local-before-internal bootstrap order", () => {
   const server = source("apps/game-server/src/server.rs");
   const localSocket = source("apps/game-server/src/local_socket.rs");
   const productionLocalSocket = localSocket.slice(0, indexOfOrFail(localSocket, "#[cfg(test)]", "test module"));
@@ -156,16 +156,62 @@ test("socket pair source preserves local-before-internal bootstrap order", () =>
 
   assert.match(localSocket, /ListenerOptions::new\(\)\.name\(to_name\(name\)\?\)\.create_tokio\(\)/);
   assert.match(productionLocalSocket, /std::fs::remove_file\(&path\)/);
-  assert.doesNotMatch(productionLocalSocket, /stale.reclaim|remove_dir_all/i);
-  const localCreate = indexOfOrFail(server, "create_listener(&config.local_socket_name)", "local socket create");
-  const localTrack = indexOfOrFail(server, ".push(config.local_socket_name.clone())", "local socket ownership registration");
-  const internalCreate = indexOfOrFail(server, "create_listener(&config.internal_socket_name)", "internal socket create");
-  const internalTrack = indexOfOrFail(server, ".push(config.internal_socket_name.clone())", "internal socket ownership registration");
+  assert.doesNotMatch(productionLocalSocket, /remove_dir_all/i);
+  const lease = indexOfOrFail(server, "WorkerLease::acquire_redis(", "worker lease acquisition");
+  const localCreate = indexOfOrFail(server, "let local_socket_listener = crate::local_socket::create_owned_listener(", "local socket create");
+  const localTrack = indexOfOrFail(server, "capture_owned_socket(\n                &config.local_socket_name", "local socket ownership registration");
+  const internalCreate = indexOfOrFail(server, "let internal_socket_listener = crate::local_socket::create_owned_listener(", "internal socket create");
+  const internalTrack = indexOfOrFail(server, "capture_owned_socket(\n                &config.internal_socket_name", "internal socket ownership registration");
+  assert.ok(lease < localCreate);
   assert.ok(localCreate < localTrack);
   assert.ok(localTrack < internalCreate);
   assert.ok(internalCreate < internalTrack);
-  assert.match(server, /CleanupStep::ReleaseListenersAndSockets[\s\S]+remove_socket_path\(&socket_name\)/);
+  assert.match(productionLocalSocket, /worker lease is required before socket reclaim/);
+  assert.match(productionLocalSocket, /socket path is not the current instance owned target/);
+  assert.match(productionLocalSocket, /symlink_metadata\(&path\)/);
+  assert.match(productionLocalSocket, /is_socket\(\)/);
+  assert.match(productionLocalSocket, /refusing to reclaim socket \{path\} after probe timeout/);
+  assert.match(productionLocalSocket, /ConnectionRefused \| io::ErrorKind::NotFound/);
+  assert.match(server, /CleanupStep::ReleaseListenersAndSockets[\s\S]+verify_worker_lease_ownership\(\)[\s\S]+remove_owned_socket_path\(&socket\)/);
+  assert.doesNotMatch(productionLocalSocket, /pub fn remove_socket_path\(/);
   assert.equal(entry.currentBehavior.createMode, "create_without_reclaim");
+});
+
+test("phase 5 derives per-instance sockets and proxy consumes only healthy published paths", () => {
+  const config = source("apps/game-server/src/config.rs");
+  const main = source("apps/game-server/src/main.rs");
+  const server = source("apps/game-server/src/server.rs");
+  const proxy = source("apps/game-proxy/src/proxy_server.rs");
+  const compose = source("deploy/docker/compose.production.yml");
+
+  assert.match(config, /build_instance_socket_names\([\s\S]+&service_instance_id/);
+  assert.match(config, /GAME_SOCKET_ROOT/);
+  assert.match(config, /GAME_SOCKET_BASENAME/);
+  assert.doesNotMatch(config, /env::var\("GAME_(?:LOCAL|INTERNAL)_SOCKET_NAME"\)/);
+  assert.match(proxy, /endpoint\.name == "proxy-local" && endpoint\.healthy && endpoint\.is_valid\(\)/);
+  assert.match(proxy, /let socket = endpoint\.socket\.trim\(\)/);
+  assert.match(proxy, /route_store\.sync_discovered_routes\(routes\)\.await/);
+  assert.match(main, /name: "proxy-local"\.to_string\(\)[\s\S]+socket: config\.local_socket_name\.clone\(\)/);
+  assert.match(compose, /SERVICE_INSTANCE_ID: \$\{GAME_SERVER_INSTANCE_ID:-game-server-1\}/);
+  assert.match(compose, /GLOBAL_ID_WORKER_ID: \$\{GAME_SERVER_WORKER_ID:-5\}/);
+  assert.doesNotMatch(compose, /rm -f \/run\/myserver\/myserver-game-server/);
+});
+
+test("drain disables new player accepts and drives unhealthy publication without aborting sessions", () => {
+  const server = source("apps/game-server/src/server.rs");
+  const runtime = source("apps/game-server/src/admin_server/runtime_config.rs");
+  const shutdown = source("apps/game-server/src/admin_server/rollout_status.rs");
+
+  assert.match(runtime, /drain_state_tx\.send_replace\(parsed\)/);
+  assert.match(server, /tcp_listener\.accept\(\), if !draining/);
+  assert.match(server, /socket = listener\.accept\(\), if !draining/);
+  assert.match(server, /mark_degraded\([\s\S]+"server-listeners"[\s\S]+StartupErrorCode::DependencyPending/);
+  assert.match(server, /run_drain_shutdown_monitor/);
+  assert.match(server, /arm_rx\.recv\(\)\.await/);
+  assert.match(server, /DrainShutdownDecision::TimedOut[\s\S]+active sessions and rooms remain protected/);
+  assert.doesNotMatch(runtime, /connection_tasks\.(?:abort|clear)/);
+  assert.match(shutdown, /!runtime\.drain_mode_enabled[\s\S]+connection_count != 0[\s\S]+owned_room_count != 0[\s\S]+migrating_room_count != 0/);
+  assert.match(server, /run_then_cleanup\(std::future::ready\(run_result\), &mut resources\)\.await/);
 });
 
 test("proxy binds frontends before starting recoverable upstream convergence", () => {

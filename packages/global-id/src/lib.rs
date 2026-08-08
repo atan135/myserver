@@ -342,6 +342,15 @@ impl WorkerLease {
     }
 
     #[cfg(feature = "redis")]
+    pub async fn owns_redis(
+        &self,
+        redis: &mut redis::aio::MultiplexedConnection,
+    ) -> redis::RedisResult<bool> {
+        let current: Option<String> = redis::cmd("GET").arg(&self.key).query_async(redis).await?;
+        Ok(worker_lease_value_matches(current.as_deref(), &self.value))
+    }
+
+    #[cfg(feature = "redis")]
     pub async fn renew_redis(
         &self,
         redis: &mut redis::aio::MultiplexedConnection,
@@ -396,6 +405,10 @@ return 0
             .await?;
         Ok(released == 1)
     }
+}
+
+fn worker_lease_value_matches(current: Option<&str>, expected: &str) -> bool {
+    current == Some(expected)
 }
 
 pub fn last_timestamp_key(origin_id: u16, worker_id: u8) -> String {
@@ -681,5 +694,12 @@ mod tests {
             generator.generate(),
             Err(GlobalIdError::WorkerLeaseUnavailable(_))
         ));
+    }
+
+    #[test]
+    fn worker_lease_compare_only_requires_exact_token_value() {
+        assert!(worker_lease_value_matches(Some("owner-a"), "owner-a"));
+        assert!(!worker_lease_value_matches(Some("owner-b"), "owner-a"));
+        assert!(!worker_lease_value_matches(None, "owner-a"));
     }
 }

@@ -24,8 +24,8 @@ use crate::pb::{
 use crate::protocol::MessageType;
 use crate::server::RuntimeConfig;
 
-mod audit;
 mod assertion;
+mod audit;
 mod auth;
 mod gm;
 mod mail_assertion;
@@ -33,8 +33,8 @@ mod protocol_io;
 mod rollout_status;
 mod runtime_config;
 
-pub use audit::{AdminAuditConfig, AdminAuditLogger};
 pub(crate) use assertion::AdminAssertionVerifier;
+pub use audit::{AdminAuditConfig, AdminAuditLogger};
 pub(crate) use mail_assertion::MailGrantAssertionVerifier;
 
 use audit::{
@@ -140,13 +140,16 @@ async fn handle_admin_connection(
         Admin(AdminConnectionAuth),
         Mail(MailGrantAssertion),
     }
-    let connection_auth = if auth_packet.message_type() == Some(MessageType::MailAttachmentGrantAssertionReq) {
-        mail_assertion_verifier.parse(&auth_packet.body).map(ConnectionAuth::Mail)
-    } else {
-        authenticate_admin_connection(&auth_packet, &admin_token)
-            .map(ConnectionAuth::Admin)
-            .ok_or(MailGrantAssertionError::Unauthenticated)
-    };
+    let connection_auth =
+        if auth_packet.message_type() == Some(MessageType::MailAttachmentGrantAssertionReq) {
+            mail_assertion_verifier
+                .parse(&auth_packet.body)
+                .map(ConnectionAuth::Mail)
+        } else {
+            authenticate_admin_connection(&auth_packet, &admin_token)
+                .map(ConnectionAuth::Admin)
+                .ok_or(MailGrantAssertionError::Unauthenticated)
+        };
     let Ok(connection_auth) = connection_auth else {
         write_error(
             &mut writer,
@@ -158,13 +161,18 @@ async fn handle_admin_connection(
         return Ok(());
     };
     let is_mail_connection = matches!(connection_auth, ConnectionAuth::Mail(_));
-    let assertion_connection = matches!(&connection_auth, ConnectionAuth::Admin(AdminConnectionAuth::Assertion));
+    let assertion_connection = matches!(
+        &connection_auth,
+        ConnectionAuth::Admin(AdminConnectionAuth::Assertion)
+    );
     let mut auth_context = match &connection_auth {
         ConnectionAuth::Admin(AdminConnectionAuth::ReadOnly(context)) => context.clone(),
-        ConnectionAuth::Admin(AdminConnectionAuth::Assertion) | ConnectionAuth::Mail(_) => AdminAuthContext {
-            actor: "unknown".to_string(),
-            actor_missing: true,
-        },
+        ConnectionAuth::Admin(AdminConnectionAuth::Assertion) | ConnectionAuth::Mail(_) => {
+            AdminAuthContext {
+                actor: "unknown".to_string(),
+                actor_missing: true,
+            }
+        }
     };
     let mut pending_assertion = None;
 
@@ -174,10 +182,13 @@ async fn handle_admin_connection(
         };
 
         if is_mail_connection {
-            let ConnectionAuth::Mail(assertion) = &connection_auth else { unreachable!() };
+            let ConnectionAuth::Mail(assertion) = &connection_auth else {
+                unreachable!()
+            };
             match packet.message_type() {
                 Some(MessageType::MailAttachmentGrantReq) => {
-                    match mail_assertion_verifier.verify_grant(assertion, &packet, &owner_server_id) {
+                    match mail_assertion_verifier.verify_grant(assertion, &packet, &owner_server_id)
+                    {
                         Ok(context) => {
                             handle_gm_send_item(
                                 &mut writer,
@@ -191,18 +202,47 @@ async fn handle_admin_connection(
                                 &redis_client,
                                 &redis_key_prefix,
                                 &owner_server_id,
-                            ).await?;
+                            )
+                            .await?;
                         }
-                        Err(error) => write_error(&mut writer, packet.header.seq, error.code(), "mail attachment grant assertion rejected").await?,
+                        Err(error) => {
+                            write_error(
+                                &mut writer,
+                                packet.header.seq,
+                                error.code(),
+                                "mail attachment grant assertion rejected",
+                            )
+                            .await?
+                        }
                     }
                 }
                 Some(MessageType::MailAttachmentGrantResultQueryReq) => {
-                    match mail_assertion_verifier.verify_query(assertion, &packet, &owner_server_id) {
-                        Ok(_) => handle_grant_items_result_query(&mut writer, &packet, &player_manager).await?,
-                        Err(error) => write_error(&mut writer, packet.header.seq, error.code(), "mail attachment grant query assertion rejected").await?,
+                    match mail_assertion_verifier.verify_query(assertion, &packet, &owner_server_id)
+                    {
+                        Ok(_) => {
+                            handle_grant_items_result_query(&mut writer, &packet, &player_manager)
+                                .await?
+                        }
+                        Err(error) => {
+                            write_error(
+                                &mut writer,
+                                packet.header.seq,
+                                error.code(),
+                                "mail attachment grant query assertion rejected",
+                            )
+                            .await?
+                        }
                     }
                 }
-                _ => write_error(&mut writer, packet.header.seq, "MAIL_GRANT_MESSAGE_FORBIDDEN", "mail assertion sessions only allow mail attachment grant messages").await?,
+                _ => {
+                    write_error(
+                        &mut writer,
+                        packet.header.seq,
+                        "MAIL_GRANT_MESSAGE_FORBIDDEN",
+                        "mail assertion sessions only allow mail attachment grant messages",
+                    )
+                    .await?
+                }
             }
             continue;
         }
@@ -919,13 +959,20 @@ async fn handle_admin_connection(
                     }
                 };
                 let target = server_shutdown_target();
-                let response = build_server_shutdown_response(
+                let mut response = build_server_shutdown_response(
                     &room_manager,
                     &runtime_config,
                     &owner_server_id,
                     &connection_count,
                 )
                 .await;
+                if response.ok {
+                    response.shutdown_armed = true;
+                } else if response.drain_mode_enabled {
+                    let control = runtime_config.read().await.drain_shutdown.clone();
+                    control.try_arm();
+                    response.shutdown_armed = control.is_armed();
+                }
                 let ok = response.ok;
                 let error_code = response.error_code.clone();
                 audit_then_write_message(
@@ -942,7 +989,7 @@ async fn handle_admin_connection(
                 )
                 .await?;
 
-                if ok {
+                if response.shutdown_armed {
                     info!(
                         channel = "admin_tcp",
                         actor = %auth_context.actor,
@@ -953,7 +1000,9 @@ async fn handle_admin_connection(
                         retired_room_count = response.retired_room_count,
                         "requesting game-server graceful shutdown"
                     );
-                    shutdown_signal.notify_one();
+                    if ok {
+                        shutdown_signal.notify_one();
+                    }
                 }
             }
             Some(_) => {
@@ -1005,20 +1054,20 @@ fn admin_write_requirement(packet: &crate::protocol::Packet) -> (&'static str, &
             ("gm.asset_correction.emergency", "character")
         }
         Some(message_type) => match message_type {
-        MessageType::AdminUpdateConfigReq => ("game.config.write", "config"),
-        MessageType::GmSendItemReq => ("gm.send_item", "character"),
-        MessageType::GmBroadcastReq => ("gm.broadcast", "world"),
-        MessageType::GmKickPlayerReq => ("gm.kick_player", "player"),
-        MessageType::GmBanPlayerReq => ("gm.ban_player", "player"),
-        MessageType::FreezeRoomForTransferReq
-        | MessageType::ExportRoomTransferReq
-        | MessageType::ImportRoomTransferReq
-        | MessageType::ConfirmRoomOwnershipReq
-        | MessageType::RetireTransferredRoomReq => ("game.room.transfer", "room"),
-        MessageType::TriggerServerRedirectReq
-        | MessageType::TriggerRolloutDrainNoticeReq
-        | MessageType::RequestServerShutdownReq => ("game.config.write", "service"),
-        _ => ("", ""),
+            MessageType::AdminUpdateConfigReq => ("game.config.write", "config"),
+            MessageType::GmSendItemReq => ("gm.send_item", "character"),
+            MessageType::GmBroadcastReq => ("gm.broadcast", "world"),
+            MessageType::GmKickPlayerReq => ("gm.kick_player", "player"),
+            MessageType::GmBanPlayerReq => ("gm.ban_player", "player"),
+            MessageType::FreezeRoomForTransferReq
+            | MessageType::ExportRoomTransferReq
+            | MessageType::ImportRoomTransferReq
+            | MessageType::ConfirmRoomOwnershipReq
+            | MessageType::RetireTransferredRoomReq => ("game.room.transfer", "room"),
+            MessageType::TriggerServerRedirectReq
+            | MessageType::TriggerRolloutDrainNoticeReq
+            | MessageType::RequestServerShutdownReq => ("game.config.write", "service"),
+            _ => ("", ""),
         },
         None => ("", ""),
     }

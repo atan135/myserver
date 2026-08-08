@@ -598,7 +598,14 @@ where
                     }
                 };
                 let target = InternalAuditTarget::for_shutdown();
-                let response = build_server_shutdown_response(&services).await;
+                let mut response = build_server_shutdown_response(&services).await;
+                if response.ok {
+                    response.shutdown_armed = true;
+                } else if response.drain_mode_enabled {
+                    let control = services.runtime_config.read().await.drain_shutdown.clone();
+                    control.try_arm();
+                    response.shutdown_armed = control.is_armed();
+                }
                 let ok = response.ok;
                 let error_code = response.error_code.clone();
                 audit_internal_control_action(
@@ -617,7 +624,7 @@ where
                 )
                 .await?;
 
-                if ok {
+                if response.shutdown_armed {
                     info!(
                         channel = "internal_socket",
                         reason = %request.reason,
@@ -627,7 +634,9 @@ where
                         retired_room_count = response.retired_room_count,
                         "requesting game-server graceful shutdown"
                     );
-                    services.shutdown_signal.notify_one();
+                    if ok {
+                        services.shutdown_signal.notify_one();
+                    }
                 }
             }
             Some(_) => {
@@ -748,6 +757,7 @@ pub async fn build_server_shutdown_response(services: &ServiceContext) -> Reques
         migrating_room_count: snapshot.migrating_room_count,
         drain_mode_enabled: runtime.drain_mode_enabled,
         retired_room_count: snapshot.retired_room_count,
+        shutdown_armed: false,
     }
 }
 
@@ -992,6 +1002,8 @@ mod tests {
             drain_mode_entered_at_ms: None,
             drain_mode_reason: DEFAULT_DRAIN_MODE_REASON.to_string(),
             drain_mode_source: DEFAULT_DRAIN_MODE_SOURCE.to_string(),
+            drain_state_tx: tokio::sync::watch::channel(false).0,
+            drain_shutdown: crate::server::DrainShutdownControl::channel().0,
         }
     }
 
@@ -1209,6 +1221,7 @@ mod tests {
         assert!(!response.ok);
         assert_eq!(response.error_code, "SHUTDOWN_CONNECTIONS_REMAIN");
         assert_eq!(response.connection_count, 1);
+        assert!(!response.shutdown_armed);
     }
 
     #[tokio::test]
@@ -1308,11 +1321,65 @@ mod tests {
         let response = RequestServerShutdownRes::decode(packet.body.as_slice()).unwrap();
         assert!(response.ok);
         assert!(response.error_code.is_empty());
+        assert!(response.shutdown_armed);
         tokio::time::timeout(Duration::from_millis(50), shutdown_signal.notified())
             .await
             .expect("shutdown signal should be triggered after success response");
 
         drop(client_io);
         handler.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn internal_shutdown_request_with_connection_blocker_arms_without_immediate_signal() {
+        let services = service_context_fixture().await;
+        services.runtime_config.write().await.drain_mode_enabled = true;
+        services.connection_count.store(1, Ordering::Relaxed);
+        let (drain_shutdown, arm_rx) = crate::server::DrainShutdownControl::channel();
+        services.runtime_config.write().await.drain_shutdown = drain_shutdown;
+        let shutdown_signal = services.shutdown_signal.clone();
+        let (server_io, mut client_io) = duplex(4096);
+        let handler = tokio::spawn(async move {
+            handle_internal_connection(server_io, services, DEFAULT_INTERNAL_TOKEN.to_string())
+                .await
+                .map_err(|error| error.to_string())
+        });
+
+        client_io
+            .write_all(&encode_packet(
+                MessageType::InternalAuthReq,
+                1,
+                DEFAULT_INTERNAL_TOKEN.as_bytes(),
+            ))
+            .await
+            .unwrap();
+        client_io
+            .write_all(&encode_packet(
+                MessageType::RequestServerShutdownReq,
+                2,
+                &encode_body(&RequestServerShutdownReq {
+                    reason: "unit-test-blocker".to_string(),
+                }),
+            ))
+            .await
+            .unwrap();
+
+        let packet = read_test_packet(&mut client_io).await;
+        assert_eq!(
+            packet.header.msg_type,
+            MessageType::RequestServerShutdownRes as u16
+        );
+        let response = RequestServerShutdownRes::decode(packet.body.as_slice()).unwrap();
+        assert!(!response.ok);
+        assert_eq!(response.error_code, "SHUTDOWN_CONNECTIONS_REMAIN");
+        assert_eq!(response.connection_count, 1);
+        assert!(response.shutdown_armed);
+        tokio::time::timeout(Duration::from_millis(50), shutdown_signal.notified())
+            .await
+            .expect_err("an armed blocker response must not trigger immediate shutdown");
+
+        drop(client_io);
+        handler.await.unwrap().unwrap();
+        drop(arm_rx);
     }
 }

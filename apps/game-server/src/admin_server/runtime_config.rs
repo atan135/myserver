@@ -117,6 +117,7 @@ pub(super) async fn apply_runtime_config(
             } else {
                 DEFAULT_DRAIN_MODE_SOURCE.to_string()
             };
+            runtime.drain_state_tx.send_replace(parsed);
 
             if previous != parsed {
                 info!(

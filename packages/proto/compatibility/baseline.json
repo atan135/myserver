@@ -1,5 +1,5 @@
 {
-  "digest": "sha256:97203daa8b3c2edf08c9aea797aeeede90f8141967ef8d0266bed9a12b23d7f6",
+  "digest": "sha256:24534218671a9c17fe65dc7092bdfaf43923bc334e208fb2b7979611591d10fd",
   "files": [
     {
       "enums": [],
@@ -4838,6 +4838,13 @@
               "number": 7,
               "oneof": "",
               "type": "uint64"
+            },
+            {
+              "label": "singular",
+              "name": "shutdown_armed",
+              "number": 8,
+              "oneof": "",
+              "type": "bool"
             }
           ],
           "name": "RequestServerShutdownRes",

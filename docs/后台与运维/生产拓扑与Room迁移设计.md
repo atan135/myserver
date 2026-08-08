@@ -115,7 +115,7 @@
 
 部署侧必须显式设置 `REGISTRY_ENABLED=true`、`DISCOVERY_REQUIRED=true`。应用进程启动后异步注册、发现并连接依赖：required endpoint 暂缺时保持进程存活和 not-ready，optional endpoint 暂缺时进入 degraded 并保留无关业务。发布系统统一等待全部 required readiness 和稳定窗口，而不是逐个启动并等待下一个服务。
 
-第 2 阶段已为 `game-server`、`game-proxy`、`match-service` 接入共享 dependency state 和动态 `/livez`、`/readyz`，production 默认使用 120 秒启动收敛窗口、10 秒 Ready 稳定窗口和 60 秒依赖 stale 窗口。当前仍有首次 discovery fail-fast、过早注册 healthy 和资源清理不完整等差距。详细控制流、接口 schema、依赖分类、状态机、稳定错误码和故障 fixture 见 [应用服务启动契约与故障基线](./应用服务启动契约与故障基线.md)。在第 3 阶段消除首次发现退出边界前，已有顺序启动只能作为临时兼容措施，不能作为目标架构或生产正确性前提。
+三个 Rust 核心服务已接入共享 dependency state、动态 `/livez` / `/readyz`、异步依赖收敛和 unhealthy-first registry publication；production 默认使用 120 秒启动收敛窗口、10 秒 Ready 稳定窗口和 60 秒依赖 stale 窗口。`game-server` 还已完成 lease-first 资源事务和实例级 socket 收敛。详细控制流、接口 schema、依赖分类、状态机、稳定错误码和故障 fixture 见 [应用服务启动契约与故障基线](./应用服务启动契约与故障基线.md)。应用顺序启动只能作为本地临时兼容措施，不能作为生产正确性前提。
 
 ### 5.2 注册后接流量门禁
 
@@ -177,6 +177,8 @@ Node 服务当前可能出现注册失败只打日志的情况，因此 readines
 4. 下线：实例退出服务前，先从接新流量路径移除，或进入 drain 状态；随后等待现有连接、房间、后台任务、异步通知或控制面操作达到安全收敛。该步骤只定义下线状态边界，滚动发布中的旧实例 drain 和 route store 清理细节由后续滚动发布流程单独定义。
 5. 注销：安全收敛后停止 heartbeat，执行 deregister，并确认 registry 中该实例不再可被发现。注销完成前，部署系统不得把同一实例视为已完全退出。
 
+`game-server` 线上发布还必须为每个并存实例分配不同的 `SERVICE_INSTANCE_ID` 和 `GLOBAL_ID_WORKER_ID`。实例据此派生独立的 `proxy-local` / `internal` socket 并精确发布路径；`game-proxy` 在严格发现环境只消费 registry 中 healthy 的 `proxy-local.socket`，不得回退到固定路径。production compose 的 `GAME_SERVER_INSTANCE_ID`、`GAME_SERVER_WORKER_ID` 只是注入入口，发布平台必须保证值在同一环境内唯一。
+
 本地 dev-stack 可以继续保留简化启动顺序和非严格发现下的 local fallback，用于单机开发和快速联调；但 dev-stack 的简化流程不能作为测试、预发或线上准入依据。任何测试/预发/线上演练都必须覆盖上述完整状态机，避免出现本地默认 host/port、静态 upstream 或手工绕过 registry 的部署路径。
 
 本节只定义统一部署流程和状态边界，不实现脚本、健康检查接口、LB/DNS/gateway 更新接口或服务启动逻辑。
@@ -185,9 +187,9 @@ Node 服务当前可能出现注册失败只打日志的情况，因此 readines
 
 滚动发布、缩容或实例替换时，旧实例的正常退出必须走显式下线流程，不能只依赖进程退出或 registry TTL 过期。下线流程至少包含以下阶段：
 
-1. 移出接新流量：先从 LB、DNS、gateway upstream、admin/control target 或 rollout target 中移除旧实例；如果不能立即移除，必须把旧实例标记为 drain 或不可新建业务，禁止新连接、新房间、新匹配分配或新的控制面写操作继续选中旧实例。
-2. 等待业务收敛：等待旧实例现有连接、房间、匹配分配、邮件附件发放、异步通知和控制面操作达到安全收敛。`game-server` 必须结合已有 drain status 和受控 graceful shutdown 安全闸确认旧服已进入 drain，且连接、仍持有 room、迁移中 room 等阻塞项已经清零后，才能进入停服请求。
-3. 停止 heartbeat 并注销：业务收敛后停止 registry heartbeat，并执行 deregister，随后确认 registry 中该实例不再可被发现。异常退出时 TTL 可以作为最终摘除兜底，但 TTL 不能作为正常滚动发布下线的主路径。
+1. 移出接新流量：对旧 `game-server` 开启 drain 后，玩家 TCP 和 `proxy-local` 立即停止 accept，registry publication 转为 unhealthy，proxy 后续发现不再把旧 socket 作为健康默认 route；已有连接任务、房间以及 admin/internal 控制通道继续运行。其他服务同样应先从 LB、DNS、gateway upstream、admin/control target 或 rollout target 移除，禁止新连接、新房间、新匹配分配或新的控制面写操作继续选中旧实例。
+2. 等待业务收敛：等待旧实例现有连接、房间、匹配分配、邮件附件发放、异步通知和控制面操作达到安全收敛。`game-server` 必须先进入 drain，再由已鉴权 `RequestServerShutdownReq` 显式武装退出；控制面可在 blocker 清零前发出请求进入有界等待，不需要用轮询竞态抢占“刚好归零”的瞬间。
+3. 安全停服并统一清理：`RequestServerShutdownRes` 使用三态：`ok=true, shutdown_armed=true` 表示无 blocker 并立即 graceful shutdown；`ok=false, shutdown_armed=true` 表示连接或 room blocker 仍在但已接受默认 `300s` 有界等待；`ok=false, shutdown_armed=false` 表示拒绝或未能武装。等待超时不会强杀现有会话或 room，而会解除武装，控制面可在状态继续收敛后重试；重复请求不会重置当前期限。退出后统一 cleanup 释放本实例 listener/socket、deregister、compare-and-delete 本实例 lease 并关闭 stores。异常退出时 heartbeat TTL 可以作为最终摘除兜底，但 TTL 不能作为正常滚动发布下线的主路径。
 4. 清理或降级 route store：移除或标记旧实例对应的 upstream、room route、player route 和 rollout target，确保新请求不会继续被导向旧实例。若 route store 清理失败，必须降级为旧实例不可接新流量、不可选，并保留故障状态供重试或人工处理，不能因为清理失败而重新放开旧实例。
 5. 完成验证：确认旧实例在 registry 中不可发现，route store 不再把新连接、新建房、重连、匹配或控制面请求导向旧实例，并保留 drain、deregister、route store 更新或降级结果的日志和审计记录。
 
@@ -345,7 +347,7 @@ RoomRouteRecord {
 
 payload 最小建议字段见 [空房接管式灰度规范](../游戏服与接入层/空房接管式灰度规范.md)。本文额外要求 payload 包含 schema/version 信息，便于跨版本导入时做兼容判断。
 
-当前实现状态（截至 `2026-06-15`）：`game-server` 已完成已鉴权 internal/admin 通道内的 room freeze/export/import/confirm/retire 最小闭环，适用于空房或全员离线 room 的基础 transfer 验证；`ConfirmRoomOwnershipReq/Res` 会在新服校验 room 存在、`OwnedByNew` 状态、`rollout_epoch`、checksum 和 `room_version` 后才返回成功。同时已提供 `TriggerServerRedirectReq/Res` 控制入口，可向旧服上目标 room 的当前在线成员下发 `ServerRedirectPush`。push 成功进入出站队列后，旧服会以 `server_redirect_reconnect_required` 主动请求关闭旧连接；push 排队失败的连接计入失败数，不额外覆盖关闭原因。`GetRolloutDrainStatusReq/Res` 会返回旧服真实 `drain_mode_enabled`、`drain_mode_entered_at_ms`、`drain_mode_reason`、`drain_mode_source`、连接数、仍持有 room、迁移中 room、已 retired tombstone room、route 样本和可接管空房分类；可接管空房仅包含仍为 `Owned` / 对外视作 `OwnedByOld` 且在线成员数为 `0` 的 room，已 `Retired` room 单独计入 `retired_room_count`，不作为旧服排空阻塞项。该状态供 `auth-http` 内部接口、`tools/mock-client` 查询，也可被 `game-proxy` 的 `complete-if-drained` 在配置启用时作为结束 rollout 前的真实排空校验。`RequestServerShutdownReq/Res` 已提供旧服排空后的受控 graceful shutdown 请求入口，必须满足 `drain_mode_enabled == true`、`connection_count == 0`、`owned_room_count == 0`、`migrating_room_count == 0` 才会触发 game-server 自身 graceful shutdown 信号；`retired_room_count` 只作为观测字段，不阻塞停服。`tools/mock-client` 已具备收到 push 后主动断线、连接目标入口、重新 `AuthReq` 并优先 `RoomReconnectReq` 的验证场景，也可通过 `request-server-shutdown` 场景人工调用停服安全闸。2026-06-13 已在真实 old/new/proxy/auth 环境中人工跑通 `movement_demo` 空房迁移控制面，并用 mock-client 验证 redirect -> transfer -> proxy reconnect；尚未完成自动测试准入、mybevy 适配、L7 relay、同连接 upstream swap、真实 route metadata 丢失恢复或生产部署平台 stop hook 接入，也不代表 movement/combat/NPC/AI/timer 等完整玩法状态已经可无损迁移。
+当前实现状态（截至 `2026-06-15`）：`game-server` 已完成已鉴权 internal/admin 通道内的 room freeze/export/import/confirm/retire 最小闭环，适用于空房或全员离线 room 的基础 transfer 验证；`ConfirmRoomOwnershipReq/Res` 会在新服校验 room 存在、`OwnedByNew` 状态、`rollout_epoch`、checksum 和 `room_version` 后才返回成功。同时已提供 `TriggerServerRedirectReq/Res` 控制入口，可向旧服上目标 room 的当前在线成员下发 `ServerRedirectPush`。push 成功进入出站队列后，旧服会以 `server_redirect_reconnect_required` 主动请求关闭旧连接；push 排队失败的连接计入失败数，不额外覆盖关闭原因。`GetRolloutDrainStatusReq/Res` 会返回旧服真实 `drain_mode_enabled`、`drain_mode_entered_at_ms`、`drain_mode_reason`、`drain_mode_source`、连接数、仍持有 room、迁移中 room、已 retired tombstone room、route 样本和可接管空房分类；可接管空房仅包含仍为 `Owned` / 对外视作 `OwnedByOld` 且在线成员数为 `0` 的 room，已 `Retired` room 单独计入 `retired_room_count`，不作为旧服排空阻塞项。该状态供 `auth-http` 内部接口、`tools/mock-client` 查询，也可被 `game-proxy` 的 `complete-if-drained` 在配置启用时作为结束 rollout 前的真实排空校验。`RequestServerShutdownReq/Res` 已提供显式武装的受控 graceful shutdown 请求入口：无 blocker 时立即触发，仍有连接或 room blocker 时接受默认 `300s` 有界等待；`ok` 与 `shutdown_armed` 共同表达立即执行、已接受等待和拒绝三态。超时不会强杀会话或 room，解除武装后可由后续显式请求重试；`retired_room_count` 只作为观测字段，不阻塞停服。`tools/mock-client` 已具备收到 push 后主动断线、连接目标入口、重新 `AuthReq` 并优先 `RoomReconnectReq` 的验证场景，也可通过 `request-server-shutdown` 场景人工调用停服安全闸。2026-06-13 已在真实 old/new/proxy/auth 环境中人工跑通 `movement_demo` 空房迁移控制面，并用 mock-client 验证 redirect -> transfer -> proxy reconnect；尚未完成自动测试准入、mybevy 适配、L7 relay、同连接 upstream swap、真实 route metadata 丢失恢复或生产部署平台 stop hook 接入，也不代表 movement/combat/NPC/AI/timer 等完整玩法状态已经可无损迁移。
 
 启动资源边界补充：`game-server` 必须在持有 global-ID worker lease 后才绑定玩家/admin listener 和两个 local socket。启动失败、SIGTERM/Ctrl-C、内部受控 shutdown、lease lost 或关键 listener task 失败统一停止任务、释放 listener/socket、注销自身 registry identity，并以 token compare-and-delete 释放自身 lease。固定 socket 名仍不支持新旧实例重叠；实例级 socket 与独立 lease/identity 的滚动替换由后续阶段完成。
 

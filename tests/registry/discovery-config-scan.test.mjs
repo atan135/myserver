@@ -323,7 +323,10 @@ test("repository match-service strict templates omit game-server internal socket
   }
 
   const gameServerExample = fs.readFileSync(path.join(projectRoot, "apps/game-server/.env.example"), "utf8");
-  assert.equal(hasActiveConfigAssignment(gameServerExample, "GAME_INTERNAL_SOCKET_NAME"), true);
+  assert.equal(hasActiveConfigAssignment(gameServerExample, "GAME_INTERNAL_SOCKET_NAME"), false);
+  assert.equal(hasActiveConfigAssignment(gameServerExample, "GAME_LOCAL_SOCKET_NAME"), false);
+  assert.equal(hasActiveConfigAssignment(gameServerExample, "GAME_SOCKET_ROOT"), true);
+  assert.equal(hasActiveConfigAssignment(gameServerExample, "GAME_SOCKET_BASENAME"), true);
   assert.equal(
     result.allowedLocalFallbacks.some(
       (item) =>
@@ -331,7 +334,7 @@ test("repository match-service strict templates omit game-server internal socket
         item.variable === "GAME_INTERNAL_SOCKET_NAME"
     ),
     false,
-    "apps/game-server/.env.example GAME_INTERNAL_SOCKET_NAME is the game-server self bind config"
+    "apps/game-server/.env.example derives self bind paths from instance socket settings"
   );
 });
 

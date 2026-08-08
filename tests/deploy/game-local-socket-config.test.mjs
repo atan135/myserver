@@ -13,39 +13,35 @@ function serviceBlock(compose, serviceName) {
   return match[1];
 }
 
-test("production game services share absolute local socket paths", async () => {
+test("production game services share instance-specific absolute local socket paths", async () => {
   const compose = await read("deploy/docker/compose.production.yml");
   const applyScript = await read("scripts/docker/server-apply-release.sh");
   const socketInit = serviceBlock(compose, "game-socket-init");
-  const socketClean = serviceBlock(compose, "game-socket-clean");
   const gameServer = serviceBlock(compose, "game-server");
   const gameProxy = serviceBlock(compose, "game-proxy");
   const matchService = serviceBlock(compose, "match-service");
 
   assert.match(
     gameServer,
-    /^      GAME_LOCAL_SOCKET_NAME: \/run\/myserver\/myserver-game-server\.sock$/m
+    /^      GAME_SOCKET_ROOT: \/run\/myserver$/m
   );
   assert.match(
     gameServer,
-    /^      GAME_INTERNAL_SOCKET_NAME: \/run\/myserver\/myserver-game-server-internal\.sock$/m
+    /^      GAME_SOCKET_BASENAME: game-server$/m
   );
+  assert.match(gameServer, /^      SERVICE_INSTANCE_ID: \$\{GAME_SERVER_INSTANCE_ID:-game-server-1\}$/m);
+  assert.match(gameServer, /^      GLOBAL_ID_WORKER_ID: \$\{GAME_SERVER_WORKER_ID:-5\}$/m);
   assert.match(socketInit, /^    user: "0:0"$/m);
   assert.match(
     socketInit,
     /^    command: \["install -d -o 10001 -g 10001 -m 0770 \/run\/myserver"\]$/m
   );
   assert.match(socketInit, /^      - game-sockets:\/run\/myserver$/m);
-  assert.match(socketClean, /^    user: "0:0"$/m);
-  assert.match(socketClean, /^    profiles: \["ops"\]$/m);
-  assert.match(
-    socketClean,
-    /^    command: \["rm -f \/run\/myserver\/myserver-game-server\.sock \/run\/myserver\/myserver-game-server-internal\.sock"\]$/m
-  );
-  assert.match(socketClean, /^      - game-sockets:\/run\/myserver$/m);
+  assert.doesNotMatch(compose, /^  game-socket-clean:$/m);
+  assert.doesNotMatch(applyScript, /game-socket-clean/);
   assert.match(
     applyScript,
-    /^"\$\{compose\[@\]\}" stop game-server\r?\n"\$\{compose\[@\]\}" --profile ops run --rm --no-deps game-socket-clean\r?\n"\$\{compose\[@\]\}" up -d game-server/m
+    /^"\$\{compose\[@\]\}" stop game-server\r?\n"\$\{compose\[@\]\}" up -d game-server/m
   );
   assert.match(
     gameServer,

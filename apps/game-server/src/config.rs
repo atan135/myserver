@@ -8,6 +8,11 @@ pub const DEFAULT_OUTBOUND_QUEUE_CAPACITY: usize = 1024;
 pub const DEFAULT_MAX_LEARNED_DISCIPLINES: usize = 8;
 pub const DEFAULT_MAX_ACTIVE_DISCIPLINES: usize = 2;
 const DISALLOW_LEGACY_DIRECT_CONFIG_ENV_NAME: &str = "DISALLOW_LEGACY_DIRECT_CONFIG";
+const DEFAULT_SOCKET_BASENAME: &str = "game-server";
+const DEFAULT_PRODUCTION_SOCKET_ROOT: &str = "/run/myserver";
+const DEFAULT_LOCAL_SOCKET_ROOT: &str = "/tmp/myserver";
+const MAX_SOCKET_COMPONENT_LEN: usize = 48;
+const MAX_UNIX_SOCKET_PATH_LEN: usize = 103;
 
 #[derive(Clone)]
 pub struct Config {
@@ -218,16 +223,18 @@ impl Config {
             env::var("ADMIN_ASSERTION_PUBLIC_KEYS_JSON").ok().as_deref(),
         )
         .unwrap_or_else(|error| panic!("invalid game-server assertion config: {error}"));
-        let admin_assertion_max_ttl_ms = parse_u64("ADMIN_ASSERTION_MAX_TTL_MS", 60_000)
-            .clamp(1_000, 300_000);
+        let admin_assertion_max_ttl_ms =
+            parse_u64("ADMIN_ASSERTION_MAX_TTL_MS", 60_000).clamp(1_000, 300_000);
         let mail_grant_assertion_issuer =
             parse_non_empty_string("MAIL_GRANT_ASSERTION_ISSUER", "mail-service");
         let mail_grant_assertion_public_keys = parse_admin_assertion_public_keys(
-            env::var("MAIL_GRANT_ASSERTION_PUBLIC_KEYS_JSON").ok().as_deref(),
+            env::var("MAIL_GRANT_ASSERTION_PUBLIC_KEYS_JSON")
+                .ok()
+                .as_deref(),
         )
         .unwrap_or_else(|error| panic!("invalid game-server mail grant assertion config: {error}"));
-        let mail_grant_assertion_max_ttl_ms = parse_u64("MAIL_GRANT_ASSERTION_MAX_TTL_MS", 60_000)
-            .clamp(1_000, 300_000);
+        let mail_grant_assertion_max_ttl_ms =
+            parse_u64("MAIL_GRANT_ASSERTION_MAX_TTL_MS", 60_000).clamp(1_000, 300_000);
         let admin_audit_enabled = parse_bool("GAME_ADMIN_AUDIT_ENABLED", true);
         let admin_audit_path = env::var("GAME_ADMIN_AUDIT_PATH")
             .unwrap_or_else(|_| "logs/game-server/admin-audit.jsonl".to_string());
@@ -236,10 +243,29 @@ impl Config {
             env::var("GAME_INTERNAL_TOKEN").unwrap_or_else(|_| DEFAULT_INTERNAL_TOKEN.to_string());
         let discovery_required = discovery_required_from_env();
         validate_legacy_direct_config("game-server", &["MATCH_SERVICE_ADDR"], discovery_required);
-        let local_socket_name = env::var("GAME_LOCAL_SOCKET_NAME")
-            .unwrap_or_else(|_| "myserver-game-server.sock".to_string());
-        let internal_socket_name = env::var("GAME_INTERNAL_SOCKET_NAME")
-            .unwrap_or_else(|_| derive_internal_socket_name(&local_socket_name));
+        let service_name = parse_non_empty_string("SERVICE_NAME", "game-server");
+        let service_instance_id = env::var("SERVICE_INSTANCE_ID")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| format!("{}-{}", service_name, port));
+        let socket_root = parse_non_empty_string(
+            "GAME_SOCKET_ROOT",
+            if is_production_env() {
+                DEFAULT_PRODUCTION_SOCKET_ROOT
+            } else {
+                DEFAULT_LOCAL_SOCKET_ROOT
+            },
+        );
+        let socket_basename =
+            parse_non_empty_string("GAME_SOCKET_BASENAME", DEFAULT_SOCKET_BASENAME);
+        let (local_socket_name, internal_socket_name) = build_instance_socket_names(
+            &socket_root,
+            &socket_basename,
+            &service_instance_id,
+            cfg!(windows),
+        )
+        .unwrap_or_else(|error| panic!("invalid game-server socket config: {error}"));
         let log_level = env::var("LOG_LEVEL").unwrap_or_else(|_| "info".to_string());
         let log_enable_console = parse_bool("LOG_ENABLE_CONSOLE", true);
         let log_enable_file = parse_bool("LOG_ENABLE_FILE", true);
@@ -294,9 +320,6 @@ impl Config {
             .or_else(|_| env::var("REDIS_KEY_PREFIX"))
             .unwrap_or_default();
         let registry_heartbeat_interval_secs = parse_u64("REGISTRY_HEARTBEAT_INTERVAL", 10);
-        let service_name = env::var("SERVICE_NAME").unwrap_or_else(|_| "game-server".to_string());
-        let service_instance_id = env::var("SERVICE_INSTANCE_ID")
-            .unwrap_or_else(|_| format!("{}-{}", service_name, port));
         let service_build_version = parse_non_empty_string("SERVICE_BUILD_VERSION", "dev");
         let service_zone = parse_non_empty_string("SERVICE_ZONE", "local");
         let service_rollout_epoch =
@@ -395,12 +418,75 @@ impl Config {
     }
 }
 
-fn derive_internal_socket_name(local_socket_name: &str) -> String {
-    if let Some(prefix) = local_socket_name.strip_suffix(".sock") {
-        return format!("{prefix}-internal.sock");
+fn build_instance_socket_names(
+    root: &str,
+    basename: &str,
+    instance_id: &str,
+    windows: bool,
+) -> Result<(String, String), String> {
+    validate_socket_component("GAME_SOCKET_BASENAME", basename)?;
+    validate_socket_component("SERVICE_INSTANCE_ID", instance_id)?;
+
+    let local_filename = format!("{basename}-{instance_id}.sock");
+    let internal_filename = format!("{basename}-{instance_id}-internal.sock");
+    if windows {
+        let local = format!(r"\\.\pipe\myserver-{local_filename}");
+        let internal = format!(r"\\.\pipe\myserver-{internal_filename}");
+        if internal.len() > 240 {
+            return Err("derived Windows named pipe exceeds 240 bytes".to_string());
+        }
+        return Ok((local, internal));
     }
 
-    format!("{local_socket_name}-internal")
+    validate_socket_root(root)?;
+    let root = root.trim_end_matches('/');
+    let local = format!("{root}/{local_filename}");
+    let internal = format!("{root}/{internal_filename}");
+    if local.len() > MAX_UNIX_SOCKET_PATH_LEN || internal.len() > MAX_UNIX_SOCKET_PATH_LEN {
+        return Err(format!(
+            "derived Unix socket path exceeds {MAX_UNIX_SOCKET_PATH_LEN} bytes"
+        ));
+    }
+    Ok((local, internal))
+}
+
+fn validate_socket_component(name: &str, value: &str) -> Result<(), String> {
+    if value.is_empty() || value.len() > MAX_SOCKET_COMPONENT_LEN {
+        return Err(format!(
+            "{name} length must be 1..={MAX_SOCKET_COMPONENT_LEN}"
+        ));
+    }
+    if value == "."
+        || value == ".."
+        || value.chars().any(|character| {
+            character.is_control()
+                || matches!(character, '/' | '\\')
+                || !(character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.'))
+        })
+    {
+        return Err(format!("{name} contains an unsafe socket path component"));
+    }
+    Ok(())
+}
+
+fn validate_socket_root(root: &str) -> Result<(), String> {
+    if !root.starts_with('/') || root == "/" || root.len() > 64 {
+        return Err(
+            "GAME_SOCKET_ROOT must be an absolute non-root path of at most 64 bytes".to_string(),
+        );
+    }
+    if root.contains('\\')
+        || root.strip_prefix('/').unwrap().split('/').any(|component| {
+            component.is_empty()
+                || matches!(component, "." | "..")
+                || component.chars().any(|character| {
+                    !(character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.'))
+                })
+        })
+    {
+        return Err("GAME_SOCKET_ROOT contains an unsafe path component".to_string());
+    }
+    Ok(())
 }
 
 fn is_production_env() -> bool {
@@ -523,14 +609,19 @@ fn validate_production_config(config: &Config) {
         "MYSERVER_CHARACTER_ELEMENT_DEBUG_TOKEN",
         "MYSERVER_CHARACTER_TITLE_DEBUG_TOKEN",
     ] {
-        if env::var(name).ok().is_some_and(|value| !value.trim().is_empty()) {
+        if env::var(name)
+            .ok()
+            .is_some_and(|value| !value.trim().is_empty())
+        {
             errors.push("character debug tokens must not be configured in production");
             break;
         }
     }
 
     if config.admin_assertion_public_keys.is_empty() {
-        errors.push("ADMIN_ASSERTION_PUBLIC_KEYS_JSON must contain at least one Ed25519 key in production");
+        errors.push(
+            "ADMIN_ASSERTION_PUBLIC_KEYS_JSON must contain at least one Ed25519 key in production",
+        );
     }
 
     if config.mail_grant_assertion_public_keys.is_empty() {
@@ -591,6 +682,80 @@ mod tests {
         LOCK.get_or_init(|| Mutex::new(()))
     }
 
+    #[test]
+    fn instance_socket_names_are_deterministic_distinct_and_publishable() {
+        let first =
+            build_instance_socket_names("/run/myserver", "game-server", "game-server-blue", false)
+                .unwrap();
+        let repeated =
+            build_instance_socket_names("/run/myserver", "game-server", "game-server-blue", false)
+                .unwrap();
+        let second =
+            build_instance_socket_names("/run/myserver", "game-server", "game-server-green", false)
+                .unwrap();
+
+        assert_eq!(first, repeated);
+        assert_ne!(first, second);
+        assert_eq!(first.0, "/run/myserver/game-server-game-server-blue.sock");
+        assert_eq!(
+            first.1,
+            "/run/myserver/game-server-game-server-blue-internal.sock"
+        );
+        let windows = build_instance_socket_names(
+            "/ignored-on-windows",
+            "game-server",
+            "game-server-blue",
+            true,
+        )
+        .unwrap();
+        assert!(windows.0.starts_with(r"\\.\pipe\myserver-"));
+        assert!(windows.0.contains("game-server-blue"));
+    }
+
+    #[test]
+    fn socket_names_reject_escape_controls_separators_and_length_overflow() {
+        for instance_id in ["..", "blue/other", "blue\\other", "blue\nother", "蓝服"] {
+            assert!(
+                build_instance_socket_names("/run/myserver", "game-server", instance_id, false)
+                    .is_err(),
+                "unsafe instance id accepted: {instance_id:?}"
+            );
+        }
+        for root in [
+            "relative",
+            "/",
+            "/run/../tmp",
+            "/run/./tmp",
+            "/run//myserver",
+            "/run/myserver/",
+            "/run/蓝服",
+            "/run\\myserver",
+        ] {
+            assert!(
+                build_instance_socket_names(root, "game-server", "blue", false).is_err(),
+                "unsafe root accepted: {root:?}"
+            );
+        }
+        assert!(
+            build_instance_socket_names(
+                "/run/myserver",
+                "game-server",
+                &"a".repeat(MAX_SOCKET_COMPONENT_LEN + 1),
+                false,
+            )
+            .is_err()
+        );
+        assert!(
+            build_instance_socket_names(
+                "/this/root/is/intentionally/long/enough/to/overflow/the/unix/socket/path/budget",
+                "game-server",
+                "instance-1234567890",
+                false,
+            )
+            .is_err()
+        );
+    }
+
     struct EnvGuard {
         saved: Vec<(&'static str, Option<String>)>,
     }
@@ -635,6 +800,8 @@ mod tests {
         "GAME_ADMIN_AUDIT_PATH",
         "GAME_ADMIN_AUDIT_REQUIRE_ACTOR",
         "GAME_INTERNAL_TOKEN",
+        "ADMIN_ASSERTION_PUBLIC_KEYS_JSON",
+        "MAIL_GRANT_ASSERTION_PUBLIC_KEYS_JSON",
         "DB_ENABLED",
         "GLOBAL_ID_ORIGIN_ID",
         "GLOBAL_ID_WORKER_ID",
@@ -684,8 +851,8 @@ mod tests {
         "GAME_PUBLIC_HOST",
         "ADMIN_HOST",
         "GAME_PORT",
-        "GAME_LOCAL_SOCKET_NAME",
-        "GAME_INTERNAL_SOCKET_NAME",
+        "GAME_SOCKET_ROOT",
+        "GAME_SOCKET_BASENAME",
         "MATCH_SERVICE_ADDR",
         "SERVICE_NAME",
         "SERVICE_INSTANCE_ID",
@@ -718,6 +885,14 @@ mod tests {
             env::set_var("DB_ENABLED", "true");
             env::set_var("GLOBAL_ID_ORIGIN_ID", "1");
             env::set_var("GLOBAL_ID_WORKER_ID", "1");
+            env::set_var(
+                "ADMIN_ASSERTION_PUBLIC_KEYS_JSON",
+                r#"{"test-v1":"11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo"}"#,
+            );
+            env::set_var(
+                "MAIL_GRANT_ASSERTION_PUBLIC_KEYS_JSON",
+                r#"{"test-v1":"11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo"}"#,
+            );
         }
     }
 
@@ -909,8 +1084,8 @@ mod tests {
         unsafe {
             clear_production_env();
             env::remove_var("GAME_PORT");
-            env::remove_var("GAME_LOCAL_SOCKET_NAME");
-            env::remove_var("GAME_INTERNAL_SOCKET_NAME");
+            env::remove_var("GAME_SOCKET_ROOT");
+            env::remove_var("GAME_SOCKET_BASENAME");
             env::remove_var("SERVICE_NAME");
             env::remove_var("SERVICE_INSTANCE_ID");
             env::remove_var("SERVICE_BUILD_VERSION");
@@ -933,10 +1108,7 @@ mod tests {
         assert_eq!(metadata["zone"], "local");
         assert_eq!(metadata["rollout_epoch"], "default");
         assert_eq!(metadata["drain_mode"], false);
-        assert_eq!(
-            metadata["internal_socket"],
-            "myserver-game-server-internal.sock"
-        );
+        assert_eq!(metadata["internal_socket"], config.internal_socket_name);
     }
 
     #[test]
@@ -951,7 +1123,8 @@ mod tests {
             env::set_var("SERVICE_ZONE", " zone-a ");
             env::remove_var("SERVICE_ROLLOUT_EPOCH");
             env::set_var("ROLLOUT_EPOCH", " epoch-fallback ");
-            env::set_var("GAME_INTERNAL_SOCKET_NAME", "gs-42-internal.sock");
+            env::set_var("GAME_SOCKET_ROOT", "/tmp/myserver-tests");
+            env::set_var("GAME_SOCKET_BASENAME", "gs");
         }
 
         let config = Config::from_env();
@@ -968,7 +1141,12 @@ mod tests {
         assert_eq!(metadata["zone"], "zone-a");
         assert_eq!(metadata["rollout_epoch"], "epoch-fallback");
         assert_eq!(metadata["drain_mode"], false);
-        assert_eq!(metadata["internal_socket"], "gs-42-internal.sock");
+        assert_eq!(metadata["internal_socket"], config.internal_socket_name);
+        assert!(
+            config
+                .internal_socket_name
+                .contains("gs-gs-42-internal.sock")
+        );
 
         unsafe {
             env::set_var("SERVICE_ROLLOUT_EPOCH", " epoch-primary ");
@@ -1095,7 +1273,9 @@ mod tests {
         unsafe {
             clear_production_env();
             env::set_var("DISALLOW_LEGACY_DIRECT_CONFIG", "true");
-            env::set_var("GAME_INTERNAL_SOCKET_NAME", "gs-42-internal.sock");
+            env::set_var("SERVICE_INSTANCE_ID", "gs-42");
+            env::set_var("GAME_SOCKET_ROOT", "/tmp/myserver-tests");
+            env::set_var("GAME_SOCKET_BASENAME", "gs");
             env::set_var("MATCH_SERVICE_ADDR", "http://127.0.0.1:19002");
         }
 
@@ -1133,13 +1313,19 @@ mod tests {
         unsafe {
             clear_production_env();
             env::set_var("DISALLOW_LEGACY_DIRECT_CONFIG", "true");
-            env::set_var("GAME_INTERNAL_SOCKET_NAME", "gs-42-internal.sock");
+            env::set_var("SERVICE_INSTANCE_ID", "gs-42");
+            env::set_var("GAME_SOCKET_ROOT", "/tmp/myserver-tests");
+            env::set_var("GAME_SOCKET_BASENAME", "gs");
             env::remove_var("MATCH_SERVICE_ADDR");
         }
 
         let config = Config::from_env();
 
-        assert_eq!(config.internal_socket_name, "gs-42-internal.sock");
+        assert!(
+            config
+                .internal_socket_name
+                .contains("gs-gs-42-internal.sock")
+        );
         assert!(config.legacy_direct_config_warnings.is_empty());
     }
 
@@ -1288,7 +1474,10 @@ mod tests {
         unsafe {
             env::set_var("NODE_ENV", "production");
             env::remove_var("APP_ENV");
-            env::set_var("MYSERVER_CHARACTER_TITLE_DEBUG_TOKEN", "development-only-debug-token");
+            env::set_var(
+                "MYSERVER_CHARACTER_TITLE_DEBUG_TOKEN",
+                "development-only-debug-token",
+            );
             env::remove_var("MYSERVER_CHARACTER_ELEMENT_DEBUG_TOKEN");
             env::set_var("GAME_ADMIN_AUDIT_ENABLED", "true");
         }

@@ -313,6 +313,13 @@ mod tests {
         assert_eq!(instance.endpoints[1].protocol, "tcp");
         assert_eq!(instance.endpoints[1].host, "10.0.0.21");
         assert_eq!(instance.endpoints[1].port, 7500);
+        assert_eq!(instance.endpoints[2].name, "internal");
+        assert_eq!(
+            instance.endpoints[2].socket,
+            "myserver-game-server-internal.sock"
+        );
+        assert_eq!(instance.endpoints[3].name, "proxy-local");
+        assert_eq!(instance.endpoints[3].socket, "myserver-game-server.sock");
     }
 
     #[test]
