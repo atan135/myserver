@@ -12,7 +12,8 @@ import {
   RegistryClient,
   discoverAuthHttpInternalEndpoints,
   discoverGameProxyAdminEndpoints,
-  discoverGameServerAdminEndpoints
+  discoverGameServerAdminEndpoints,
+  discoverLiveGameServerAdminEndpoints
 } from "./registry-client.js";
 
 configureLogger({
@@ -327,6 +328,39 @@ test("discoverGameServerAdminEndpoints requires admin visibility and never falls
   assert.deepEqual(endpoints.map(({ instanceId, endpointName, port }) => ({ instanceId, endpointName, port })), [
     { instanceId: "game-server-admin", endpointName: "admin", port: 7500 }
   ]);
+});
+
+test("live game-server admin discovery includes drained instances but only healthy admin endpoints", async () => {
+  const redis = createRedisCapture();
+  putInstance(redis, registryInstance("game-server", "game-server-drained", [
+    networkEndpoint("client", "tcp", "public", "10.0.0.20", 7000),
+    networkEndpoint("admin", "tcp", "admin", "10.0.0.20", 7500)
+  ], { healthy: false }));
+  putInstance(redis, registryInstance("game-server", "game-server-bad-admin", [
+    { ...networkEndpoint("admin", "tcp", "admin", "10.0.0.21", 7501), healthy: false }
+  ], { healthy: false }));
+
+  assert.deepEqual(await discoverGameServerAdminEndpoints(redis), []);
+  const live = await discoverLiveGameServerAdminEndpoints(redis);
+  assert.deepEqual(live.map(({ instanceId, healthy, endpointHealthy, reason }) => ({
+    instanceId, healthy, endpointHealthy, reason
+  })), [{
+    instanceId: "game-server-drained",
+    healthy: false,
+    endpointHealthy: true,
+    reason: "live_admin_control"
+  }]);
+});
+
+test("live game-server admin discovery rejects expired heartbeat", async () => {
+  const redis = createRedisCapture();
+  const instance = registryInstance("game-server", "game-server-expired", [
+    networkEndpoint("admin", "tcp", "admin", "10.0.0.22", 7500)
+  ], { healthy: false });
+  putInstance(redis, instance);
+  redis.keys.delete(`heartbeat:game-server:${instance.id}`);
+
+  assert.deepEqual(await discoverLiveGameServerAdminEndpoints(redis, { discoveryCacheTtlMs: 0 }), []);
 });
 
 test("discoverGameServerAdminEndpoints returns empty when only client-visible endpoints exist", async () => {

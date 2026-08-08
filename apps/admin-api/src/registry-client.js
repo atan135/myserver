@@ -5,6 +5,7 @@ import {
   createServiceInstancePayload,
   discoveryLogContext,
   discoverAllEndpoints,
+  discoverLiveServiceInstances as discoverRegistryLiveServiceInstances,
   deregisterRegistryInstance,
   discoverServiceInstances as discoverRegistryServiceInstances,
   heartbeatRegistryInstance,
@@ -283,6 +284,56 @@ export async function discoverGameServerAdminEndpoints(redis, registryKeyPrefix 
       reason: "discovered"
     }));
   emitDiscoveryLog(options, endpoints.length > 0 ? "info" : "warn", "registry.discovery_all_endpoints", {
+    serviceName: GAME_SERVER_SERVICE_NAME,
+    endpointName: GAME_SERVER_ADMIN_ENDPOINT_NAME,
+    source: "registry",
+    reason: endpoints.length > 0 ? "discovered" : "endpoint_missing",
+    instance_count: endpoints.length
+  });
+  return endpoints;
+}
+
+export async function discoverLiveGameServerAdminEndpoints(redis, registryKeyPrefix = "") {
+  const options = normalizeAdminDiscoveryOptions(registryKeyPrefix);
+  const instances = await discoverRegistryLiveServiceInstances(redis, GAME_SERVER_SERVICE_NAME, {
+    ...options,
+    onParseError: options.onParseError || ((error, context) => {
+      logDiscovery("warn", "registry.discovery_parse_failed", {
+        serviceName: context.serviceName,
+        instanceId: context.instanceId,
+        source: "registry",
+        reason: "registry_error",
+        error
+      });
+    }),
+    onDiscoveryLog: options.onDiscoveryLog || logDiscovery
+  });
+  const endpoints = instances.flatMap((instance) => instance.endpoints
+    .filter((endpoint) =>
+      endpoint.name === GAME_SERVER_ADMIN_ENDPOINT_NAME &&
+      endpoint.visibility === ADMIN_ENDPOINT_VISIBILITY &&
+      GAME_SERVER_ADMIN_PROTOCOLS.has(endpoint.protocol) &&
+      endpoint.healthy === true
+    )
+    .map((endpoint) => ({
+      service: GAME_SERVER_SERVICE_NAME,
+      instanceId: instance.id,
+      instance_id: instance.id,
+      endpointName: endpoint.name,
+      endpoint_name: endpoint.name,
+      protocol: endpoint.protocol,
+      host: endpoint.host,
+      port: endpoint.port,
+      healthy: instance.healthy !== false,
+      instanceHealthy: instance.healthy !== false,
+      endpointHealthy: true,
+      weight: instance.weight,
+      metadata: endpoint.metadata || {},
+      fallback: false,
+      source: "registry",
+      reason: "live_admin_control"
+    })));
+  emitDiscoveryLog(options, endpoints.length > 0 ? "info" : "warn", "registry.discovery_live_admin_endpoints", {
     serviceName: GAME_SERVER_SERVICE_NAME,
     endpointName: GAME_SERVER_ADMIN_ENDPOINT_NAME,
     source: "registry",

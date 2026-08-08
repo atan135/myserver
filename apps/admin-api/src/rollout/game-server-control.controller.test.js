@@ -130,6 +130,7 @@ test("game-server drain control binds registry target, assertion scope, and audi
   assert.equal(result.ok, true);
   assert.equal(options.targetInstanceId, "game-server-a");
   assert.equal(options.requireRegistryTarget, true);
+  assert.equal(options.allowLiveUnhealthyAdminTarget, undefined);
   assert.equal(options.assertionContext.permission, "game.config.write");
   assert.equal(options.assertionContext.scope.worldId, "*");
   assert.equal(options.assertionContext.scope.instanceId, "game-server-a");
@@ -190,6 +191,7 @@ test("game-server shutdown binds the emergency service permission to the exact r
     worldId: null
   });
   assert.equal(options.assertionContext.permission, "service.shutdown");
+  assert.equal(options.allowLiveUnhealthyAdminTarget, true);
   assert.equal(options.assertionContext.scope.instanceId, "game-server-a");
   assert.equal(options.assertionContext.scope.worldId, undefined);
 });

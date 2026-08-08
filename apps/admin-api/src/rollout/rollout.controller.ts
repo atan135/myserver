@@ -196,6 +196,7 @@ export class RolloutController {
         execute: () => this.gameAdminClient.requestServerShutdown(body?.reason, {
           targetInstanceId: instanceId,
           requireRegistryTarget: true,
+          allowLiveUnhealthyAdminTarget: true,
           assertionContext: gameServerAssertionContext(
             req,
             body,

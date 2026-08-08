@@ -77,6 +77,7 @@ const registryCapacityMetrics = {
   cacheMissTotal: 0
 };
 const INSTANCE_DISCOVERY_STRATEGY = "healthy_instances_sorted_v1";
+const LIVE_INSTANCE_DISCOVERY_STRATEGY = "live_instances_sorted_v1";
 const ENDPOINT_PICK_STRATEGY = "weighted_stable_endpoint_v1";
 const ALL_ENDPOINTS_STRATEGY = "all_healthy_endpoints_sorted_v1";
 const discoveryClientByRedis = new WeakMap();
@@ -795,6 +796,45 @@ export class RegistryDiscoveryClient {
     }
   }
 
+  async discoverLiveInstances(serviceName) {
+    const cacheKey = discoveryCacheKey({
+      prefix: this.registryKeyPrefix,
+      serviceName,
+      endpointName: "",
+      kind: "live_instances",
+      strategy: LIVE_INSTANCE_DISCOVERY_STRATEGY
+    });
+    const cached = this.getCachedEntry(cacheKey);
+    if (cached) {
+      return cached.value;
+    }
+
+    try {
+      const instances = await discoverIndexedServiceInstances(
+        this.redis,
+        serviceName,
+        this.registryKeyPrefix,
+        this.onParseError,
+        { requireHealthy: false }
+      );
+      this.emitDiscoveryLog(instances.length > 0 ? "info" : "warn", "registry.discovery_live_instances", {
+        serviceName,
+        source: "registry",
+        reason: instances.length > 0 ? "discovered" : "no_live_instance",
+        instance_count: instances.length
+      });
+      return this.setCached(cacheKey, instances).value;
+    } catch (error) {
+      this.emitDiscoveryLog("warn", "registry.discovery_live_instances_failed", {
+        serviceName,
+        source: "registry",
+        reason: "registry_error",
+        error
+      });
+      throw error;
+    }
+  }
+
   async discoverEndpoint(serviceName, endpointName) {
     const cacheKey = discoveryCacheKey({
       prefix: this.registryKeyPrefix,
@@ -1169,6 +1209,10 @@ export async function discoverServiceInstances(redis, serviceName, options = {})
   return getRegistryDiscoveryClient(redis, normalizeDiscoveryOptions(options)).discoverInstances(serviceName);
 }
 
+export async function discoverLiveServiceInstances(redis, serviceName, options = {}) {
+  return getRegistryDiscoveryClient(redis, normalizeDiscoveryOptions(options)).discoverLiveInstances(serviceName);
+}
+
 function normalizeEndpointList(endpoints, sourceSchemaVersion, legacy) {
   const explicit = Array.isArray(endpoints) ? endpoints.map(normalizeEndpoint).filter(Boolean) : [];
   if (Array.isArray(endpoints)) {
@@ -1296,7 +1340,13 @@ function stableHash(value) {
   return (hash >>> 0) / 4294967295;
 }
 
-async function discoverIndexedServiceInstances(redis, serviceName, registryKeyPrefix, onParseError = null) {
+async function discoverIndexedServiceInstances(
+  redis,
+  serviceName,
+  registryKeyPrefix,
+  onParseError = null,
+  { requireHealthy = true } = {}
+) {
   assertRegistryServiceName(serviceName);
   const nowSeconds = Math.floor(Date.now() / 1000);
   const instanceIds = await redis.zrangebyscore(
@@ -1332,8 +1382,10 @@ async function discoverIndexedServiceInstances(redis, serviceName, registryKeyPr
 
     try {
       const instance = normalizeServiceInstance(JSON.parse(data));
-      if (instance && instance.id === instanceId && instance.name === serviceName && isHealthyInstance(instance)) {
-        instances.push(instance);
+      if (instance && instance.id === instanceId && instance.name === serviceName) {
+        if (!requireHealthy || isHealthyInstance(instance)) {
+          instances.push(instance);
+        }
       } else if (instance) {
         onParseError?.(new Error("registry index payload identity mismatch"), { serviceName, instanceId });
       }

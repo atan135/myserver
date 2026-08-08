@@ -214,6 +214,9 @@ function createDiscoveryRedis(instances) {
   }
 
   return {
+    expireHeartbeat(instanceId) {
+      keys.delete(`heartbeat:game-server:${instanceId}`);
+    },
     async zrangebyscore() {
       return [...hashes.keys()]
         .map((key) => key.match(/^service:game-server:instances:([^:]+):data$/)?.[1])
@@ -466,6 +469,130 @@ test("GameAdminClient registry-only writes reject direct endpoint overrides", as
   await assert.rejects(
     client.requestServerShutdown("rolling replacement", options),
     { code: "GAME_SERVER_ADMIN_DIRECT_ENDPOINT_FORBIDDEN" }
+  );
+});
+
+test("GameAdminClient shutdown reaches an exact live drained registry target", async () => {
+  const server = net.createServer((socket) => {
+    let buffer = Buffer.alloc(0);
+    socket.on("data", (chunk) => {
+      buffer = Buffer.concat([buffer, chunk]);
+      while (buffer.length >= HEADER_LEN) {
+        const bodyLen = buffer.readUInt32BE(10);
+        const packetLen = HEADER_LEN + bodyLen;
+        if (buffer.length < packetLen) return;
+        const messageType = buffer.readUInt16BE(4);
+        const seq = buffer.readUInt32BE(6);
+        buffer = buffer.subarray(packetLen);
+        if (messageType === MESSAGE_TYPE.REQUEST_SERVER_SHUTDOWN_REQ) {
+          socket.write(encodeTestPacket(
+            MESSAGE_TYPE.REQUEST_SERVER_SHUTDOWN_RES,
+            seq,
+            Buffer.concat([protoBool(1, true), protoBool(6, true), protoBool(8, true)])
+          ));
+        }
+      }
+    });
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = server.address().port;
+  const drained = gameServerInstance("game-server-drained", "127.0.0.1", port);
+  drained.healthy = false;
+  const client = new GameAdminClient({
+    registryDiscoveryEnabled: true,
+    registryDiscoveryRequired: true,
+    gameAdminConnectTimeoutMs: 1000,
+    gameAdminWriteTimeoutMs: 1000,
+    gameAdminReadTimeoutMs: 1000,
+    gameAdminMaxResponseBytes: 4096
+  }, createDiscoveryRedis([drained]), {
+    async issue() { return { signature: "fixture" }; }
+  });
+
+  try {
+    const result = await client.requestServerShutdown("rolling replacement", {
+      targetInstanceId: drained.id,
+      requireRegistryTarget: true,
+      allowLiveUnhealthyAdminTarget: true,
+      assertionContext: { requestId: "shutdown-drained" }
+    });
+    assert.equal(result.ok, true);
+    assert.equal(result.shutdown_armed, true);
+    assert.equal(result.endpoint.instanceId, drained.id);
+    assert.equal(result.endpoint.healthy, false);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test("GameAdminClient live-unhealthy discovery remains shutdown-only", async () => {
+  const drained = gameServerInstance("game-server-drained", "127.0.0.1", 7500);
+  drained.healthy = false;
+  const client = new GameAdminClient(
+    { registryDiscoveryEnabled: true, registryDiscoveryRequired: true },
+    createDiscoveryRedis([drained])
+  );
+  const options = {
+    targetInstanceId: drained.id,
+    requireRegistryTarget: true,
+    allowLiveUnhealthyAdminTarget: true
+  };
+
+  for (const operation of [
+    () => client.updateConfig("drain_mode", "off", options),
+    () => client.broadcast("title", "content", "System", options),
+    () => client.sendItem("character-1", "item-1", 1, "test", options),
+    () => client.kickPlayer("player-1", "test", options),
+    () => client.banPlayer("player-1", 60, "test", options)
+  ]) {
+    await assert.rejects(operation, { code: "GAME_SERVER_ADMIN_LIVE_DISCOVERY_FORBIDDEN" });
+  }
+  await assert.rejects(
+    client.updateConfig("drain_mode", "off", {
+      targetInstanceId: drained.id,
+      requireRegistryTarget: true
+    }),
+    { code: "GAME_SERVER_ADMIN_ENDPOINT_NOT_FOUND" }
+  );
+  await assert.rejects(
+    client.requestServerShutdown("test", {
+      requireRegistryTarget: true,
+      allowLiveUnhealthyAdminTarget: true
+    }),
+    { code: "GAME_SERVER_ADMIN_TARGET_REQUIRED" }
+  );
+});
+
+test("GameAdminClient live shutdown rejects expired heartbeat and unhealthy admin endpoint", async () => {
+  const expired = gameServerInstance("game-server-expired", "127.0.0.1", 7500);
+  expired.healthy = false;
+  const expiredRedis = createDiscoveryRedis([expired]);
+  expiredRedis.expireHeartbeat(expired.id);
+  const expiredClient = new GameAdminClient(
+    { registryDiscoveryEnabled: true, registryDiscoveryRequired: true, registryDiscoveryCacheTtlMs: 0 },
+    expiredRedis
+  );
+  const options = {
+    targetInstanceId: expired.id,
+    requireRegistryTarget: true,
+    allowLiveUnhealthyAdminTarget: true,
+    assertionContext: {}
+  };
+  await assert.rejects(
+    expiredClient.requestServerShutdown("test", options),
+    { code: "GAME_SERVER_ADMIN_ENDPOINT_NOT_FOUND" }
+  );
+
+  const badEndpoint = gameServerInstance("game-server-bad-admin", "127.0.0.1", 7501);
+  badEndpoint.healthy = false;
+  badEndpoint.endpoints[0].healthy = false;
+  const badClient = new GameAdminClient(
+    { registryDiscoveryEnabled: true, registryDiscoveryRequired: true, registryDiscoveryCacheTtlMs: 0 },
+    createDiscoveryRedis([badEndpoint])
+  );
+  await assert.rejects(
+    badClient.requestServerShutdown("test", { ...options, targetInstanceId: badEndpoint.id }),
+    { code: "GAME_SERVER_ADMIN_ENDPOINT_NOT_FOUND" }
   );
 });
 

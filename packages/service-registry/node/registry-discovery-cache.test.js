@@ -134,6 +134,45 @@ test("RegistryDiscoveryClient separates service and endpoint cache keys", async 
   assert.equal(redis.stats.pipelineCount, 2);
 });
 
+test("RegistryDiscoveryClient isolates live-unhealthy cache from healthy discovery", async () => {
+  const redis = createRedisCapture();
+  const drained = createInstance("game-server", "game-drained", "admin", 7500);
+  drained.healthy = false;
+  redis.addInstance("", "game-server", drained);
+  const client = new RegistryDiscoveryClient(redis, { discoveryCacheTtlMs: 1000 });
+
+  assert.deepEqual(await client.discoverInstances("game-server"), []);
+  assert.deepEqual((await client.discoverLiveInstances("game-server")).map(({ id, healthy }) => [id, healthy]), [
+    ["game-drained", false]
+  ]);
+  assert.equal(redis.stats.pipelineCount, 2);
+
+  assert.deepEqual(await client.discoverInstances("game-server"), []);
+  assert.equal((await client.discoverLiveInstances("game-server")).length, 1);
+  assert.equal(redis.stats.pipelineCount, 2);
+});
+
+test("RegistryDiscoveryClient live discovery still rejects expired heartbeat", async () => {
+  const redis = createRedisCapture();
+  const drained = createInstance("game-server", "game-expired", "admin", 7500);
+  drained.healthy = false;
+  redis.addInstance("", "game-server", drained);
+  redis.keys.delete(registryHeartbeatKey("", "game-server", drained.id));
+  const client = new RegistryDiscoveryClient(redis, { discoveryCacheTtlMs: 0 });
+
+  assert.deepEqual(await client.discoverLiveInstances("game-server"), []);
+});
+
+test("RegistryDiscoveryClient live discovery rejects mismatched service identity", async () => {
+  const redis = createRedisCapture();
+  const mismatched = createInstance("chat-server", "game-mismatched", "admin", 7500);
+  mismatched.healthy = false;
+  redis.addInstance("", "game-server", mismatched);
+  const client = new RegistryDiscoveryClient(redis, { discoveryCacheTtlMs: 0 });
+
+  assert.deepEqual(await client.discoverLiveInstances("game-server"), []);
+});
+
 test("RegistryDiscoveryClient separates registry key prefixes", async () => {
   const redis = createRedisCapture();
   redis.addInstance("", "game-server", createInstance("game-server", "game-a", "admin", 7500));

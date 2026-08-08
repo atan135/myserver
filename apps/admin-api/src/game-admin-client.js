@@ -2,7 +2,7 @@ import net from "node:net";
 
 import { discoveryLogContext, recordDiscoveryMetric } from "../../../packages/service-registry/node/registry-schema.js";
 import { log } from "./logger.js";
-import { discoverGameServerAdminEndpoints } from "./registry-client.js";
+import { discoverGameServerAdminEndpoints, discoverLiveGameServerAdminEndpoints } from "./registry-client.js";
 
 const MAGIC = 0xcafe;
 const VERSION = 1;
@@ -31,6 +31,7 @@ const MESSAGE_TYPE = {
 };
 const ACTOR_PATTERN = /^[A-Za-z0-9._@-]{1,128}$/;
 let nextSeqValue = 1;
+const SHUTDOWN_LIVE_DISCOVERY_CAPABILITY = Symbol("shutdown-live-admin-discovery");
 
 function encodePacket(messageType, seq, body) {
   const header = Buffer.alloc(HEADER_LEN);
@@ -469,8 +470,21 @@ export class GameAdminClient {
     this.assertionService = assertionService;
   }
 
-  async listAdminEndpoints() {
+  async listAdminEndpoints(options = {}, capability = null) {
+    const allowLiveUnhealthyAdminTarget = options.allowLiveUnhealthyAdminTarget === true;
+    if (allowLiveUnhealthyAdminTarget && capability !== SHUTDOWN_LIVE_DISCOVERY_CAPABILITY) {
+      throw createAdminError(
+        "GAME_SERVER_ADMIN_LIVE_DISCOVERY_FORBIDDEN",
+        "live unhealthy game-server discovery is restricted to shutdown"
+      );
+    }
     if (!this.config.registryDiscoveryEnabled) {
+      if (allowLiveUnhealthyAdminTarget) {
+        throw createAdminError(
+          "SERVICE_DISCOVERY_REQUIRED",
+          "live unhealthy game-server discovery requires the service registry"
+        );
+      }
       if (this.config.registryDiscoveryRequired || !this.config.localDiscoveryFallbackEnabled) {
         logDiscovery("warn", "registry.discovery_fallback_forbidden", {
           source: "registry",
@@ -512,10 +526,25 @@ export class GameAdminClient {
       );
     }
 
-    return discoverGameServerAdminEndpoints(this.redis, this.config);
+    return allowLiveUnhealthyAdminTarget
+      ? discoverLiveGameServerAdminEndpoints(this.redis, this.config)
+      : discoverGameServerAdminEndpoints(this.redis, this.config);
   }
 
-  async resolveAdminEndpoint(options = {}) {
+  async resolveAdminEndpoint(options = {}, capability = null) {
+    const allowLiveUnhealthyAdminTarget = options.allowLiveUnhealthyAdminTarget === true;
+    if (allowLiveUnhealthyAdminTarget && capability !== SHUTDOWN_LIVE_DISCOVERY_CAPABILITY) {
+      throw createAdminError(
+        "GAME_SERVER_ADMIN_LIVE_DISCOVERY_FORBIDDEN",
+        "live unhealthy game-server discovery is restricted to shutdown"
+      );
+    }
+    if (allowLiveUnhealthyAdminTarget && (!options.requireRegistryTarget || !normalizeTargetInstanceId(options.targetInstanceId))) {
+      throw createAdminError(
+        "GAME_SERVER_ADMIN_TARGET_REQUIRED",
+        "live unhealthy shutdown discovery requires an exact registry target"
+      );
+    }
     if (options.requireRegistryTarget && options.endpoint) {
       throw createAdminError(
         "GAME_SERVER_ADMIN_DIRECT_ENDPOINT_FORBIDDEN",
@@ -526,7 +555,7 @@ export class GameAdminClient {
       return options.endpoint;
     }
 
-    const endpoints = await this.listAdminEndpoints();
+    const endpoints = await this.listAdminEndpoints(options, capability);
 
     if (endpoints.length === 0) {
       throw createAdminError(
@@ -544,7 +573,11 @@ export class GameAdminClient {
           `game-server admin target instance not found: ${targetInstanceId}`
         );
       }
-      if (options.requireRegistryTarget && (selected.fallback || selected.source !== "registry" || selected.healthy === false)) {
+      const invalidRegistryTarget = selected.fallback || selected.source !== "registry" ||
+        (allowLiveUnhealthyAdminTarget
+          ? selected.endpointHealthy !== true || selected.reason !== "live_admin_control"
+          : selected.healthy === false);
+      if (options.requireRegistryTarget && invalidRegistryTarget) {
         throw createAdminError(
           "GAME_SERVER_ADMIN_TARGET_NOT_FOUND",
           `healthy registry game-server admin target not found: ${targetInstanceId}`
@@ -619,7 +652,10 @@ export class GameAdminClient {
 
   async requestServerShutdown(reason, options = {}) {
     const payload = encodeRequestServerShutdownReq(reason);
-    const endpoint = await this.resolveAdminEndpoint({ ...options, requireExplicitTarget: true });
+    const endpoint = await this.resolveAdminEndpoint(
+      { ...options, requireExplicitTarget: true },
+      SHUTDOWN_LIVE_DISCOVERY_CAPABILITY
+    );
     try {
       const requestOptions = await this.writeRequestOptions(
         endpoint,
