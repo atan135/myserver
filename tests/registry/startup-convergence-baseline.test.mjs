@@ -283,6 +283,22 @@ test("target services publish unhealthy until stable readiness and recover regis
     assert.match(contents, /RegistryClient::new_lazy/);
     assert.match(contents, /spawn_registry_publication/);
     assert.doesNotMatch(contents, /start_heartbeat_task_with_observer/);
-    assert.match(contents, /HealthState::try_from_env/);
+    assert.match(
+      contents,
+      /HealthState::try_from_env|HealthConfig::try_from_env[\s\S]+HealthState::new/
+    );
+  }
+});
+
+test("lease-owning production services handle Docker SIGTERM gracefully", () => {
+  for (const relativePath of [
+    "apps/match-service/src/server.rs",
+    "apps/chat-server/src/chat_server.rs"
+  ]) {
+    const contents = source(relativePath);
+    assert.match(contents, /async fn shutdown_signal\(\)/);
+    assert.match(contents, /SignalKind::terminate\(\)/);
+    assert.match(contents, /tokio::signal::ctrl_c\(\)/);
+    assert.ok((contents.match(/shutdown_signal\(\)/g) ?? []).length >= 2);
   }
 });

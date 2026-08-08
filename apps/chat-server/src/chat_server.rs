@@ -557,11 +557,13 @@ pub async fn run(
     let readiness_task = service_registry::readiness::spawn_from_env("chat-server").await?;
 
     let mut lease_lost = false;
+    let shutdown = shutdown_signal();
+    tokio::pin!(shutdown);
     loop {
         let accept_result = tokio::select! {
             result = listener.accept() => Some((Transport::Tcp, result)),
             result = accept_optional(ws_listener.as_ref()) => Some((Transport::WebSocket, result)),
-            _ = tokio::signal::ctrl_c() => None,
+            _ = &mut shutdown => None,
             changed = lease_loss_rx.changed() => {
                 if changed.is_err() || *lease_loss_rx.borrow_and_update() {
                     lease_lost = true;
@@ -729,6 +731,23 @@ pub async fn run(
         Err(std::io::Error::other("global id worker lease lost").into())
     } else {
         Ok(())
+    }
+}
+
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        let mut terminate =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .expect("failed to install SIGTERM handler");
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = terminate.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
     }
 }
 

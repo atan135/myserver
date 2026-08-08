@@ -114,10 +114,7 @@ pub async fn run(
                     warn!("global id worker lease lost, stopping match-service gRPC server");
                 } else {
                     tokio::select! {
-                        result = tokio::signal::ctrl_c() => {
-                            if let Err(error) = result {
-                                warn!(error = %error, "failed to wait for shutdown signal");
-                            }
+                        _ = shutdown_signal() => {
                             info!("shutdown signal received, stopping match-service gRPC server");
                         }
                         changed = shutdown_lease_loss_rx.changed() => {
@@ -142,6 +139,23 @@ pub async fn run(
         Err(std::io::Error::other("global id worker lease lost").into())
     } else {
         result
+    }
+}
+
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        let mut terminate =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .expect("failed to install SIGTERM handler");
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = terminate.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
     }
 }
 
