@@ -4,7 +4,9 @@ use std::time::{Duration, Instant};
 use interprocess::local_socket::traits::tokio::Stream as _;
 use interprocess::local_socket::{GenericFilePath, ToFsName, tokio::Stream};
 use prost::Message;
-use service_registry::{RegistryClient, ServiceInstance, record_discovery_metric};
+use service_registry::{
+    HealthState, RegistryClient, ServiceInstance, StartupErrorCode, record_discovery_metric,
+};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Mutex;
 
@@ -24,13 +26,23 @@ const ERROR_RES: u16 = 9000;
 pub struct GameServerClient {
     config: Config,
     discovery: Arc<GameServerDiscovery>,
+    health_state: Option<HealthState>,
 }
 
 impl GameServerClient {
     pub fn new(config: &Config) -> Self {
         Self {
             config: config.clone(),
-            discovery: Arc::new(GameServerDiscovery::new(config)),
+            discovery: Arc::new(GameServerDiscovery::new(config, None)),
+            health_state: None,
+        }
+    }
+
+    pub fn new_with_health(config: &Config, health_state: HealthState) -> Self {
+        Self {
+            config: config.clone(),
+            discovery: Arc::new(GameServerDiscovery::new(config, Some(health_state.clone()))),
+            health_state: Some(health_state),
         }
     }
 
@@ -43,6 +55,7 @@ impl GameServerClient {
     ) -> Result<String, MatchError> {
         let socket_name = self.resolve_internal_socket_name(match_id, mode).await?;
         let mut stream = connect_local_socket(&socket_name).await.map_err(|error| {
+            self.mark_internal_degraded(StartupErrorCode::DependencyPending);
             MatchError::RoomCreateFailed(format!(
                 "connect internal socket {socket_name} failed: {error}"
             ))
@@ -54,6 +67,7 @@ impl GameServerClient {
             self.config.game_internal_token.as_bytes(),
         );
         stream.write_all(&auth_packet).await.map_err(|error| {
+            self.mark_internal_degraded(StartupErrorCode::StartupPhaseFailure);
             MatchError::RoomCreateFailed(format!("write InternalAuthReq failed: {error}"))
         })?;
 
@@ -67,36 +81,15 @@ impl GameServerClient {
         let packet = encode_packet(CREATE_MATCHED_ROOM_REQ, 1, &body);
 
         stream.write_all(&packet).await.map_err(|error| {
+            self.mark_internal_degraded(StartupErrorCode::StartupPhaseFailure);
             MatchError::RoomCreateFailed(format!("write CreateMatchedRoomReq failed: {error}"))
         })?;
 
-        let response_packet = read_packet(&mut stream).await?;
-        match response_packet.msg_type {
-            CREATE_MATCHED_ROOM_RES => {
-                let response = CreateMatchedRoomRes::decode(response_packet.body.as_slice())
-                    .map_err(|error| {
-                        MatchError::RoomCreateFailed(format!(
-                            "decode CreateMatchedRoomRes failed: {error}"
-                        ))
-                    })?;
-
-                if response.ok {
-                    Ok(response.room_id)
-                } else {
-                    Err(MatchError::RoomCreateFailed(response.error_code))
-                }
-            }
-            ERROR_RES => {
-                let response =
-                    ErrorRes::decode(response_packet.body.as_slice()).map_err(|error| {
-                        MatchError::RoomCreateFailed(format!("decode ErrorRes failed: {error}"))
-                    })?;
-                Err(MatchError::RoomCreateFailed(response.error_code))
-            }
-            other => Err(MatchError::RoomCreateFailed(format!(
-                "unexpected response message type: {other}"
-            ))),
-        }
+        let response_packet = read_packet(&mut stream).await.map_err(|error| {
+            self.mark_internal_degraded(StartupErrorCode::StartupPhaseFailure);
+            error
+        })?;
+        self.handle_create_room_response(response_packet)
     }
 
     async fn resolve_internal_socket_name(
@@ -108,6 +101,7 @@ impl GameServerClient {
 
         if !self.config.registry_enabled {
             if discovery_required || !self.config.local_discovery_fallback_enabled {
+                self.mark_internal_degraded(StartupErrorCode::RegistryUnavailable);
                 record_discovery_metric(
                     &self.config.game_server_service_name,
                     "internal",
@@ -180,6 +174,33 @@ impl GameServerClient {
             }
         }
     }
+
+    fn mark_internal_ready(&self) {
+        if let Some(health_state) = &self.health_state {
+            health_state.mark_ready("game-server", "internal");
+        }
+    }
+
+    fn mark_internal_degraded(&self, error_code: StartupErrorCode) {
+        if let Some(health_state) = &self.health_state {
+            health_state.mark_degraded("game-server", "internal", error_code);
+        }
+    }
+
+    fn handle_create_room_response(
+        &self,
+        response_packet: PacketFrame,
+    ) -> Result<String, MatchError> {
+        let outcome = decode_create_room_response(response_packet).map_err(|error| {
+            self.mark_internal_degraded(StartupErrorCode::StartupPhaseFailure);
+            error
+        })?;
+        self.mark_internal_ready();
+        match outcome {
+            CreateRoomResponseOutcome::Accepted(room_id) => Ok(room_id),
+            CreateRoomResponseOutcome::Rejected(error) => Err(error),
+        }
+    }
 }
 
 struct GameServerDiscovery {
@@ -193,10 +214,11 @@ struct GameServerDiscovery {
     target_zone: String,
     registry_client: Mutex<Option<Arc<RegistryClient>>>,
     cache: Mutex<DiscoveryCache>,
+    health_state: Option<HealthState>,
 }
 
 impl GameServerDiscovery {
-    fn new(config: &Config) -> Self {
+    fn new(config: &Config, health_state: Option<HealthState>) -> Self {
         Self {
             registry_url: config.registry_url.clone(),
             registry_key_prefix: config.registry_key_prefix.clone(),
@@ -208,6 +230,7 @@ impl GameServerDiscovery {
             target_zone: config.game_server_target_zone.clone(),
             registry_client: Mutex::new(None),
             cache: Mutex::new(DiscoveryCache::default()),
+            health_state,
         }
     }
 
@@ -219,7 +242,12 @@ impl GameServerDiscovery {
     ) -> Result<String, MatchError> {
         let now = Instant::now();
         if let Some(candidates) = self.cache.lock().await.get(now) {
-            return select_socket(&candidates, match_id, mode, &self.target_zone);
+            return select_socket(&candidates, match_id, mode, &self.target_zone).map_err(
+                |error| {
+                    self.mark_internal_degraded(StartupErrorCode::DependencyPending);
+                    error
+                },
+            );
         }
 
         let client = self.registry_client().await?;
@@ -227,6 +255,7 @@ impl GameServerDiscovery {
             .discover(&self.game_server_service_name)
             .await
             .map_err(|error| {
+                self.mark_internal_degraded(StartupErrorCode::RegistryUnavailable);
                 record_discovery_metric(
                     &self.game_server_service_name,
                     "internal",
@@ -241,6 +270,7 @@ impl GameServerDiscovery {
         let candidates = internal_socket_candidates(&instances);
 
         if candidates.is_empty() {
+            self.mark_internal_degraded(StartupErrorCode::DependencyPending);
             record_discovery_metric(
                 &self.game_server_service_name,
                 "internal",
@@ -267,6 +297,7 @@ impl GameServerDiscovery {
         match select_socket(&candidates, match_id, mode, &self.target_zone) {
             Ok(socket) => Ok(socket),
             Err(error) if !discovery_required => {
+                self.mark_internal_degraded(StartupErrorCode::DependencyPending);
                 record_discovery_metric(
                     &self.game_server_service_name,
                     "internal",
@@ -285,7 +316,10 @@ impl GameServerDiscovery {
                 );
                 Ok(self.fallback_socket_name.clone())
             }
-            Err(error) => Err(error),
+            Err(error) => {
+                self.mark_internal_degraded(StartupErrorCode::DependencyPending);
+                Err(error)
+            }
         }
     }
 
@@ -302,6 +336,7 @@ impl GameServerDiscovery {
         )
         .await
         .map_err(|error| {
+            self.mark_internal_degraded(StartupErrorCode::RegistryUnavailable);
             record_discovery_metric(
                 &self.game_server_service_name,
                 "internal",
@@ -315,6 +350,12 @@ impl GameServerDiscovery {
         let client = Arc::new(client.with_key_prefix(self.registry_key_prefix.clone()));
         *guard = Some(client.clone());
         Ok(client)
+    }
+
+    fn mark_internal_degraded(&self, error_code: StartupErrorCode) {
+        if let Some(health_state) = &self.health_state {
+            health_state.mark_degraded("game-server", "internal", error_code);
+        }
     }
 }
 
@@ -510,6 +551,44 @@ struct PacketFrame {
     body: Vec<u8>,
 }
 
+enum CreateRoomResponseOutcome {
+    Accepted(String),
+    Rejected(MatchError),
+}
+
+fn decode_create_room_response(
+    response_packet: PacketFrame,
+) -> Result<CreateRoomResponseOutcome, MatchError> {
+    match response_packet.msg_type {
+        CREATE_MATCHED_ROOM_RES => {
+            let response =
+                CreateMatchedRoomRes::decode(response_packet.body.as_slice()).map_err(|error| {
+                    MatchError::RoomCreateFailed(format!(
+                        "decode CreateMatchedRoomRes failed: {error}"
+                    ))
+                })?;
+            if response.ok {
+                Ok(CreateRoomResponseOutcome::Accepted(response.room_id))
+            } else {
+                Ok(CreateRoomResponseOutcome::Rejected(
+                    MatchError::RoomCreateFailed(response.error_code),
+                ))
+            }
+        }
+        ERROR_RES => {
+            let response = ErrorRes::decode(response_packet.body.as_slice()).map_err(|error| {
+                MatchError::RoomCreateFailed(format!("decode ErrorRes failed: {error}"))
+            })?;
+            Ok(CreateRoomResponseOutcome::Rejected(
+                MatchError::RoomCreateFailed(response.error_code),
+            ))
+        }
+        other => Err(MatchError::RoomCreateFailed(format!(
+            "unexpected response message type: {other}"
+        ))),
+    }
+}
+
 async fn connect_local_socket(name: &str) -> std::io::Result<Stream> {
     Stream::connect(to_name(name)?).await
 }
@@ -605,7 +684,10 @@ fn parse_header(header: [u8; HEADER_LEN]) -> Result<(u16, usize), MatchError> {
 mod tests {
     use super::*;
     use crate::config::ModeConfig;
-    use service_registry::{get_discovery_metrics_snapshot, reset_discovery_metrics};
+    use service_registry::{
+        DependencySpec, DependencyStatus, HealthConfig, get_discovery_metrics_snapshot,
+        reset_discovery_metrics,
+    };
     use std::collections::HashMap;
 
     fn candidate(
@@ -1025,6 +1107,104 @@ mod tests {
             .to_string();
 
         assert!(error.contains("REGISTRY_ENABLED=false"));
+    }
+
+    #[tokio::test]
+    async fn request_path_updates_optional_internal_capability() {
+        let mut config = test_config();
+        config.discovery_required = true;
+        config.registry_enabled = false;
+        let health = HealthState::new(
+            "match-service",
+            "match-test",
+            HealthConfig::for_tests(100, 0, 100),
+            [DependencySpec::optional("game-server", "internal")],
+        );
+        let client = GameServerClient::new_with_health(&config, health.clone());
+
+        client
+            .resolve_internal_socket_name("match-1", "1v1")
+            .await
+            .expect_err("strict discovery should reject local fallback");
+        let degraded = health.snapshot();
+        assert_eq!(degraded.dependencies[0].status, DependencyStatus::Degraded);
+        assert_eq!(
+            degraded.dependencies[0].error_code,
+            Some(StartupErrorCode::RegistryUnavailable)
+        );
+        assert!(degraded.ready);
+
+        client.mark_internal_ready();
+        let recovered = health.snapshot();
+        assert_eq!(recovered.dependencies[0].status, DependencyStatus::Ready);
+        assert_eq!(recovered.dependencies[0].error_code, None);
+    }
+
+    #[test]
+    fn decoded_business_rejections_restore_internal_capability_to_ready() {
+        let config = test_config();
+        let health = HealthState::new(
+            "match-service",
+            "match-test",
+            HealthConfig::for_tests(100, 0, 100),
+            [DependencySpec::optional("game-server", "internal")],
+        );
+        let client = GameServerClient::new_with_health(&config, health.clone());
+        let frames = [
+            PacketFrame {
+                msg_type: CREATE_MATCHED_ROOM_RES,
+                body: encode_body(&CreateMatchedRoomRes {
+                    ok: false,
+                    room_id: String::new(),
+                    error_code: "ROOM_REJECTED".to_string(),
+                    snapshot: None,
+                }),
+            },
+            PacketFrame {
+                msg_type: ERROR_RES,
+                body: encode_body(&ErrorRes {
+                    error_code: "BUSINESS_REJECTED".to_string(),
+                    message: "request rejected".to_string(),
+                }),
+            },
+        ];
+
+        for frame in frames {
+            client.mark_internal_degraded(StartupErrorCode::StartupPhaseFailure);
+            let error = client
+                .handle_create_room_response(frame)
+                .expect_err("business rejection should retain its MatchError")
+                .to_string();
+            assert!(error.contains("REJECTED"));
+            let dependency = &health.snapshot().dependencies[0];
+            assert_eq!(dependency.status, DependencyStatus::Ready);
+            assert_eq!(dependency.error_code, None);
+        }
+    }
+
+    #[test]
+    fn invalid_or_unknown_response_keeps_internal_capability_degraded() {
+        let config = test_config();
+        let health = HealthState::new(
+            "match-service",
+            "match-test",
+            HealthConfig::for_tests(100, 0, 100),
+            [DependencySpec::optional("game-server", "internal")],
+        );
+        let client = GameServerClient::new_with_health(&config, health.clone());
+
+        client
+            .handle_create_room_response(PacketFrame {
+                msg_type: CREATE_MATCHED_ROOM_RES,
+                body: vec![0xff],
+            })
+            .expect_err("invalid protobuf must remain a protocol failure");
+        let dependency = &health.snapshot().dependencies[0];
+        assert_eq!(dependency.status, DependencyStatus::Degraded);
+        assert_eq!(
+            dependency.error_code,
+            Some(StartupErrorCode::StartupPhaseFailure)
+        );
     }
 
     #[tokio::test]

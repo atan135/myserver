@@ -36,7 +36,10 @@ use route_store::{
     ProxyRouteStore, RedisRouteStorePersistence, UpstreamHealthState, UpstreamOperationState,
     UpstreamRoute, run_redis_route_store_update_listener,
 };
-use service_registry::{RegistryClient, ServiceEndpoint, ServiceInstance};
+use service_registry::{
+    DependencySpec, HealthState, HeartbeatOutcome, RegistryClient, ServiceEndpoint,
+    ServiceInstance, StartupErrorCode,
+};
 use tokio::sync::RwLock;
 use tracing_appender::rolling;
 use tracing_subscriber::fmt;
@@ -95,6 +98,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     config
         .validate_upstream_discovery()
         .map_err(std::io::Error::other)?;
+
+    let upstream_dependency = if config.registry_enabled {
+        DependencySpec::required("game-server", "proxy-local")
+    } else {
+        DependencySpec::required_without_stale_detection("game-server", "proxy-local")
+    };
+    let mut health_dependencies = vec![
+        DependencySpec::local_required("bootstrap"),
+        DependencySpec::local_required("frontends"),
+        upstream_dependency,
+    ];
+    if config.registry_enabled {
+        health_dependencies.push(DependencySpec::required_without_stale_detection(
+            "service-registry",
+            "self-registration",
+        ));
+    }
+    let health_state = HealthState::try_from_env(
+        &config.service_name,
+        &config.service_instance_id,
+        health_dependencies,
+    )?;
+    let health_task =
+        service_registry::readiness::spawn_health_from_env(health_state.clone()).await?;
 
     // 启动 metrics 上报任务
     let metrics_nats_url = config.nats_url.clone();
@@ -199,6 +226,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config.redis_key_prefix.clone(),
         std::time::Duration::from_millis(config.redis_blocklist_cache_ttl_ms),
     )?);
+    health_state.mark_ready("local-runtime", "bootstrap");
 
     let connection_count = Arc::new(AtomicU64::new(0));
     let maintenance = Arc::new(RwLock::new(false));
@@ -217,11 +245,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let instance = build_service_instance(&config);
 
                 if let Err(error) = client.register(&instance).await {
+                    health_state.mark_degraded(
+                        "service-registry",
+                        "self-registration",
+                        StartupErrorCode::RegistryUnavailable,
+                    );
                     tracing::error!(error = %error, "failed to register game-proxy service");
                     if registry_failure_is_fatal() {
                         return Err(std::io::Error::other(error.to_string()).into());
                     }
                 } else {
+                    health_state.mark_ready("service-registry", "self-registration");
                     tracing::info!(
                         service = %config.service_name,
                         instance = %config.service_instance_id,
@@ -233,6 +267,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Some(client)
             }
             Err(error) => {
+                health_state.mark_degraded(
+                    "service-registry",
+                    "self-registration",
+                    StartupErrorCode::RegistryUnavailable,
+                );
                 tracing::error!(error = %error, "failed to create registry client");
                 if registry_failure_is_fatal() {
                     return Err(std::io::Error::other(error.to_string()).into());
@@ -244,9 +283,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tracing::info!("service registry disabled; using local static upstream fallback");
         None
     };
-    let heartbeat_handle = registry_client
-        .as_ref()
-        .map(|client| client.start_heartbeat_task());
+    let heartbeat_health = health_state.clone();
+    let heartbeat_handle = registry_client.as_ref().map(|client| {
+        client.start_heartbeat_task_with_observer(move |outcome| match outcome {
+            HeartbeatOutcome::Succeeded => {
+                heartbeat_health.mark_ready("service-registry", "self-registration");
+            }
+            HeartbeatOutcome::Failed => {
+                heartbeat_health.mark_degraded(
+                    "service-registry",
+                    "self-registration",
+                    StartupErrorCode::RegistryUnavailable,
+                );
+            }
+        })
+    });
 
     let admin_bind_addr = config.admin_bind_addr();
     let admin_auth_config = admin_server::AdminAuthConfig::with_scoped_tokens(
@@ -303,8 +354,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         blocklist_checker,
         connection_count,
         maintenance,
+        health_state.clone(),
     )
     .await;
+
+    health_state.mark_shutting_down();
 
     admin_task.abort();
     let _ = admin_task.await;
@@ -325,6 +379,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "game-proxy service deregistered from registry"
             );
         }
+    }
+    if let Some(health_task) = health_task {
+        health_task.abort();
+        let _ = health_task.await;
     }
     result
 }

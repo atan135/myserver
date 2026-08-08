@@ -132,7 +132,11 @@ docker compose --env-file compose.production.env -f compose.production.yml \
   up -d caddy
 ```
 
-`game-server`、`game-proxy` 和 `chat-server` 分别在 Docker internal network 的 `7600`、`7601`、`7602` 提供 `GET /readyz`。它们没有宿主机端口映射，只用于 postflight；Node HTTP 服务使用自身 `/healthz`。postflight 失败时，不要启动 Caddy 或开放 `4000/UDP`、`80/TCP`、`443/TCP`，也不要手工修改 `_sqlx_migrations`。
+`game-server`、`game-proxy`、`chat-server` 和 `match-service` 分别在 Docker internal network 的 `7600`、`7601`、`7602`、`7603` 提供健康监听。前三个已纳入现有数据库 postflight URL 清单；`match-service:7603/readyz` 在统一应用发布收敛门禁落地前需由发布侧单独核验。`GET /livez` 只证明 runtime 存活，发布与接流量判断必须使用 `GET /readyz`。这些端口不映射到宿主机公网；Node HTTP 服务使用自身 `/healthz`。任一 required readiness 失败时，不要启动 Caddy 或开放 `4000/UDP`、`80/TCP`、`443/TCP`，也不要手工修改 `_sqlx_migrations`。
+
+三个 dependency-aware Rust 服务的 production 窗口固定为：启动收敛 `120s`、Ready 稳定 `10s`、依赖 stale `60s`。启动收敛超时后进程保持运行且 `/readyz` 持续返回 503，由发布系统停止接流量并判定回滚；不得通过容器 restart loop 重新碰运气。依赖恢复后必须连续稳定 10 秒才可重新接流量。
+
+窗口变量只在未设置时使用默认值。发布配置若包含非数字、零、溢出值、超过 `600/120/600` 秒上限，或不满足 `stability <= convergence`、`stale > stability`，服务必须启动失败；不得通过删掉错误日志或依赖默认回退继续发布。
 
 `initialize` 只用于首次上线，且会先验证五个逻辑库均不存在 `_sqlx_migrations`、不存在业务表。它随后通过同一个受控 runner 写入 schema 与 SQLx history，并执行不要求服务 readiness 的数据库 postflight。任一库已有 history 或业务表时它都会拒绝；这类环境必须改用常规的 `preflight` 和 `apply`，不得以初始化命令绕过迁移审计。
 

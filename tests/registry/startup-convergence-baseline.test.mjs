@@ -156,3 +156,55 @@ test("proxy source routes initial endpoint count through the tested validator", 
   assert.equal(entry.currentBehavior.processOutcome, "error_return");
   assert.deepEqual(entry.condition.eligibleEndpoints, []);
 });
+
+test("stage 2 health contract keeps the required graph acyclic and diagnostics address-free", () => {
+  const health = source("packages/service-registry/src/health.rs");
+  const game = source("apps/game-server/src/main.rs");
+  const proxy = source("apps/game-proxy/src/main.rs");
+  const match = source("apps/match-service/src/main.rs");
+
+  assert.match(game, /DependencySpec::required\("match-service", "grpc"\)/);
+  assert.match(proxy, /DependencySpec::required\("game-server", "proxy-local"\)/);
+  assert.match(match, /DependencySpec::optional\("game-server", "internal"\)/);
+  assert.match(health, /last_error_code: Option<StartupErrorCode>/);
+  assert.doesNotMatch(health, /pub (?:host|port|socket|url|token|password|credential):/i);
+});
+
+test("production config gives all dependency-aware services bounded health windows", () => {
+  const compose = source("deploy/docker/compose.production.yml");
+  const services = [
+    ["game-server", "7600"],
+    ["match-service", "7603"],
+    ["game-proxy", "7601"]
+  ];
+
+  for (const [service, port] of services) {
+    const start = indexOfOrFail(compose, `  ${service}:`, `${service} compose block`);
+    const remainder = compose.slice(start + 3);
+    const nextOffset = remainder.search(/^  [a-z0-9][a-z0-9-]*:\r?$/m);
+    const next = nextOffset === -1 ? compose.length : start + 3 + nextOffset;
+    const block = compose.slice(start, next);
+    assert.match(block, new RegExp(`MYSERVER_HEALTH_BIND_ADDR: 0\\.0\\.0\\.0:${port}`));
+    assert.match(block, /MYSERVER_STARTUP_CONVERGENCE_WINDOW_SECS: "120"/);
+    assert.match(block, /MYSERVER_READY_STABILITY_WINDOW_SECS: "10"/);
+    assert.match(block, /MYSERVER_DEPENDENCY_STALE_WINDOW_SECS: "60"/);
+  }
+});
+
+test("target services observe heartbeat outcomes without exposing raw errors", () => {
+  const registry = source("packages/service-registry/src/client.rs");
+  assert.match(registry, /pub enum HeartbeatOutcome\s*\{\s*Succeeded,\s*Failed/);
+  assert.match(registry, /pub fn start_heartbeat_task\(&self\)[\s\S]+?start_heartbeat_task_with_observer/);
+
+  for (const entry of [
+    "apps/game-server/src/main.rs",
+    "apps/game-proxy/src/main.rs",
+    "apps/match-service/src/main.rs"
+  ]) {
+    const contents = source(entry);
+    assert.match(contents, /start_heartbeat_task_with_observer/);
+    assert.match(contents, /HeartbeatOutcome::Failed[\s\S]+?StartupErrorCode::RegistryUnavailable/);
+    assert.match(contents, /HeartbeatOutcome::Succeeded[\s\S]+?mark_ready\("service-registry", "self-registration"\)/);
+    assert.match(contents, /HealthState::try_from_env/);
+  }
+});

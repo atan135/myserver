@@ -223,7 +223,10 @@ write_secret_file game-server.env \
   "ADMIN_ASSERTION_PUBLIC_KEYS_JSON={\"admin-api-v1\":\"$admin_assertion_public_key\"}" \
   "MAIL_GRANT_ASSERTION_PUBLIC_KEYS_JSON={\"mail-service-v1\":\"$mail_assertion_public_key\"}" \
   "GLOBAL_ID_ORIGIN_ID=$origin_id" \
-  'GLOBAL_ID_WORKER_ID=5'
+  'GLOBAL_ID_WORKER_ID=5' \
+  'MYSERVER_STARTUP_CONVERGENCE_WINDOW_SECS=120' \
+  'MYSERVER_READY_STABILITY_WINDOW_SECS=10' \
+  'MYSERVER_DEPENDENCY_STALE_WINDOW_SECS=60'
 
 write_secret_file game-proxy.env \
   "REDIS_URL=$redis_url" \
@@ -233,7 +236,10 @@ write_secret_file game-proxy.env \
   "TICKET_SECRET=$ticket_secret" \
   "PROXY_ADMIN_TOKEN=$proxy_admin_token" \
   "PROXY_ADMIN_READ_TOKEN=$proxy_admin_read_token" \
-  "ADMIN_ASSERTION_PUBLIC_KEYS_JSON={\"admin-api-v1\":\"$admin_assertion_public_key\"}"
+  "ADMIN_ASSERTION_PUBLIC_KEYS_JSON={\"admin-api-v1\":\"$admin_assertion_public_key\"}" \
+  'MYSERVER_STARTUP_CONVERGENCE_WINDOW_SECS=120' \
+  'MYSERVER_READY_STABILITY_WINDOW_SECS=10' \
+  'MYSERVER_DEPENDENCY_STALE_WINDOW_SECS=60'
 
 write_secret_file chat-server.env \
   "REDIS_URL=$redis_url" \
@@ -250,7 +256,10 @@ write_secret_file match-service.env \
   "NATS_URL=$nats_url" \
   "GAME_INTERNAL_TOKEN=$game_internal_token" \
   "GLOBAL_ID_ORIGIN_ID=$origin_id" \
-  'GLOBAL_ID_WORKER_ID=6'
+  'GLOBAL_ID_WORKER_ID=6' \
+  'MYSERVER_STARTUP_CONVERGENCE_WINDOW_SECS=120' \
+  'MYSERVER_READY_STABILITY_WINDOW_SECS=10' \
+  'MYSERVER_DEPENDENCY_STALE_WINDOW_SECS=60'
 
 printf 'Created %s protected env files in %s for release %s.\n' \
   "${#files[@]}" "$secrets_dir" "$(sed -n 's/^RELEASE_ID=//p' "$release_dir/compose.production.env")"

@@ -8,6 +8,7 @@ use global_id::{
 };
 use interprocess::local_socket::traits::tokio::Listener as _;
 use serde_json::{Value, json};
+use service_registry::{HealthState, StartupErrorCode};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::{Notify, RwLock, mpsc, watch};
@@ -390,6 +391,7 @@ pub async fn run(
     config: &Config,
     db_store: PgAuditStore,
     config_tables: ConfigTableRuntime,
+    health_state: HealthState,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let tcp_listener = TcpListener::bind(config.bind_addr()).await?;
     let admin_listener = TcpListener::bind(config.admin_bind_addr()).await?;
@@ -398,6 +400,7 @@ pub async fn run(
             &config.local_socket_name,
             &config.internal_socket_name,
         )?;
+    health_state.mark_ready("local-runtime", "server-listeners");
     let redis_client = redis::Client::open(config.redis_url.clone())?;
     let mut global_id_redis = redis_client.get_multiplexed_async_connection().await?;
     let global_id_origin_id = u16::try_from(config.global_id_origin_id).map_err(|_| {
@@ -438,6 +441,7 @@ pub async fn run(
         lease_key = %worker_lease_key,
         "global id worker lease acquired"
     );
+    health_state.mark_ready("local-runtime", "worker-lease");
     let lease_renew_client = redis_client.clone();
     let lease_for_renewal = worker_lease.clone();
     let (lease_loss_tx, mut lease_loss_rx) = watch::channel(false);
@@ -481,10 +485,16 @@ pub async fn run(
     let match_client = crate::match_client::create_match_client_shared();
     let match_client_config = MatchClientConfig::from_env().await;
     if let Err(e) = init_match_client(&match_client, match_client_config.clone()).await {
+        health_state.mark_degraded("match-service", "grpc", StartupErrorCode::DependencyPending);
         tracing::error!(error = %e, "failed to connect to match-service, match notifications will be disabled");
+    } else {
+        health_state.mark_ready("match-service", "grpc");
     }
-    let match_client_rediscovery_task =
-        spawn_match_client_rediscovery(match_client.clone(), match_client_config.clone());
+    let match_client_rediscovery_task = spawn_match_client_rediscovery(
+        match_client.clone(),
+        match_client_config.clone(),
+        health_state.clone(),
+    );
 
     let item_uid_generator =
         crate::core::global_id::ItemUidGenerator::from_worker_lease(&worker_lease)?;
@@ -546,6 +556,7 @@ pub async fn run(
         title_service.clone(),
     );
     let character_push_service = crate::core::character_push::CharacterPushService::new();
+    health_state.mark_ready("local-runtime", "gameplay-stores");
 
     let player_registry: PlayerRegistry = PlayerRegistry::default();
 
@@ -633,8 +644,6 @@ pub async fn run(
         config.nats_url.clone(),
         player_registry,
     ));
-    let readiness_task = service_registry::readiness::spawn_from_env(&config.service_name).await?;
-
     let mut next_session_id: u64 = 1;
     let mut lease_lost = false;
 
@@ -687,10 +696,6 @@ pub async fn run(
     gm_broadcast_task.abort();
     let _ = gm_broadcast_task.await;
     if let Some(task) = match_client_rediscovery_task {
-        task.abort();
-        let _ = task.await;
-    }
-    if let Some(task) = readiness_task {
         task.abort();
         let _ = task.await;
     }

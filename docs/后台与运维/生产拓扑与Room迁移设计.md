@@ -115,7 +115,7 @@
 
 部署侧必须显式设置 `REGISTRY_ENABLED=true`、`DISCOVERY_REQUIRED=true`。应用进程启动后异步注册、发现并连接依赖：required endpoint 暂缺时保持进程存活和 not-ready，optional endpoint 暂缺时进入 degraded 并保留无关业务。发布系统统一等待全部 required readiness 和稳定窗口，而不是逐个启动并等待下一个服务。
 
-当前实现仍有首次 discovery fail-fast、过早注册 healthy 和资源清理不完整等差距。详细的当前控制流、依赖分类、状态机、稳定错误码和故障 fixture 见 [应用服务启动契约与故障基线](./应用服务启动契约与故障基线.md)。在这些差距完成改造前，已有顺序启动只能作为临时兼容措施，不能继续作为目标架构或生产正确性前提。
+第 2 阶段已为 `game-server`、`game-proxy`、`match-service` 接入共享 dependency state 和动态 `/livez`、`/readyz`，production 默认使用 120 秒启动收敛窗口、10 秒 Ready 稳定窗口和 60 秒依赖 stale 窗口。当前仍有首次 discovery fail-fast、过早注册 healthy 和资源清理不完整等差距。详细控制流、接口 schema、依赖分类、状态机、稳定错误码和故障 fixture 见 [应用服务启动契约与故障基线](./应用服务启动契约与故障基线.md)。在第 3 阶段消除首次发现退出边界前，已有顺序启动只能作为临时兼容措施，不能作为目标架构或生产正确性前提。
 
 ### 5.2 注册后接流量门禁
 
@@ -163,7 +163,7 @@ readiness 必须至少验证以下 registry 相关条件：
 
 Node 服务当前可能出现注册失败只打日志的情况，因此 readiness 必须兜底验证 registry 可见性，避免“进程已启动但自身或依赖不可发现”的实例接入流量。
 
-本节只定义健康检查必须验证的内容，不定义具体接口形态，不新增自动化测试，也不要求启动任何服务。
+当前三个 Rust 核心服务使用内网 `GET /livez` 和 `GET /readyz`：发布门禁只使用 `/readyz`，`/livez` 只用于区分进程存活与依赖未收敛。readiness 返回安全的结构化 dependency 状态，不返回连接地址、socket、URL 或凭据。production 监听端口分别为 `game-server:7600`、`game-proxy:7601`、`match-service:7603`，均不映射到宿主机公网。
 
 ### 5.4 测试/线上统一部署步骤
 

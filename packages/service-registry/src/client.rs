@@ -52,6 +52,12 @@ pub struct RegistryClient {
     discovery_cache: Mutex<DiscoveryCache>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HeartbeatOutcome {
+    Succeeded,
+    Failed,
+}
+
 #[derive(Clone, Debug)]
 pub struct DiscoverySnapshot {
     pub service_name: String,
@@ -300,6 +306,14 @@ impl RegistryClient {
 
     /// 启动心跳任务
     pub fn start_heartbeat_task(&self) -> tokio::task::JoinHandle<()> {
+        self.start_heartbeat_task_with_observer(|_| {})
+    }
+
+    /// 启动心跳任务，并以不含底层错误详情的结果通知调用方。
+    pub fn start_heartbeat_task_with_observer<F>(&self, observer: F) -> tokio::task::JoinHandle<()>
+    where
+        F: Fn(HeartbeatOutcome) + Send + Sync + 'static,
+    {
         let heartbeat_ttl = self.heartbeat_ttl_secs;
         let heartbeat_interval = self.heartbeat_interval_secs;
         let instance_ttl = self.instance_ttl_secs;
@@ -315,7 +329,7 @@ impl RegistryClient {
             let interval = heartbeat_interval;
 
             // 立即发送一次心跳
-            let _ = heartbeat_registry_instance(
+            let result = heartbeat_registry_instance(
                 &redis,
                 &key_prefix,
                 &service_name,
@@ -326,6 +340,10 @@ impl RegistryClient {
                 max_instances,
             )
             .await;
+            notify_heartbeat_observer(&observer, &result);
+            if result.is_err() {
+                tracing::warn!("failed to send heartbeat");
+            }
 
             let mut ticker = tokio::time::interval(tokio::time::Duration::from_secs(interval));
             loop {
@@ -342,6 +360,7 @@ impl RegistryClient {
                     max_instances,
                 )
                 .await;
+                notify_heartbeat_observer(&observer, &result);
                 if result.is_err() {
                     tracing::warn!("failed to send heartbeat");
                 }
@@ -875,6 +894,21 @@ impl RegistryClient {
     }
 }
 
+fn heartbeat_outcome<T, E>(result: &Result<T, E>) -> HeartbeatOutcome {
+    if result.is_ok() {
+        HeartbeatOutcome::Succeeded
+    } else {
+        HeartbeatOutcome::Failed
+    }
+}
+
+fn notify_heartbeat_observer<F, T, E>(observer: &F, result: &Result<T, E>)
+where
+    F: Fn(HeartbeatOutcome),
+{
+    observer(heartbeat_outcome(result));
+}
+
 async fn refresh_watch_once<F, Fut>(
     client: &RegistryClient,
     service_name: &str,
@@ -889,7 +923,9 @@ async fn refresh_watch_once<F, Fut>(
         Ok(snapshot) => snapshot,
         Err(error) => {
             if !retain_stale_on_error {
-                client.clear_cached_discovery_for_service(service_name).await;
+                client
+                    .clear_cached_discovery_for_service(service_name)
+                    .await;
             }
             let previous = snapshot.read().await.clone();
             let instances = if retain_stale_on_error {
@@ -897,7 +933,12 @@ async fn refresh_watch_once<F, Fut>(
             } else {
                 Vec::new()
             };
-            DiscoverySnapshot::failure(service_name, instances, previous.updated_at, error.to_string())
+            DiscoverySnapshot::failure(
+                service_name,
+                instances,
+                previous.updated_at,
+                error.to_string(),
+            )
         }
     };
 
@@ -1111,8 +1152,7 @@ fn pick_endpoint_weighted_stable<'a>(
     instances: &'a [ServiceInstance],
     endpoint_name: &str,
 ) -> Option<&'a ServiceEndpoint> {
-    pick_endpoint_candidate_weighted_stable(instances, endpoint_name)
-        .map(|(_, endpoint)| endpoint)
+    pick_endpoint_candidate_weighted_stable(instances, endpoint_name).map(|(_, endpoint)| endpoint)
 }
 
 fn pick_endpoint_candidate_weighted_stable<'a>(
@@ -1306,6 +1346,27 @@ impl DiscoveryCacheKey {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn heartbeat_outcome_exposes_only_success_or_failure() {
+        assert_eq!(
+            heartbeat_outcome(&Ok::<_, &str>(())),
+            HeartbeatOutcome::Succeeded
+        );
+        assert_eq!(
+            heartbeat_outcome(&Err::<(), _>("redis://user:secret@internal")),
+            HeartbeatOutcome::Failed
+        );
+
+        let observed = std::sync::Mutex::new(Vec::new());
+        let observer = |outcome| observed.lock().unwrap().push(outcome);
+        notify_heartbeat_observer(&observer, &Ok::<_, &str>(()));
+        notify_heartbeat_observer(&observer, &Err::<(), _>("redis://user:secret@internal"));
+        assert_eq!(
+            *observed.lock().unwrap(),
+            vec![HeartbeatOutcome::Succeeded, HeartbeatOutcome::Failed]
+        );
+    }
 
     #[test]
     fn test_service_instance_creation() {

@@ -19,6 +19,7 @@ use crate::state::{
     CharacterMatchContext, CharacterMatchStatus, SharedCharacterState,
     new_character_state_store_with_runtime_store,
 };
+use service_registry::HealthState;
 
 /// 简单撮合器
 pub struct SimpleMatcher {
@@ -49,13 +50,30 @@ impl SimpleMatcher {
         runtime_store: SharedMatchRuntimeStore,
         room_id_generator: Arc<GlobalIdGenerator>,
     ) -> Self {
+        Self::with_runtime_store_room_id_generator_and_health(
+            config,
+            runtime_store,
+            room_id_generator,
+            None,
+        )
+    }
+
+    fn with_runtime_store_room_id_generator_and_health(
+        config: Config,
+        runtime_store: SharedMatchRuntimeStore,
+        room_id_generator: Arc<GlobalIdGenerator>,
+        health_state: Option<HealthState>,
+    ) -> Self {
         let character_state = new_character_state_store_with_runtime_store(runtime_store.clone());
         let pool = new_match_pool_with_modes_and_runtime_store(
             character_state.clone(),
             config.modes.clone(),
             runtime_store.clone(),
         );
-        let game_server_client = GameServerClient::new(&config);
+        let game_server_client = match health_state {
+            Some(health_state) => GameServerClient::new_with_health(&config, health_state),
+            None => GameServerClient::new(&config),
+        };
 
         Self {
             pool,
@@ -1005,24 +1023,32 @@ fn lease_renew_interval(ttl: Duration) -> Duration {
 pub fn new_simple_matcher(
     config: Config,
     room_id_generator: Arc<GlobalIdGenerator>,
+    health_state: HealthState,
 ) -> SharedSimpleMatcher {
-    Arc::new(SimpleMatcher::with_runtime_store_and_room_id_generator(
-        config,
-        new_memory_match_runtime_store(),
-        room_id_generator,
-    ))
+    Arc::new(
+        SimpleMatcher::with_runtime_store_room_id_generator_and_health(
+            config,
+            new_memory_match_runtime_store(),
+            room_id_generator,
+            Some(health_state),
+        ),
+    )
 }
 
 pub fn new_simple_matcher_with_runtime_store(
     config: Config,
     runtime_store: SharedMatchRuntimeStore,
     room_id_generator: Arc<GlobalIdGenerator>,
+    health_state: HealthState,
 ) -> SharedSimpleMatcher {
-    Arc::new(SimpleMatcher::with_runtime_store_and_room_id_generator(
-        config,
-        runtime_store,
-        room_id_generator,
-    ))
+    Arc::new(
+        SimpleMatcher::with_runtime_store_room_id_generator_and_health(
+            config,
+            runtime_store,
+            room_id_generator,
+            Some(health_state),
+        ),
+    )
 }
 
 #[cfg(test)]

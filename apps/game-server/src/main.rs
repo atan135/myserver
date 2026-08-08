@@ -38,7 +38,10 @@ use std::time::Duration;
 use config::Config;
 use core::config_table::{ConfigTableRuntime, spawn_hot_reload_task};
 use db_store::PgAuditStore;
-use service_registry::{RegistryClient, ServiceEndpoint, ServiceInstance};
+use service_registry::{
+    DependencySpec, HealthState, HeartbeatOutcome, RegistryClient, ServiceEndpoint,
+    ServiceInstance, StartupErrorCode,
+};
 use tracing_appender::rolling;
 use tracing_subscriber::fmt;
 use tracing_subscriber::layer::SubscriberExt;
@@ -113,6 +116,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "game-server logging initialized"
     );
 
+    let match_dependency = if config.registry_enabled {
+        DependencySpec::required("match-service", "grpc")
+    } else {
+        DependencySpec::required_without_stale_detection("match-service", "grpc")
+    };
+    let mut health_dependencies = vec![
+        DependencySpec::local_required("server-listeners"),
+        DependencySpec::local_required("worker-lease"),
+        DependencySpec::local_required("gameplay-stores"),
+        match_dependency,
+    ];
+    if config.registry_enabled {
+        health_dependencies.push(DependencySpec::required_without_stale_detection(
+            "service-registry",
+            "self-registration",
+        ));
+    }
+    let health_state = HealthState::try_from_env(
+        &config.service_name,
+        &config.service_instance_id,
+        health_dependencies,
+    )?;
+    let health_task =
+        service_registry::readiness::spawn_health_from_env(health_state.clone()).await?;
+
     let config_table_runtime = ConfigTableRuntime::load(Path::new(&config.csv_dir))?;
     let initial_config = config_table_runtime.snapshot().await;
     let initial_tables = initial_config.tables.clone();
@@ -150,11 +178,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let instance = build_service_instance(&config);
 
                 if let Err(e) = client.register(&instance).await {
+                    health_state.mark_degraded(
+                        "service-registry",
+                        "self-registration",
+                        StartupErrorCode::RegistryUnavailable,
+                    );
                     tracing::error!(error = %e, "failed to register service");
                     if registry_failure_is_fatal() {
                         return Err(std::io::Error::other(e.to_string()).into());
                     }
                 } else {
+                    health_state.mark_ready("service-registry", "self-registration");
                     tracing::info!(
                         service = %config.service_name,
                         instance = %config.service_instance_id,
@@ -165,6 +199,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Some(client)
             }
             Err(e) => {
+                health_state.mark_degraded(
+                    "service-registry",
+                    "self-registration",
+                    StartupErrorCode::RegistryUnavailable,
+                );
                 tracing::error!(error = %e, "failed to create registry client");
                 if registry_failure_is_fatal() {
                     return Err(std::io::Error::other(e.to_string()).into());
@@ -178,9 +217,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // 启动心跳任务
-    let heartbeat_handle = registry_client
-        .as_ref()
-        .map(|client| client.start_heartbeat_task());
+    let heartbeat_health = health_state.clone();
+    let heartbeat_handle = registry_client.as_ref().map(|client| {
+        client.start_heartbeat_task_with_observer(move |outcome| match outcome {
+            HeartbeatOutcome::Succeeded => {
+                heartbeat_health.mark_ready("service-registry", "self-registration");
+            }
+            HeartbeatOutcome::Failed => {
+                heartbeat_health.mark_degraded(
+                    "service-registry",
+                    "self-registration",
+                    StartupErrorCode::RegistryUnavailable,
+                );
+            }
+        })
+    });
 
     let csv_reload_task = if config.csv_reload_enabled {
         Some(spawn_hot_reload_task(
@@ -203,7 +254,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .await;
     });
 
-    let result = server::run(&config, db_store.clone(), config_table_runtime.clone()).await;
+    let result = server::run(
+        &config,
+        db_store.clone(),
+        config_table_runtime.clone(),
+        health_state.clone(),
+    )
+    .await;
+
+    health_state.mark_shutting_down();
 
     // 关闭时注销服务
     if let Some(client) = registry_client {
@@ -229,6 +288,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     db_store.close().await;
+    if let Some(task) = health_task {
+        task.abort();
+        let _ = task.await;
+    }
     result
 }
 

@@ -2,7 +2,7 @@
 //!
 //! GameServer 通过此客户端调用 MatchService 的内部接口
 
-use service_registry::{RegistryClient, record_discovery_metric};
+use service_registry::{HealthState, RegistryClient, StartupErrorCode, record_discovery_metric};
 use std::error::Error;
 use std::future::Future;
 use std::sync::Arc;
@@ -348,6 +348,7 @@ pub async fn init_match_client(
 pub fn spawn_match_client_rediscovery(
     client: SharedMatchClient,
     config: MatchClientConfig,
+    health_state: HealthState,
 ) -> Option<JoinHandle<()>> {
     if !config.rediscovery_enabled() {
         tracing::info!(
@@ -391,6 +392,11 @@ pub fn spawn_match_client_rediscovery(
             {
                 Ok(resolved) => resolved.addr,
                 Err(error) => {
+                    health_state.mark_degraded(
+                        "match-service",
+                        "grpc",
+                        StartupErrorCode::RegistryUnavailable,
+                    );
                     tracing::warn!(
                         service = %config.service_name,
                         endpoint = "grpc",
@@ -413,15 +419,25 @@ pub fn spawn_match_client_rediscovery(
             .await
             {
                 Ok(true) => {
+                    health_state.mark_ready("match-service", "grpc");
                     tracing::info!(addr = %discovered_addr, "match-service rediscovery reconnected");
                 }
                 Ok(false) => {
+                    let current = current_match_client_state(&client).await;
+                    if current.addr.is_some() && !current.reconnect_required {
+                        health_state.mark_ready("match-service", "grpc");
+                    }
                     tracing::debug!(
                         addr = %discovered_addr,
                         "match-service rediscovery kept existing client"
                     );
                 }
                 Err(error) => {
+                    health_state.mark_degraded(
+                        "match-service",
+                        "grpc",
+                        StartupErrorCode::DependencyPending,
+                    );
                     tracing::warn!(
                         addr = %discovered_addr,
                         error = %error,

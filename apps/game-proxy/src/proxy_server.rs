@@ -33,8 +33,8 @@ use crate::route_store::{
 use crate::session::{ProxySession, ProxySessionState};
 use crate::upstream::connect_upstream;
 use service_registry::{
-    DiscoverySnapshot, DiscoveryWatchConfig, RegistryClient, ServiceEndpoint, ServiceInstance,
-    record_discovery_metric,
+    DiscoverySnapshot, DiscoveryWatchConfig, HealthState, RegistryClient, ServiceEndpoint,
+    ServiceInstance, StartupErrorCode, record_discovery_metric,
 };
 
 const MAX_PROXY_BODY_LEN: usize = 1024 * 1024;
@@ -237,6 +237,7 @@ pub async fn run(
     blocklist_checker: Arc<RedisBlocklistChecker>,
     connection_count: SharedConnectionCount,
     maintenance: SharedMaintenanceFlag,
+    health_state: HealthState,
 ) -> Result<(), Box<dyn std::error::Error>> {
     config
         .validate_upstream_discovery()
@@ -248,16 +249,42 @@ pub async fn run(
         let service_name = config.upstream_service_name.clone();
         let discover_interval = config.registry_discover_interval_secs;
         let route_store_clone = route_store.clone();
-        let initial_client = RegistryClient::new(&registry_url, "proxy", "proxy-initial")
-            .await
-            .map(|client| client.with_key_prefix(registry_key_prefix.clone()))
-            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        let initial_client =
+            match RegistryClient::new(&registry_url, "proxy", "proxy-initial").await {
+                Ok(client) => client.with_key_prefix(registry_key_prefix.clone()),
+                Err(error) => {
+                    health_state.mark_degraded(
+                        "game-server",
+                        "proxy-local",
+                        StartupErrorCode::RegistryUnavailable,
+                    );
+                    return Err(std::io::Error::other(error.to_string()).into());
+                }
+            };
         let initial_routes =
-            discover_and_update_routes(&initial_client, &service_name, &route_store)
-                .await
-                .map_err(|error| std::io::Error::other(error.to_string()))?;
+            match discover_and_update_routes(&initial_client, &service_name, &route_store).await {
+                Ok(routes) => routes,
+                Err(error) => {
+                    health_state.mark_degraded(
+                        "game-server",
+                        "proxy-local",
+                        StartupErrorCode::RegistryUnavailable,
+                    );
+                    return Err(std::io::Error::other(error.to_string()).into());
+                }
+            };
+        if initial_routes == 0 {
+            health_state.mark_pending(
+                "game-server",
+                "proxy-local",
+                StartupErrorCode::DependencyPending,
+            );
+        } else {
+            health_state.mark_ready("game-server", "proxy-local");
+        }
         validate_initial_upstream_routes(&service_name, initial_routes)?;
 
+        let discovery_health_state = health_state.clone();
         tokio::spawn(async move {
             if let Err(error) = run_upstream_discovery(
                 registry_url,
@@ -265,9 +292,15 @@ pub async fn run(
                 service_name.clone(),
                 discover_interval,
                 route_store_clone,
+                discovery_health_state.clone(),
             )
             .await
             {
+                discovery_health_state.mark_degraded(
+                    "game-server",
+                    "proxy-local",
+                    StartupErrorCode::RegistryUnavailable,
+                );
                 tracing::error!(
                     service = %service_name,
                     endpoint = "proxy-local",
@@ -296,6 +329,7 @@ pub async fn run(
             upstream_local_socket_name = %config.upstream_local_socket_name,
             "using static upstream config"
         );
+        health_state.mark_ready("game-server", "proxy-local");
     }
 
     let mut kcp_frontend =
@@ -305,7 +339,7 @@ pub async fn run(
     let tcp_addr = config.tcp_fallback_addr();
     let mut tcp_frontend = crate::transport::tcp_frontend::TcpFrontend::bind(&tcp_addr).await?;
     info!(addr = %tcp_addr, protocol = "tcp", "game-proxy tcp fallback frontend listening");
-    let _readiness_task = service_registry::readiness::spawn_from_env(&config.service_name).await?;
+    health_state.mark_ready("local-runtime", "frontends");
 
     let mut next_session_id = 1u64;
     let connection_limiter = ConnectionLimiter::new(config.connection_limits.clone());
@@ -426,6 +460,7 @@ async fn run_upstream_discovery(
     service_name: String,
     discover_interval_secs: u64,
     route_store: ProxyRouteStore,
+    health_state: HealthState,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let client = RegistryClient::new(&registry_url, "proxy", "proxy-static")
         .await?
@@ -436,8 +471,26 @@ async fn run_upstream_discovery(
         DiscoveryWatchConfig::new(interval),
         move |snapshot| {
             let route_store = route_store.clone();
+            let health_state = health_state.clone();
             async move {
-                refresh_routes_from_discovery_snapshot(snapshot, &route_store).await;
+                let registry_failed = snapshot.error.is_some();
+                let endpoint_count =
+                    refresh_routes_from_discovery_snapshot(snapshot, &route_store).await;
+                if registry_failed {
+                    health_state.mark_degraded(
+                        "game-server",
+                        "proxy-local",
+                        StartupErrorCode::RegistryUnavailable,
+                    );
+                } else if endpoint_count == 0 {
+                    health_state.mark_degraded(
+                        "game-server",
+                        "proxy-local",
+                        StartupErrorCode::DependencyPending,
+                    );
+                } else {
+                    health_state.mark_ready("game-server", "proxy-local");
+                }
             }
         },
     );

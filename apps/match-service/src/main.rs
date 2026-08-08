@@ -15,7 +15,10 @@ mod state;
 use std::fs;
 
 use serde_json::{Value, json};
-use service_registry::{RegistryClient, ServiceEndpoint, ServiceInstance};
+use service_registry::{
+    DependencySpec, HealthState, HeartbeatOutcome, RegistryClient, ServiceEndpoint,
+    ServiceInstance, StartupErrorCode,
+};
 use tracing_appender::rolling;
 use tracing_subscriber::fmt;
 use tracing_subscriber::layer::SubscriberExt;
@@ -80,6 +83,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "match-service starting"
     );
 
+    let mut health_dependencies = vec![
+        DependencySpec::local_required("worker-lease"),
+        DependencySpec::local_required("grpc-listener"),
+        DependencySpec::optional("game-server", "internal"),
+    ];
+    if config.registry_enabled {
+        health_dependencies.push(DependencySpec::required_without_stale_detection(
+            "service-registry",
+            "self-registration",
+        ));
+    }
+    let health_state = HealthState::try_from_env(
+        &config.service_name,
+        &config.service_instance_id,
+        health_dependencies,
+    )?;
+    let health_task =
+        service_registry::readiness::spawn_health_from_env(health_state.clone()).await?;
+
     let registry_client: Option<RegistryClient> = if config.registry_enabled {
         match RegistryClient::new(
             &config.registry_url,
@@ -95,11 +117,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let instance = build_service_instance(&config);
 
                 if let Err(e) = client.register(&instance).await {
+                    health_state.mark_degraded(
+                        "service-registry",
+                        "self-registration",
+                        StartupErrorCode::RegistryUnavailable,
+                    );
                     tracing::error!(error = %e, "failed to register service");
                     if registry_failure_is_fatal() {
                         return Err(std::io::Error::other(e.to_string()).into());
                     }
                 } else {
+                    health_state.mark_ready("service-registry", "self-registration");
                     tracing::info!(
                         service = %config.service_name,
                         instance = %config.service_instance_id,
@@ -110,6 +138,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Some(client)
             }
             Err(e) => {
+                health_state.mark_degraded(
+                    "service-registry",
+                    "self-registration",
+                    StartupErrorCode::RegistryUnavailable,
+                );
                 tracing::error!(error = %e, "failed to create registry client");
                 if registry_failure_is_fatal() {
                     return Err(std::io::Error::other(e.to_string()).into());
@@ -122,9 +155,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         None
     };
 
-    let heartbeat_handle = registry_client
-        .as_ref()
-        .map(|client| client.start_heartbeat_task());
+    let heartbeat_health = health_state.clone();
+    let heartbeat_handle = registry_client.as_ref().map(|client| {
+        client.start_heartbeat_task_with_observer(move |outcome| match outcome {
+            HeartbeatOutcome::Succeeded => {
+                heartbeat_health.mark_ready("service-registry", "self-registration");
+            }
+            HeartbeatOutcome::Failed => {
+                heartbeat_health.mark_degraded(
+                    "service-registry",
+                    "self-registration",
+                    StartupErrorCode::RegistryUnavailable,
+                );
+            }
+        })
+    });
 
     // 启动 metrics 上报任务
     let metrics_nats_url = config.nats_url.clone();
@@ -135,7 +180,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .await;
     });
 
-    let result = server::run(config).await;
+    let result = server::run(config, health_state.clone()).await;
+
+    health_state.mark_shutting_down();
 
     if let Some(client) = registry_client {
         if let Some(handle) = heartbeat_handle {
@@ -146,6 +193,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         } else {
             tracing::info!("service deregistered from registry");
         }
+    }
+    if let Some(health_task) = health_task {
+        health_task.abort();
+        let _ = health_task.await;
     }
 
     result

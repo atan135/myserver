@@ -6,8 +6,10 @@ use std::time::Duration;
 use global_id::{
     DEFAULT_WORKER_LEASE_RENEW_INTERVAL_SECONDS, DEFAULT_WORKER_LEASE_TTL_SECONDS, WorkerLease,
 };
+use service_registry::HealthState;
+use tokio::net::TcpListener;
 use tokio::sync::watch;
-use tonic::transport::Server;
+use tonic::transport::{Server, server::TcpIncoming};
 use tracing::{info, warn};
 
 use crate::config::Config;
@@ -20,7 +22,10 @@ use crate::runtime_store::{
 };
 use crate::service::{MatchInternalImpl, MatchServiceImpl};
 
-pub async fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn run(
+    config: Config,
+    health_state: HealthState,
+) -> Result<(), Box<dyn std::error::Error>> {
     let redis_client = redis::Client::open(config.redis_url.clone())?;
     let mut global_id_redis = redis_client.get_multiplexed_async_connection().await?;
     let global_id_origin_id = u16::try_from(config.global_id_origin_id).map_err(|_| {
@@ -57,6 +62,7 @@ pub async fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
         lease_key = %worker_lease.key,
         "global id worker lease acquired"
     );
+    health_state.mark_ready("local-runtime", "worker-lease");
 
     let (lease_loss_tx, mut lease_loss_rx) = watch::channel(false);
     let lease_renew_task =
@@ -65,10 +71,15 @@ pub async fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
     let result = async {
         let room_id_generator = Arc::new(worker_lease.generator()?);
         let matcher = if uses_memory_runtime_store(&config) {
-            new_simple_matcher(config.clone(), room_id_generator)
+            new_simple_matcher(config.clone(), room_id_generator, health_state.clone())
         } else {
             let runtime_store = build_runtime_store(&config)?;
-            new_simple_matcher_with_runtime_store(config.clone(), runtime_store, room_id_generator)
+            new_simple_matcher_with_runtime_store(
+                config.clone(),
+                runtime_store,
+                room_id_generator,
+                health_state.clone(),
+            )
         };
         matcher.recover_runtime_state().await?;
         let cleanup_matcher = matcher.clone();
@@ -92,12 +103,13 @@ pub async fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
         let addr = config.bind_addr.parse()?;
         let reflection = tonic_reflection::server::Builder::configure().build()?;
         let mut shutdown_lease_loss_rx = lease_loss_rx.clone();
+        let incoming = bind_grpc_incoming(addr, &health_state).await?;
 
         Server::builder()
             .add_service(reflection)
             .add_service(MatchServiceServer::new(match_service))
             .add_service(MatchInternalServer::new(match_internal))
-            .serve_with_shutdown(addr, async {
+            .serve_with_incoming_shutdown(incoming, async {
                 if *shutdown_lease_loss_rx.borrow_and_update() {
                     warn!("global id worker lease lost, stopping match-service gRPC server");
                 } else {
@@ -131,6 +143,17 @@ pub async fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
     } else {
         result
     }
+}
+
+async fn bind_grpc_incoming(
+    addr: std::net::SocketAddr,
+    health_state: &HealthState,
+) -> Result<TcpIncoming, std::io::Error> {
+    let listener = TcpListener::bind(addr).await?;
+    let incoming = TcpIncoming::from_listener(listener, false, None)
+        .map_err(|error| std::io::Error::other(error.to_string()))?;
+    health_state.mark_ready("local-runtime", "grpc-listener");
+    Ok(incoming)
 }
 
 fn spawn_worker_lease_renewal(
@@ -214,4 +237,46 @@ fn build_runtime_store(
 
 fn uses_memory_runtime_store(config: &Config) -> bool {
     matches!(config.match_runtime_store.as_str(), "memory" | "")
+}
+
+#[cfg(test)]
+mod health_tests {
+    use super::*;
+    use service_registry::{DependencySpec, DependencyStatus, HealthConfig};
+
+    fn listener_health() -> HealthState {
+        HealthState::new(
+            "match-service",
+            "match-test",
+            HealthConfig::for_tests(100, 0, 100),
+            [DependencySpec::local_required("grpc-listener")],
+        )
+    }
+
+    #[tokio::test]
+    async fn bind_failure_does_not_mark_grpc_listener_ready() {
+        let occupied = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = occupied.local_addr().unwrap();
+        let health = listener_health();
+
+        assert!(bind_grpc_incoming(addr, &health).await.is_err());
+        assert_eq!(
+            health.snapshot().dependencies[0].status,
+            DependencyStatus::Pending
+        );
+    }
+
+    #[tokio::test]
+    async fn successful_bind_marks_grpc_listener_ready() {
+        let health = listener_health();
+        let incoming = bind_grpc_incoming("127.0.0.1:0".parse().unwrap(), &health)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            health.snapshot().dependencies[0].status,
+            DependencyStatus::Ready
+        );
+        drop(incoming);
+    }
 }
