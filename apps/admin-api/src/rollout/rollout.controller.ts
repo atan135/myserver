@@ -182,7 +182,13 @@ export class RolloutController {
           targetIds: [instanceId],
           targetCount: 1
         },
-        targetSummary: { targetType: "service", targetIds: [instanceId], instanceId },
+        targetSummary: {
+          targetType: "service",
+          targetIds: [instanceId],
+          serviceName: "game-server",
+          instanceId,
+          worldId: null
+        },
         payload: { action: "game_server_shutdown", instanceId },
         impactSummary: { action: "game_server_shutdown", instanceId, targetCount: 1 },
         reason: body?.reason,

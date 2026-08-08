@@ -12,6 +12,8 @@ const { AdminPolicyGuard } = await import("../auth/admin-policy.guard.ts");
 const { AdminPolicyService } = await import("../auth/admin-policy.service.ts");
 const { AdminOperationService } = await import("../operations/admin-operation.service.ts");
 const { AdminHighRiskOperationService } = await import("../operations/admin-high-risk-operation.service.ts");
+const { AdminBreakglassService } = await import("../operations/admin-breakglass.service.ts");
+const { AdminOperationController } = await import("../operations/admin-operation.controller.ts");
 const { PERMISSIONS_KEY, POLICY_SCOPE_RESOLVER_KEY } = await import("../auth/roles.decorator.ts");
 
 const ROOT_SCOPE = {
@@ -166,9 +168,107 @@ test("game-server shutdown binds the emergency service permission to the exact r
   assert.equal(captured().scope.serviceName, "game-server");
   assert.equal(captured().scope.instanceId, "game-server-a");
   assert.equal(captured().scope.worldId, undefined);
+  assert.deepEqual(captured().targetSummary, {
+    targetType: "service",
+    targetIds: ["game-server-a"],
+    serviceName: "game-server",
+    instanceId: "game-server-a",
+    worldId: null
+  });
   assert.equal(options.assertionContext.permission, "service.shutdown");
   assert.equal(options.assertionContext.scope.instanceId, "game-server-a");
   assert.equal(options.assertionContext.scope.worldId, undefined);
+});
+
+test("formal break-glass activation matches only the exact game-server shutdown target", async () => {
+  const grants = [];
+  const store = {
+    async findAdminPolicyPermission(permission) {
+      if (permission === "service.shutdown") {
+        return {
+          permission_key: permission,
+          active: true,
+          risk_level: "emergency",
+          scope_dimensions: ["service_names", "instance_ids"]
+        };
+      }
+      return null;
+    },
+    async createAdminBreakglassGrant(input) {
+      const grant = { ...input, activatedAt: new Date().toISOString(), revokedAt: null };
+      grants.push(grant);
+      return { kind: "created", grant };
+    },
+    async listActiveAdminBreakglassGrants(adminId, permission) {
+      return grants.filter((grant) =>
+        String(grant.actorAdminId) === String(adminId) && grant.permissionKey === permission
+      );
+    }
+  };
+  const breakglass = new AdminBreakglassService({
+    async authorize() { return { allowed: true, code: "ALLOWED" }; }
+  }, store);
+  const operationController = new AdminOperationController({}, breakglass, {});
+  await operationController.activateBreakglass({
+    requestId: "phase7-breakglass-1",
+    permission: "service.shutdown",
+    serviceName: "game-server",
+    instanceId: "game-server-a",
+    targetType: "service",
+    targetIds: ["game-server-a"],
+    reason: "isolated rollout verification",
+    ttlMs: 60000
+  }, { admin: { sub: "admin-7" } });
+
+  let operationInput;
+  const rollout = new RolloutController({}, {
+    async run(input) {
+      operationInput = input;
+      return { state: "preflight", response: { ok: true, state: "preflighted" } };
+    }
+  }, {});
+  await rollout.shutdownGameServer(
+    "game-server-a",
+    body(),
+    { admin: { sub: "admin-7" }, body: body() }
+  );
+
+  const matched = await breakglass.requireActiveGrant({
+    actorAdminId: "admin-7",
+    permission: operationInput.permission,
+    scope: operationInput.scope,
+    targetSummary: operationInput.targetSummary
+  });
+  assert.equal(matched.permissionKey, "service.shutdown");
+
+  const mismatches = [
+    {
+      scope: { ...operationInput.scope, serviceName: "other-service" },
+      targetSummary: { ...operationInput.targetSummary, serviceName: "other-service" }
+    },
+    {
+      scope: { ...operationInput.scope, instanceId: "game-server-b" },
+      targetSummary: { ...operationInput.targetSummary, instanceId: "game-server-b" }
+    },
+    {
+      scope: { ...operationInput.scope, worldId: "world-2" },
+      targetSummary: { ...operationInput.targetSummary, worldId: "world-2" }
+    },
+    {
+      scope: { ...operationInput.scope, targetIds: ["game-server-b"] },
+      targetSummary: { ...operationInput.targetSummary, targetIds: ["game-server-b"] }
+    }
+  ];
+  for (const mismatch of mismatches) {
+    await assert.rejects(
+      breakglass.requireActiveGrant({
+        actorAdminId: "admin-7",
+        permission: operationInput.permission,
+        ...mismatch
+      }),
+      (error) => error.code === "ADMIN_BREAKGLASS_GRANT_REQUIRED"
+    );
+  }
 });
 
 test("game-server controls pass real policy and high-risk preflight with least-privilege scopes", async () => {
