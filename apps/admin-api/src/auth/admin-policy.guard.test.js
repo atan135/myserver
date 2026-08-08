@@ -13,10 +13,11 @@ const {
 } = await import("./admin-policy.guard.ts");
 const {
   PERMISSIONS_KEY,
-  POLICY_PERMISSION_RESOLVER_KEY
+  POLICY_PERMISSION_RESOLVER_KEY,
+  POLICY_SCOPE_RESOLVER_KEY
 } = await import("./roles.decorator.ts");
 
-function makeContext({ request = {}, permissions, resolver } = {}) {
+function makeContext({ request = {}, permissions, resolver, scopeResolver } = {}) {
   function handler() {}
   const req = {
     method: "POST",
@@ -34,6 +35,7 @@ function makeContext({ request = {}, permissions, resolver } = {}) {
       getAllAndOverride(key) {
         if (key === PERMISSIONS_KEY) return permissions;
         if (key === POLICY_PERMISSION_RESOLVER_KEY) return resolver;
+        if (key === POLICY_SCOPE_RESOLVER_KEY) return scopeResolver;
         return undefined;
       }
     },
@@ -163,6 +165,44 @@ test("AdminPolicyGuard supports server-defined conditional permissions", async (
 
   assert.equal(await guard.canActivate(fixture.context), true);
   assert.deepEqual(calls.map((call) => call.permission), ["players.status.update", "players.ban"]);
+});
+
+test("AdminPolicyGuard uses trusted route scope metadata instead of request scope fields", async () => {
+  const fixture = makeContext({
+    permissions: ["service.shutdown"],
+    scopeResolver: (request) => ({
+      serviceName: "game-server",
+      instanceId: request.params.instanceId,
+      targetType: "service",
+      targetIds: [request.params.instanceId],
+      targetCount: 1
+    }),
+    request: {
+      params: { instanceId: "game-server-a" },
+      body: { serviceName: "forged-service", instanceId: "forged-instance", worldId: "forged-world" }
+    }
+  });
+  const { guard, calls } = makeGuard(fixture);
+
+  assert.equal(await guard.canActivate(fixture.context), true);
+  assert.deepEqual(calls[0].scope, {
+    serviceName: "game-server",
+    instanceId: "game-server-a",
+    targetType: "service",
+    targetIds: ["game-server-a"],
+    targetCount: 1
+  });
+});
+
+test("AdminPolicyGuard fails closed when trusted route scope resolution fails", async () => {
+  const fixture = makeContext({
+    permissions: ["service.shutdown"],
+    scopeResolver: () => { throw new Error("invalid route target"); }
+  });
+  const { guard, calls } = makeGuard(fixture);
+
+  await assert.rejects(() => guard.canActivate(fixture.context), assertHttpError(403, "ADMIN_SCOPE_DENIED"));
+  assert.equal(calls.length, 0);
 });
 
 test("AdminPolicyGuard blocks horizontal target escalation even when the route permission exists", async () => {

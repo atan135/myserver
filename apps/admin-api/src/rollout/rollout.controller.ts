@@ -3,7 +3,7 @@ import { ApiBearerAuth, ApiTags } from "@nestjs/swagger";
 
 import { JwtAuthGuard } from "../auth/jwt-auth.guard.js";
 import { AdminPolicyGuard } from "../auth/admin-policy.guard.js";
-import { Permissions } from "../auth/roles.decorator.js";
+import { Permissions, PolicyScopeResolver } from "../auth/roles.decorator.js";
 import { ApiHttpException } from "../common/http-exception.js";
 import { ADMIN_GAME_ADMIN_CLIENT, ADMIN_HIGH_RISK_OPERATIONS } from "../tokens.js";
 import { RoomTransferService } from "./room-transfer.service.js";
@@ -41,18 +41,44 @@ function requestId(body: any) {
   return typeof value === "string" ? value.trim() : "";
 }
 
+function gameServerDrainPolicyScope(request: any) {
+  const instanceId = requireInstanceId(request?.params?.instanceId);
+  return {
+    worldId: "*",
+    serviceName: "game-server",
+    instanceId,
+    targetType: "config",
+    targetIds: ["drain_mode"],
+    targetCount: 1
+  };
+}
+
+function gameServerShutdownPolicyScope(request: any) {
+  const instanceId = requireInstanceId(request?.params?.instanceId);
+  return {
+    serviceName: "game-server",
+    instanceId,
+    targetType: "service",
+    targetIds: [instanceId],
+    targetCount: 1
+  };
+}
+
 function gameServerAssertionContext(
   req: any,
   body: any,
+  permission: "game.config.write" | "service.shutdown",
   instanceId: string,
   targetType: "config" | "service",
-  targetIds: string[]
+  targetIds: string[],
+  worldId?: string
 ) {
   const id = requestId(body);
   return {
     actorId: req.admin?.sub,
-    permission: "game.config.write",
+    permission,
     scope: {
+      ...(worldId ? { worldId } : {}),
       serviceName: "game-server",
       instanceId,
       targetType,
@@ -78,6 +104,7 @@ export class RolloutController {
 
   @Post("game-server/:instanceId/drain")
   @Permissions("game.config.write")
+  @PolicyScopeResolver(gameServerDrainPolicyScope)
   @HttpCode(HttpStatus.OK)
   async setGameServerDrain(
     @Param("instanceId") rawInstanceId: string,
@@ -96,6 +123,7 @@ export class RolloutController {
         request: req,
         permission: "game.config.write",
         scope: {
+          worldId: "*",
           serviceName: "game-server",
           instanceId,
           targetType: "config",
@@ -109,7 +137,15 @@ export class RolloutController {
         execute: () => this.gameAdminClient.updateConfig("drain_mode", enabled ? "on" : "off", {
           targetInstanceId: instanceId,
           requireRegistryTarget: true,
-          assertionContext: gameServerAssertionContext(req, body, instanceId, "config", ["drain_mode"])
+          assertionContext: gameServerAssertionContext(
+            req,
+            body,
+            "game.config.write",
+            instanceId,
+            "config",
+            ["drain_mode"],
+            "*"
+          )
         }),
         resultSummary: (result: any) => ({
           action: "game_server_drain",
@@ -126,7 +162,8 @@ export class RolloutController {
   }
 
   @Post("game-server/:instanceId/shutdown")
-  @Permissions("game.config.write")
+  @Permissions("service.shutdown")
+  @PolicyScopeResolver(gameServerShutdownPolicyScope)
   @HttpCode(HttpStatus.OK)
   async shutdownGameServer(
     @Param("instanceId") rawInstanceId: string,
@@ -137,7 +174,7 @@ export class RolloutController {
       const instanceId = requireInstanceId(rawInstanceId);
       const outcome = await this.highRiskOperations.run({
         request: req,
-        permission: "game.config.write",
+        permission: "service.shutdown",
         scope: {
           serviceName: "game-server",
           instanceId,
@@ -149,10 +186,18 @@ export class RolloutController {
         payload: { action: "game_server_shutdown", instanceId },
         impactSummary: { action: "game_server_shutdown", instanceId, targetCount: 1 },
         reason: body?.reason,
+        emergency: true,
         execute: () => this.gameAdminClient.requestServerShutdown(body?.reason, {
           targetInstanceId: instanceId,
           requireRegistryTarget: true,
-          assertionContext: gameServerAssertionContext(req, body, instanceId, "service", [instanceId])
+          assertionContext: gameServerAssertionContext(
+            req,
+            body,
+            "service.shutdown",
+            instanceId,
+            "service",
+            [instanceId]
+          )
         }),
         resultSummary: (result: any) => ({
           action: "game_server_shutdown",

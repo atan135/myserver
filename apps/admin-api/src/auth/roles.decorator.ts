@@ -1,8 +1,11 @@
 import { SetMetadata } from "@nestjs/common";
 
+import type { AdminPolicyScopeRequest } from "./admin-policy.service.js";
+
 export const ROLES_KEY = "roles";
 export const PERMISSIONS_KEY = "permissions";
 export const POLICY_PERMISSION_RESOLVER_KEY = "admin-policy-permission-resolver";
+export const POLICY_SCOPE_RESOLVER_KEY = "admin-policy-scope-resolver";
 export type AdminRole = "viewer" | "operator" | "admin" | "super_admin";
 export type AdminPermission =
   | "audit.read"
@@ -72,6 +75,11 @@ export const Roles = (...roles: AdminRole[]) => SetMetadata(ROLES_KEY, roles);
 export const Permissions = (...permissions: AdminPermission[]) => SetMetadata(PERMISSIONS_KEY, permissions);
 export type AdminPermissionResolver = (request: any) => readonly AdminPermission[];
 export const PermissionResolver = (resolver: AdminPermissionResolver) => SetMetadata(POLICY_PERMISSION_RESOLVER_KEY, resolver);
+export type AdminPolicyScopeResolver = (
+  request: any,
+  permission: AdminPermission
+) => AdminPolicyScopeRequest | Promise<AdminPolicyScopeRequest>;
+export const PolicyScopeResolver = (resolver: AdminPolicyScopeResolver) => SetMetadata(POLICY_SCOPE_RESOLVER_KEY, resolver);
 
 export function roleHasPermission(role: unknown, permission: AdminPermission): boolean {
   if (typeof role !== "string" || !(role in ROLE_PERMISSIONS)) {

@@ -193,7 +193,7 @@ Node 服务当前可能出现注册失败只打日志的情况，因此 readines
 4. 清理或降级 route store：移除或标记旧实例对应的 upstream、room route、player route 和 rollout target，确保新请求不会继续被导向旧实例。若 route store 清理失败，必须降级为旧实例不可接新流量、不可选，并保留故障状态供重试或人工处理，不能因为清理失败而重新放开旧实例。
 5. 完成验证：确认旧实例在 registry 中不可发现，route store 不再把新连接、新建房、重连、匹配或控制面请求导向旧实例，并保留 drain、deregister、route store 更新或降级结果的日志和审计记录。
 
-`game-server` 的正式写入口由 admin-api 提供：`POST /api/v1/rollouts/game-server/:instanceId/drain` 和 `POST /api/v1/rollouts/game-server/:instanceId/shutdown`。两者都要求 Bearer/JWT、`game.config.write`、high-risk preflight/execute 二阶段确认、签名断言和审计；`:instanceId` 必须显式给出，admin-api 只从 Redis registry 的健康 `game-server.admin` endpoint 精确解析目标，不接受固定内部地址或 direct endpoint override。`auth-http` 对应历史写接口继续返回 `410 CONTROL_PLANE_ONLY`，只读状态接口不受影响。审计记录身份、目标、原因和结果，不记录 token、断言签名或内部 endpoint 凭据。
+`game-server` 的正式写入口由 admin-api 提供：`POST /api/v1/rollouts/game-server/:instanceId/drain` 和 `POST /api/v1/rollouts/game-server/:instanceId/shutdown`。drain 要求 `game.config.write`，并由控制面将权限范围绑定为影响全部 world 的 `worldId=*`、`serviceName=game-server` 和显式 instance；shutdown 使用 emergency-only 的 `service.shutdown`，范围绑定为 `serviceName=game-server` 和显式 instance，不伪造 world 范围。两者都要求 Bearer/JWT、high-risk preflight/execute 二阶段确认、独立审批、签名断言和审计；shutdown 执行阶段还要求匹配目标的有效 break-glass grant。`:instanceId` 必须显式给出，admin-api 只从 Redis registry 的健康 `game-server.admin` endpoint 精确解析目标，不接受固定内部地址或 direct endpoint override。`auth-http` 对应历史写接口继续返回 `410 CONTROL_PLANE_ONLY`，只读状态接口不受影响。审计记录身份、目标、原因和结果，不记录 token、断言签名或内部 endpoint 凭据。
 
 本节定义滚动发布和扩缩容时的旧实例退出状态机及当前 admin-api 控制入口；部署平台 stop hook 的调用编排仍由发布流程实现。
 

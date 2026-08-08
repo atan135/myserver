@@ -8,13 +8,28 @@ process.env.TS_NODE_TRANSPILE_ONLY ??= "true";
 register("ts-node/esm", pathToFileURL("./"));
 
 const { RolloutController } = await import("./rollout.controller.ts");
-const { PERMISSIONS_KEY } = await import("../auth/roles.decorator.ts");
+const { AdminPolicyGuard } = await import("../auth/admin-policy.guard.ts");
+const { AdminPolicyService } = await import("../auth/admin-policy.service.ts");
+const { AdminOperationService } = await import("../operations/admin-operation.service.ts");
+const { AdminHighRiskOperationService } = await import("../operations/admin-high-risk-operation.service.ts");
+const { PERMISSIONS_KEY, POLICY_SCOPE_RESOLVER_KEY } = await import("../auth/roles.decorator.ts");
+
+const ROOT_SCOPE = {
+  world_ids: ["*"],
+  service_names: ["*"],
+  instance_ids: ["*"],
+  field_allowlist: ["*"],
+  target_types: ["*"],
+  target_ids: ["*"],
+  max_targets: 100
+};
 
 function body(overrides = {}) {
   return {
     enabled: true,
     reason: "rolling replacement",
     requestId: "control-request-1",
+    backupReference: "control-request-1-recovery",
     preflightNonce: "nonce-1",
     preflightSummarySha256: "summary-1",
     ...overrides
@@ -34,6 +49,47 @@ function createController({ client = {}, run } = {}) {
     controller: new RolloutController({}, highRisk, client),
     captured: () => captured
   };
+}
+
+function routeGuard(handler, request, grants) {
+  const permissions = {
+    "game.config.write": {
+      permission_key: "game.config.write",
+      active: true,
+      scope_dimensions: ["world_ids", "service_names"]
+    },
+    "service.shutdown": {
+      permission_key: "service.shutdown",
+      active: true,
+      scope_dimensions: ["service_names", "instance_ids"]
+    }
+  };
+  const store = {
+    async findAdminPolicyPermission(permission) { return permissions[permission] || null; },
+    async listEffectiveAdminPolicyGrants(_adminId, permission) {
+      return (grants[permission] || []).map((scope_json, index) => ({
+        ...permissions[permission],
+        grant_source: "direct",
+        source_id: index + 1,
+        scope_json
+      }));
+    }
+  };
+  const reflector = {
+    getAllAndOverride(key, targets) {
+      for (const target of targets) {
+        const value = Reflect.getMetadata(key, target);
+        if (value !== undefined) return value;
+      }
+      return undefined;
+    }
+  };
+  const context = {
+    getHandler: () => handler,
+    getClass: () => RolloutController,
+    switchToHttp: () => ({ getRequest: () => request })
+  };
+  return { guard: new AdminPolicyGuard(reflector, new AdminPolicyService(store), store, {}), context };
 }
 
 test("game-server drain control binds registry target, assertion scope, and audit-safe payload", async () => {
@@ -59,7 +115,9 @@ test("game-server drain control binds registry target, assertion scope, and audi
   assert.equal(options.targetInstanceId, "game-server-a");
   assert.equal(options.requireRegistryTarget, true);
   assert.equal(options.assertionContext.permission, "game.config.write");
+  assert.equal(options.assertionContext.scope.worldId, "*");
   assert.equal(options.assertionContext.scope.instanceId, "game-server-a");
+  assert.equal(captured().scope.worldId, "*");
   assert.equal(captured().scope.targetType, "config");
   assert.equal(captured().payload.instanceId, "game-server-a");
   assert.doesNotMatch(JSON.stringify(captured().payload), /token|assertion|host|port|password/i);
@@ -84,6 +142,173 @@ test("game-server shutdown preserves immediate, armed, and blocked result fields
       assert.deepEqual(result, expected);
     });
   }
+});
+
+test("game-server shutdown binds the emergency service permission to the exact registry instance", async () => {
+  let options;
+  const { controller, captured } = createController({
+    client: {
+      async requestServerShutdown(_reason, inputOptions) {
+        options = inputOptions;
+        return { ok: true, error_code: "", shutdown_armed: true };
+      }
+    }
+  });
+
+  await controller.shutdownGameServer(
+    "game-server-a",
+    body(),
+    { admin: { sub: "admin-7" }, body: body() }
+  );
+
+  assert.equal(captured().permission, "service.shutdown");
+  assert.equal(captured().emergency, true);
+  assert.equal(captured().scope.serviceName, "game-server");
+  assert.equal(captured().scope.instanceId, "game-server-a");
+  assert.equal(captured().scope.worldId, undefined);
+  assert.equal(options.assertionContext.permission, "service.shutdown");
+  assert.equal(options.assertionContext.scope.instanceId, "game-server-a");
+  assert.equal(options.assertionContext.scope.worldId, undefined);
+});
+
+test("game-server controls pass real policy and high-risk preflight with least-privilege scopes", async () => {
+  const permissions = {
+    "game.config.write": {
+      permission_key: "game.config.write",
+      active: true,
+      risk_level: "high",
+      scope_dimensions: ["world_ids", "service_names"]
+    },
+    "service.shutdown": {
+      permission_key: "service.shutdown",
+      active: true,
+      risk_level: "emergency",
+      scope_dimensions: ["service_names", "instance_ids"]
+    }
+  };
+  const reservations = [];
+  const store = {
+    async findAdminPolicyPermission(permission) {
+      return permissions[permission] || null;
+    },
+    async listEffectiveAdminPolicyGrants(_adminId, permission) {
+      return permissions[permission]
+        ? [{ ...permissions[permission], grant_source: "role", source_id: 1, scope_json: ROOT_SCOPE }]
+        : [];
+    },
+    async reserveAdminOperationPreflight(input) {
+      reservations.push(input);
+      return {
+        kind: "created",
+        operation: {
+          operationId: input.operationId,
+          requestId: input.requestId,
+          status: "preflighted",
+          approvalStatus: input.approvalStatus
+        }
+      };
+    }
+  };
+  const policy = new AdminPolicyService(store);
+  const operations = new AdminOperationService({ adminOperationPreflightTtlMs: 120000 }, policy, store);
+  const highRisk = new AdminHighRiskOperationService(operations, {}, {});
+  const controller = new RolloutController({}, highRisk, {
+    async updateConfig() { throw new Error("preflight must not call game-server"); },
+    async requestServerShutdown() { throw new Error("preflight must not call game-server"); }
+  });
+  const preflightBody = body({ preflightNonce: undefined, preflightSummarySha256: undefined });
+
+  const drain = await controller.setGameServerDrain(
+    "game-server-a",
+    preflightBody,
+    { admin: { sub: "admin-7" }, body: preflightBody }
+  );
+  const shutdownBody = { ...preflightBody, requestId: "control-request-2" };
+  const shutdown = await controller.shutdownGameServer(
+    "game-server-a",
+    shutdownBody,
+    { admin: { sub: "admin-7" }, body: shutdownBody }
+  );
+
+  assert.equal(drain.state, "preflighted");
+  assert.equal(shutdown.state, "preflighted");
+  assert.deepEqual(reservations.map((entry) => entry.permissionKey), ["game.config.write", "service.shutdown"]);
+  assert.equal(reservations[0].requestedScope.worldId, "*");
+  assert.equal(reservations[0].requestedScope.serviceName, "game-server");
+  assert.equal(reservations[1].requestedScope.worldId, null);
+  assert.equal(reservations[1].requestedScope.instanceId, "game-server-a");
+  assert.deepEqual(reservations.map((entry) => entry.approvalStatus), ["pending", "pending"]);
+});
+
+test("game-server route guards accept only matching narrow grants and ignore forged body scope", async () => {
+  const drainScope = { ...ROOT_SCOPE, service_names: ["game-server"] };
+  const shutdownScope = {
+    ...ROOT_SCOPE,
+    service_names: ["game-server"],
+    instance_ids: ["game-server-a"]
+  };
+  const forgedBody = {
+    worldId: "forged-world",
+    serviceName: "forged-service",
+    instanceId: "forged-instance",
+    targetIds: ["forged-target"]
+  };
+  const drainRequest = {
+    admin: { sub: "admin-7", username: "operator" },
+    params: { instanceId: "game-server-a" },
+    query: {},
+    body: forgedBody,
+    headers: {},
+    method: "POST",
+    url: "/api/v1/rollouts/game-server/game-server-a/drain"
+  };
+  const shutdownRequest = {
+    ...drainRequest,
+    url: "/api/v1/rollouts/game-server/game-server-a/shutdown"
+  };
+
+  let fixture = routeGuard(RolloutController.prototype.setGameServerDrain, drainRequest, {
+    "game.config.write": [drainScope]
+  });
+  assert.equal(await fixture.guard.canActivate(fixture.context), true);
+
+  fixture = routeGuard(RolloutController.prototype.shutdownGameServer, shutdownRequest, {
+    "service.shutdown": [shutdownScope]
+  });
+  assert.equal(await fixture.guard.canActivate(fixture.context), true);
+
+  for (const scope of [
+    { ...shutdownScope, service_names: ["other-service"] },
+    { ...shutdownScope, instance_ids: ["game-server-b"] }
+  ]) {
+    fixture = routeGuard(RolloutController.prototype.shutdownGameServer, shutdownRequest, {
+      "service.shutdown": [scope]
+    });
+    await assert.rejects(
+      fixture.guard.canActivate(fixture.context),
+      (error) => error.getStatus() === 403 && error.getResponse().error === "ADMIN_SCOPE_DENIED"
+    );
+  }
+});
+
+test("game-server route guard rejects an invalid instance before policy evaluation", async () => {
+  const request = {
+    admin: { sub: "admin-7", username: "operator" },
+    params: { instanceId: "../other" },
+    query: {},
+    body: { serviceName: "game-server", instanceId: "game-server-a" },
+    headers: {},
+    method: "POST",
+    url: "/api/v1/rollouts/game-server/../other/shutdown"
+  };
+  const fixture = routeGuard(RolloutController.prototype.shutdownGameServer, request, {
+    "service.shutdown": [{ ...ROOT_SCOPE }]
+  });
+
+  await assert.rejects(
+    fixture.guard.canActivate(fixture.context),
+    (error) => error.getStatus() === 403 && error.getResponse().error === "ADMIN_SCOPE_DENIED"
+  );
 });
 
 test("game-server control maps unknown targets and downstream timeouts", async (t) => {
@@ -116,9 +341,11 @@ test("game-server control rejects invalid targets before downstream calls", asyn
   );
 });
 
-test("game-server control endpoints require game.config.write", () => {
+test("game-server control endpoints require action-specific permissions", () => {
   const drainPermission = Reflect.getMetadata(PERMISSIONS_KEY, RolloutController.prototype.setGameServerDrain);
   const shutdownPermission = Reflect.getMetadata(PERMISSIONS_KEY, RolloutController.prototype.shutdownGameServer);
   assert.deepEqual(drainPermission, ["game.config.write"]);
-  assert.deepEqual(shutdownPermission, ["game.config.write"]);
+  assert.deepEqual(shutdownPermission, ["service.shutdown"]);
+  assert.equal(typeof Reflect.getMetadata(POLICY_SCOPE_RESOLVER_KEY, RolloutController.prototype.setGameServerDrain), "function");
+  assert.equal(typeof Reflect.getMetadata(POLICY_SCOPE_RESOLVER_KEY, RolloutController.prototype.shutdownGameServer), "function");
 });

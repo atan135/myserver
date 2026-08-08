@@ -11,8 +11,10 @@ import {
 import {
   AdminPermission,
   AdminPermissionResolver,
+  AdminPolicyScopeResolver,
   PERMISSIONS_KEY,
-  POLICY_PERMISSION_RESOLVER_KEY
+  POLICY_PERMISSION_RESOLVER_KEY,
+  POLICY_SCOPE_RESOLVER_KEY
 } from "./roles.decorator.js";
 import { AdminPolicyScopeRequest } from "./admin-policy.service.js";
 
@@ -157,7 +159,16 @@ export class AdminPolicyGuard implements CanActivate {
     }
 
     for (const permission of permissions) {
-      const scope = await extractAdminPolicyScope(request, permission, this.adminStore);
+      let scope: AdminPolicyScopeRequest;
+      try {
+        const resolver = this.scopeResolverFor(context);
+        scope = resolver
+          ? await resolver(request, permission)
+          : await extractAdminPolicyScope(request, permission, this.adminStore);
+      } catch {
+        await this.recordDenied(context, request, permissions, "SCOPE_DENIED", permission);
+        throw policyFailure("SCOPE_DENIED");
+      }
       const decision = await this.policy.authorize(request.admin.sub, permission, scope);
       if (!decision?.allowed) {
         const code = decision?.code || "ADMIN_PERMISSION_UNAVAILABLE";
@@ -167,6 +178,14 @@ export class AdminPolicyGuard implements CanActivate {
     }
 
     return true;
+  }
+
+  private scopeResolverFor(context: ExecutionContext): AdminPolicyScopeResolver | null {
+    const resolver = this.reflector.getAllAndOverride<AdminPolicyScopeResolver>(POLICY_SCOPE_RESOLVER_KEY, [
+      context.getHandler(),
+      context.getClass()
+    ]);
+    return typeof resolver === "function" ? resolver : null;
   }
 
   private permissionsFor(context: ExecutionContext, request: any): readonly AdminPermission[] | null {

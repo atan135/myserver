@@ -147,16 +147,18 @@ function requestScopeSnapshot(scope: AdminPolicyScopeRequest = {}) {
     }
     return [...new Set(value.map((entry) => identifier(entry, field)))].sort();
   };
-  const optionalIdentifier = (value: unknown, field: string) => value === undefined || value === null || value === ""
-    ? null
-    : identifier(value, field);
+  const optionalIdentifier = (value: unknown, field: string, allowWildcard = false) => {
+    if (value === undefined || value === null || value === "") return null;
+    if (allowWildcard && value === "*") return "*";
+    return identifier(value, field);
+  };
   const targetIds = normalizedList(scope.targetIds, "targetIds");
   const targetCount = scope.targetCount === undefined ? Math.max(targetIds.length, 1) : scope.targetCount;
   if (!Number.isSafeInteger(targetCount) || targetCount < 1 || targetCount > 10_000) {
     throw operationError("ADMIN_OPERATION_INPUT_INVALID", "targetCount is invalid", { field: "targetCount" });
   }
   return {
-    worldId: optionalIdentifier(scope.worldId, "worldId"),
+    worldId: optionalIdentifier(scope.worldId, "worldId", true),
     serviceName: optionalIdentifier(scope.serviceName, "serviceName"),
     instanceId: optionalIdentifier(scope.instanceId, "instanceId"),
     fields: normalizedList(scope.fields, "fields"),
