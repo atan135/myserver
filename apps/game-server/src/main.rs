@@ -29,20 +29,15 @@ mod protocol_version_policy {
 }
 mod server;
 mod session;
+mod startup;
 mod ticket;
 
 use std::fs;
 use std::path::Path;
-use std::sync::Arc;
-use std::time::Duration;
 
 use config::Config;
-use core::config_table::{ConfigTableRuntime, spawn_hot_reload_task};
-use db_store::PgAuditStore;
-use service_registry::{
-    ConvergenceConfig, DependencySpec, HealthState, RegistryClient, ServiceEndpoint,
-    ServiceInstance, spawn_registry_publication,
-};
+use core::config_table::ConfigTableRuntime;
+use service_registry::{DependencySpec, HealthState, ServiceEndpoint, ServiceInstance};
 use tracing_appender::rolling;
 use tracing_subscriber::fmt;
 use tracing_subscriber::layer::SubscriberExt;
@@ -139,9 +134,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &config.service_instance_id,
         health_dependencies,
     )?;
-    let health_task =
-        service_registry::readiness::spawn_health_from_env(health_state.clone()).await?;
-
     let config_table_runtime = ConfigTableRuntime::load(Path::new(&config.csv_dir))?;
     let initial_config = config_table_runtime.snapshot().await;
     let initial_tables = initial_config.tables.clone();
@@ -163,96 +155,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "csv config tables loaded"
     );
 
-    // Service Registry
-    let registry_client: Option<Arc<RegistryClient>> = if config.registry_enabled {
-        let client = RegistryClient::new_lazy(
-            &config.registry_url,
-            &config.service_name,
-            &config.service_instance_id,
-        )
-        .map_err(|error| std::io::Error::other(error.to_string()))?
-        .with_key_prefix(config.registry_key_prefix.clone())
-        .with_heartbeat_interval(config.registry_heartbeat_interval_secs);
-        Some(Arc::new(client))
-    } else {
-        tracing::info!("service registry disabled");
-        None
-    };
-
-    let registry_publication_task = registry_client.as_ref().map(|client| {
-        spawn_registry_publication(
-            Arc::clone(client),
-            build_service_instance(&config),
-            health_state.clone(),
-            ConvergenceConfig {
-                steady_interval: Duration::from_secs(1),
-                ..ConvergenceConfig::default()
-            },
-        )
-    });
-
-    let csv_reload_task = if config.csv_reload_enabled {
-        Some(spawn_hot_reload_task(
-            config_table_runtime.clone(),
-            Duration::from_secs(config.csv_reload_interval_secs),
-        ))
-    } else {
-        tracing::info!(csv_dir = %config.csv_dir, "csv config hot reload disabled");
-        None
-    };
-
-    let db_store = PgAuditStore::new(&config).await?;
-
-    // 启动 metrics 上报任务
-    let metrics_nats_url = config.nats_url.clone();
-    let metrics_instance_id = config.service_instance_id.clone();
-    tokio::spawn(async move {
-        metrics::METRICS
-            .start_reporting(&metrics_nats_url, metrics_instance_id, 5)
-            .await;
-    });
-
-    let result = server::run(
-        &config,
-        db_store.clone(),
-        config_table_runtime.clone(),
-        health_state.clone(),
-    )
-    .await;
-
-    health_state.mark_shutting_down();
-
-    // 关闭时注销服务
-    if let Some(task) = registry_publication_task {
-        task.stop_and_wait().await;
-    }
-    if let Some(client) = registry_client {
-        // 注销服务
-        if let Err(e) = client.deregister().await {
-            tracing::error!(error = %e, "failed to deregister service");
-        } else {
-            tracing::info!(
-                service = %config.service_name,
-                instance = %config.service_instance_id,
-                "service deregistered from registry"
-            );
-        }
-    }
-
-    if let Some(task) = csv_reload_task {
-        task.abort();
-        let _ = task.await;
-    }
-
-    db_store.close().await;
-    if let Some(task) = health_task {
-        task.abort();
-        let _ = task.await;
-    }
-    result
+    server::run(&config, config_table_runtime, health_state).await
 }
 
-fn build_service_instance(config: &Config) -> ServiceInstance {
+pub(crate) fn build_service_instance(config: &Config) -> ServiceInstance {
     let client_host = published_host(&config.public_host);
     let admin_host = published_host(&config.admin_advertised_host);
     let endpoint_metadata = serde_json::json!({

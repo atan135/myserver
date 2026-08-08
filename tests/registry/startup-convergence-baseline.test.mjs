@@ -97,18 +97,18 @@ test("startup fixture covers the four reproducible baseline failures", () => {
   }
 });
 
-test("game-server starts match convergence after local resources without initial discovery panic", () => {
+test("game-server owns its worker lease before listeners and keeps match convergence recoverable", () => {
   const server = source("apps/game-server/src/server.rs");
   const matchClient = source("apps/game-server/src/match_client.rs");
   const entry = scenario("game-server-match-not-registered");
 
-  const socketPair = indexOfOrFail(server, "create_listener_pair(", "local socket pair bind");
+  const socketPair = indexOfOrFail(server, "create_listener(&config.local_socket_name)", "first local socket bind");
   const lease = indexOfOrFail(server, "WorkerLease::acquire_redis(", "worker lease acquisition");
   const matchConfig = indexOfOrFail(server, "MatchClientConfig::from_env().await", "match config parsing");
   const convergence = indexOfOrFail(server, "spawn_match_client_rediscovery(", "match convergence task");
 
-  assert.ok(socketPair < lease);
-  assert.ok(lease < matchConfig);
+  assert.ok(lease < socketPair);
+  assert.ok(socketPair < matchConfig);
   assert.ok(matchConfig < convergence);
   assert.doesNotMatch(matchClient, /fn require_initial_match_discovery/);
   assert.match(matchClient, /spawn_convergence\(convergence_config/);
@@ -133,6 +133,21 @@ test("worker lease source routes SET NX results through the tested classifier", 
   assert.ok(entry.condition.ttlSecondsRemaining > 0);
 });
 
+test("game-server lease wait and cleanup are bounded, cancellable, and ownership ordered", () => {
+  const startup = source("apps/game-server/src/startup.rs");
+  const server = source("apps/game-server/src/server.rs");
+
+  assert.match(startup, /GLOBAL_ID_WORKER_LEASE_WAIT_TIMEOUT_SECS/);
+  assert.match(startup, /tokio::time::sleep_until\(deadline\)/);
+  assert.match(startup, /LeaseWaitError::Cancelled/);
+  assert.match(startup, /OwnedResource::NetworkListeners \| OwnedResource::LocalSockets/);
+  assert.match(startup, /CleanupStep::StopBackgroundTasks[\s\S]+CleanupStep::CloseStores/);
+  assert.match(startup, /let run_result = run\.await;[\s\S]+let cleanup_report = run_cleanup\(executor\)\.await/);
+  assert.match(server, /run_then_cleanup\(std::future::ready\(run_result\), &mut resources\)\.await/);
+  assert.match(server, /WorkerLease::acquire_redis[\s\S]+TcpListener::bind/);
+  assert.match(server, /match \(run_result, cleanup_report\.failures\.is_empty\(\)\)/);
+});
+
 test("socket pair source preserves local-before-internal bootstrap order", () => {
   const server = source("apps/game-server/src/server.rs");
   const localSocket = source("apps/game-server/src/local_socket.rs");
@@ -140,11 +155,16 @@ test("socket pair source preserves local-before-internal bootstrap order", () =>
   const entry = scenario("game-server-two-residual-local-sockets");
 
   assert.match(localSocket, /ListenerOptions::new\(\)\.name\(to_name\(name\)\?\)\.create_tokio\(\)/);
-  assert.doesNotMatch(productionLocalSocket, /remove_file|reclaim|stale/i);
-  assert.match(server, /create_listener_pair\(\s*&config\.local_socket_name,\s*&config\.internal_socket_name/s);
-  const localCreate = indexOfOrFail(localSocket, "let local_listener = create(local_name)?", "local socket create");
-  const internalCreate = indexOfOrFail(localSocket, "let internal_listener = create(internal_name)?", "internal socket create");
-  assert.ok(localCreate < internalCreate);
+  assert.match(productionLocalSocket, /std::fs::remove_file\(&path\)/);
+  assert.doesNotMatch(productionLocalSocket, /stale.reclaim|remove_dir_all/i);
+  const localCreate = indexOfOrFail(server, "create_listener(&config.local_socket_name)", "local socket create");
+  const localTrack = indexOfOrFail(server, ".push(config.local_socket_name.clone())", "local socket ownership registration");
+  const internalCreate = indexOfOrFail(server, "create_listener(&config.internal_socket_name)", "internal socket create");
+  const internalTrack = indexOfOrFail(server, ".push(config.internal_socket_name.clone())", "internal socket ownership registration");
+  assert.ok(localCreate < localTrack);
+  assert.ok(localTrack < internalCreate);
+  assert.ok(internalCreate < internalTrack);
+  assert.match(server, /CleanupStep::ReleaseListenersAndSockets[\s\S]+remove_socket_path\(&socket_name\)/);
   assert.equal(entry.currentBehavior.createMode, "create_without_reclaim");
 });
 
@@ -208,12 +228,12 @@ test("target services publish unhealthy until stable readiness and recover regis
   assert.match(convergence, /bounded_exponential_delay/);
   assert.match(convergence, /jitter\s*\.apply/);
 
-  for (const entry of [
-    "apps/game-server/src/main.rs",
-    "apps/game-proxy/src/main.rs",
-    "apps/match-service/src/main.rs"
+  for (const entries of [
+    ["apps/game-server/src/main.rs", "apps/game-server/src/server.rs"],
+    ["apps/game-proxy/src/main.rs"],
+    ["apps/match-service/src/main.rs"]
   ]) {
-    const contents = source(entry);
+    const contents = entries.map(source).join("\n");
     assert.match(contents, /RegistryClient::new_lazy/);
     assert.match(contents, /spawn_registry_publication/);
     assert.doesNotMatch(contents, /start_heartbeat_task_with_observer/);

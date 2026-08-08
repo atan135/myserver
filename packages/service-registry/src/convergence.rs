@@ -220,10 +220,16 @@ impl ConvergenceTask {
         }
     }
 
-    pub async fn stop_and_wait(mut self) {
+    pub async fn stop_and_wait(self) {
+        let _ = self.stop_and_wait_result().await;
+    }
+
+    pub async fn stop_and_wait_result(mut self) -> Result<(), tokio::task::JoinError> {
         if let Some(task) = self.task.take() {
             task.abort();
-            let _ = task.await;
+            task.await
+        } else {
+            Ok(())
         }
     }
 }

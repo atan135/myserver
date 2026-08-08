@@ -244,166 +244,161 @@ impl MetricsCollector {
 
         let service_name = "game-server";
 
-        tokio::spawn(async move {
-            let mut ticker = interval(Duration::from_secs(interval_secs));
+        let mut ticker = interval(Duration::from_secs(interval_secs));
 
-            loop {
-                ticker.tick().await;
+        loop {
+            ticker.tick().await;
 
-                // 读取并归零计数器
-                let qps = self.qps_counter.swap(0, Ordering::Relaxed);
-                let latency_sum = self.latency_sum.swap(0, Ordering::Relaxed);
-                let latency_count = self.latency_count.swap(0, Ordering::Relaxed);
-                let online_players = self.online_players.load(Ordering::Relaxed);
-                let room_count = self.room_count.load(Ordering::Relaxed);
-                let inventory_grant_first_success = self
-                    .inventory_grant_first_success
-                    .swap(0, Ordering::Relaxed);
-                let inventory_grant_idempotent_hit = self
-                    .inventory_grant_idempotent_hit
-                    .swap(0, Ordering::Relaxed);
-                let inventory_grant_fingerprint_conflict = self
-                    .inventory_grant_fingerprint_conflict
-                    .swap(0, Ordering::Relaxed);
-                let inventory_grant_transaction_failure = self
-                    .inventory_grant_transaction_failure
-                    .swap(0, Ordering::Relaxed);
-                let inventory_grant_push_failure =
-                    self.inventory_grant_push_failure.swap(0, Ordering::Relaxed);
-                let asset_transaction_duration_ms = self
-                    .asset_transaction_duration_ms
-                    .swap(0, Ordering::Relaxed);
-                let asset_transaction_count =
-                    self.asset_transaction_count.swap(0, Ordering::Relaxed);
-                let asset_version_conflict = self.asset_version_conflict.swap(0, Ordering::Relaxed);
-                let asset_capacity_fallback =
-                    self.asset_capacity_fallback.swap(0, Ordering::Relaxed);
-                let reward_mail_created = self.reward_mail_created.swap(0, Ordering::Relaxed);
-                let client_protocol_auth_accepted_legacy = self
-                    .client_protocol_auth_accepted_legacy
-                    .swap(0, Ordering::Relaxed);
-                let client_protocol_auth_accepted_current = self
-                    .client_protocol_auth_accepted_current
-                    .swap(0, Ordering::Relaxed);
-                let client_protocol_auth_accepted_supported_older = self
-                    .client_protocol_auth_accepted_supported_older
-                    .swap(0, Ordering::Relaxed);
-                let client_protocol_auth_rejected_too_old = self
-                    .client_protocol_auth_rejected_too_old
-                    .swap(0, Ordering::Relaxed);
-                let client_protocol_auth_rejected_too_new = self
-                    .client_protocol_auth_rejected_too_new
-                    .swap(0, Ordering::Relaxed);
+            // 读取并归零计数器
+            let qps = self.qps_counter.swap(0, Ordering::Relaxed);
+            let latency_sum = self.latency_sum.swap(0, Ordering::Relaxed);
+            let latency_count = self.latency_count.swap(0, Ordering::Relaxed);
+            let online_players = self.online_players.load(Ordering::Relaxed);
+            let room_count = self.room_count.load(Ordering::Relaxed);
+            let inventory_grant_first_success = self
+                .inventory_grant_first_success
+                .swap(0, Ordering::Relaxed);
+            let inventory_grant_idempotent_hit = self
+                .inventory_grant_idempotent_hit
+                .swap(0, Ordering::Relaxed);
+            let inventory_grant_fingerprint_conflict = self
+                .inventory_grant_fingerprint_conflict
+                .swap(0, Ordering::Relaxed);
+            let inventory_grant_transaction_failure = self
+                .inventory_grant_transaction_failure
+                .swap(0, Ordering::Relaxed);
+            let inventory_grant_push_failure =
+                self.inventory_grant_push_failure.swap(0, Ordering::Relaxed);
+            let asset_transaction_duration_ms = self
+                .asset_transaction_duration_ms
+                .swap(0, Ordering::Relaxed);
+            let asset_transaction_count = self.asset_transaction_count.swap(0, Ordering::Relaxed);
+            let asset_version_conflict = self.asset_version_conflict.swap(0, Ordering::Relaxed);
+            let asset_capacity_fallback = self.asset_capacity_fallback.swap(0, Ordering::Relaxed);
+            let reward_mail_created = self.reward_mail_created.swap(0, Ordering::Relaxed);
+            let client_protocol_auth_accepted_legacy = self
+                .client_protocol_auth_accepted_legacy
+                .swap(0, Ordering::Relaxed);
+            let client_protocol_auth_accepted_current = self
+                .client_protocol_auth_accepted_current
+                .swap(0, Ordering::Relaxed);
+            let client_protocol_auth_accepted_supported_older = self
+                .client_protocol_auth_accepted_supported_older
+                .swap(0, Ordering::Relaxed);
+            let client_protocol_auth_rejected_too_old = self
+                .client_protocol_auth_rejected_too_old
+                .swap(0, Ordering::Relaxed);
+            let client_protocol_auth_rejected_too_new = self
+                .client_protocol_auth_rejected_too_new
+                .swap(0, Ordering::Relaxed);
 
-                // 计算聚合延迟
-                let latency_ms = if latency_count > 0 {
-                    latency_sum / latency_count
-                } else {
-                    0
-                };
-                let asset_transaction_latency_ms = if asset_transaction_count > 0 {
-                    asset_transaction_duration_ms / asset_transaction_count
-                } else {
-                    0
-                };
+            // 计算聚合延迟
+            let latency_ms = if latency_count > 0 {
+                latency_sum / latency_count
+            } else {
+                0
+            };
+            let asset_transaction_latency_ms = if asset_transaction_count > 0 {
+                asset_transaction_duration_ms / asset_transaction_count
+            } else {
+                0
+            };
 
-                let bucket = current_bucket();
-                // 收集扩展字段
-                let extra = {
-                    let guard = self.extra.lock().unwrap();
-                    guard.clone()
-                };
+            let bucket = current_bucket();
+            // 收集扩展字段
+            let extra = {
+                let guard = self.extra.lock().unwrap();
+                guard.clone()
+            };
 
-                let mut fields: Vec<(String, String)> = vec![
-                    ("qps".to_string(), qps.to_string()),
-                    ("latency_ms".to_string(), latency_ms.to_string()),
-                    ("online_players".to_string(), online_players.to_string()),
-                    ("room_count".to_string(), room_count.to_string()),
-                    (
-                        "inventory_grant_first_success_total".to_string(),
-                        inventory_grant_first_success.to_string(),
-                    ),
-                    (
-                        "inventory_grant_idempotent_hit_total".to_string(),
-                        inventory_grant_idempotent_hit.to_string(),
-                    ),
-                    (
-                        "inventory_grant_fingerprint_conflict_total".to_string(),
-                        inventory_grant_fingerprint_conflict.to_string(),
-                    ),
-                    (
-                        "inventory_grant_transaction_failure_total".to_string(),
-                        inventory_grant_transaction_failure.to_string(),
-                    ),
-                    (
-                        "inventory_grant_push_failure_total".to_string(),
-                        inventory_grant_push_failure.to_string(),
-                    ),
-                    (
-                        "asset_transaction_latency_ms".to_string(),
-                        asset_transaction_latency_ms.to_string(),
-                    ),
-                    (
-                        "asset_transaction_count".to_string(),
-                        asset_transaction_count.to_string(),
-                    ),
-                    (
-                        "asset_version_conflict_total".to_string(),
-                        asset_version_conflict.to_string(),
-                    ),
-                    (
-                        "asset_capacity_fallback_total".to_string(),
-                        asset_capacity_fallback.to_string(),
-                    ),
-                    (
-                        "reward_mail_created_total".to_string(),
-                        reward_mail_created.to_string(),
-                    ),
-                    (
-                        "client_protocol_auth_accepted_legacy_total".to_string(),
-                        client_protocol_auth_accepted_legacy.to_string(),
-                    ),
-                    (
-                        "client_protocol_auth_accepted_current_total".to_string(),
-                        client_protocol_auth_accepted_current.to_string(),
-                    ),
-                    (
-                        "client_protocol_auth_accepted_supported_older_total".to_string(),
-                        client_protocol_auth_accepted_supported_older.to_string(),
-                    ),
-                    (
-                        "client_protocol_auth_rejected_too_old_total".to_string(),
-                        client_protocol_auth_rejected_too_old.to_string(),
-                    ),
-                    (
-                        "client_protocol_auth_rejected_too_new_total".to_string(),
-                        client_protocol_auth_rejected_too_new.to_string(),
-                    ),
-                ];
+            let mut fields: Vec<(String, String)> = vec![
+                ("qps".to_string(), qps.to_string()),
+                ("latency_ms".to_string(), latency_ms.to_string()),
+                ("online_players".to_string(), online_players.to_string()),
+                ("room_count".to_string(), room_count.to_string()),
+                (
+                    "inventory_grant_first_success_total".to_string(),
+                    inventory_grant_first_success.to_string(),
+                ),
+                (
+                    "inventory_grant_idempotent_hit_total".to_string(),
+                    inventory_grant_idempotent_hit.to_string(),
+                ),
+                (
+                    "inventory_grant_fingerprint_conflict_total".to_string(),
+                    inventory_grant_fingerprint_conflict.to_string(),
+                ),
+                (
+                    "inventory_grant_transaction_failure_total".to_string(),
+                    inventory_grant_transaction_failure.to_string(),
+                ),
+                (
+                    "inventory_grant_push_failure_total".to_string(),
+                    inventory_grant_push_failure.to_string(),
+                ),
+                (
+                    "asset_transaction_latency_ms".to_string(),
+                    asset_transaction_latency_ms.to_string(),
+                ),
+                (
+                    "asset_transaction_count".to_string(),
+                    asset_transaction_count.to_string(),
+                ),
+                (
+                    "asset_version_conflict_total".to_string(),
+                    asset_version_conflict.to_string(),
+                ),
+                (
+                    "asset_capacity_fallback_total".to_string(),
+                    asset_capacity_fallback.to_string(),
+                ),
+                (
+                    "reward_mail_created_total".to_string(),
+                    reward_mail_created.to_string(),
+                ),
+                (
+                    "client_protocol_auth_accepted_legacy_total".to_string(),
+                    client_protocol_auth_accepted_legacy.to_string(),
+                ),
+                (
+                    "client_protocol_auth_accepted_current_total".to_string(),
+                    client_protocol_auth_accepted_current.to_string(),
+                ),
+                (
+                    "client_protocol_auth_accepted_supported_older_total".to_string(),
+                    client_protocol_auth_accepted_supported_older.to_string(),
+                ),
+                (
+                    "client_protocol_auth_rejected_too_old_total".to_string(),
+                    client_protocol_auth_rejected_too_old.to_string(),
+                ),
+                (
+                    "client_protocol_auth_rejected_too_new_total".to_string(),
+                    client_protocol_auth_rejected_too_new.to_string(),
+                ),
+            ];
 
-                fields.extend(collect_discovery_metric_fields(true));
+            fields.extend(collect_discovery_metric_fields(true));
 
-                for (k, v) in extra {
-                    fields.push((k, v));
-                }
-
-                if let Err(e) =
-                    publish_metrics(&client, service_name, &service_instance_id, bucket, fields)
-                        .await
-                {
-                    error!(error = %e, "failed to publish metrics to nats");
-                }
-
-                info!(
-                    bucket = bucket,
-                    qps = qps,
-                    latency_ms = latency_ms,
-                    online_players = online_players,
-                    room_count = room_count,
-                    "metrics reported"
-                );
+            for (k, v) in extra {
+                fields.push((k, v));
             }
-        });
+
+            if let Err(e) =
+                publish_metrics(&client, service_name, &service_instance_id, bucket, fields).await
+            {
+                error!(error = %e, "failed to publish metrics to nats");
+            }
+
+            info!(
+                bucket = bucket,
+                qps = qps,
+                latency_ms = latency_ms,
+                online_players = online_players,
+                room_count = room_count,
+                "metrics reported"
+            );
+        }
     }
 }
 

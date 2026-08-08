@@ -32,24 +32,21 @@ pub fn create_listener(name: &str) -> io::Result<Listener> {
     ListenerOptions::new().name(to_name(name)?).create_tokio()
 }
 
-pub fn create_listener_pair(
-    local_name: &str,
-    internal_name: &str,
-) -> io::Result<(Listener, Listener)> {
-    create_listener_pair_with(local_name, internal_name, create_listener)
-}
-
-fn create_listener_pair_with<T, Create>(
-    local_name: &str,
-    internal_name: &str,
-    mut create: Create,
-) -> io::Result<(T, T)>
-where
-    Create: FnMut(&str) -> io::Result<T>,
-{
-    let local_listener = create(local_name)?;
-    let internal_listener = create(internal_name)?;
-    Ok((local_listener, internal_listener))
+pub fn remove_socket_path(name: &str) -> io::Result<()> {
+    #[cfg(windows)]
+    {
+        let _ = name;
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        let path = normalize_name(name);
+        match std::fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
 }
 
 pub async fn connect(name: &str) -> io::Result<Stream> {
@@ -61,6 +58,19 @@ mod tests {
     use super::*;
     use std::collections::HashSet;
     use std::sync::atomic::{AtomicU64, Ordering};
+
+    fn create_listener_pair_with<T, Create>(
+        local_name: &str,
+        internal_name: &str,
+        mut create: Create,
+    ) -> io::Result<(T, T)>
+    where
+        Create: FnMut(&str) -> io::Result<T>,
+    {
+        let local_listener = create(local_name)?;
+        let internal_listener = create(internal_name)?;
+        Ok((local_listener, internal_listener))
+    }
 
     fn unique_name(label: &str) -> String {
         static NEXT_ID: AtomicU64 = AtomicU64::new(1);
@@ -116,10 +126,8 @@ mod tests {
         let occupied_internal =
             create_listener(&internal_name).expect("fixture internal socket should bind");
 
-        let error = match create_listener_pair(&local_name, &internal_name) {
-            Ok(_) => panic!("occupied socket pair must reject bootstrap"),
-            Err(error) => error,
-        };
+        let error =
+            create_listener(&local_name).expect_err("occupied local socket must reject bootstrap");
 
         assert_eq!(error.kind(), io::ErrorKind::AddrInUse);
         drop(occupied_local);

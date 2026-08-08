@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -8,12 +9,16 @@ use global_id::{
 };
 use interprocess::local_socket::traits::tokio::Listener as _;
 use serde_json::{Value, json};
-use service_registry::{HealthState, StartupErrorCode};
+use service_registry::{
+    ConvergenceConfig, ConvergenceTask, HealthState, RegistryClient, StartupErrorCode,
+    spawn_registry_publication,
+};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::{Notify, RwLock, mpsc, watch};
+use tokio::task::JoinHandle;
 use tokio::time::{Duration, timeout};
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use crate::adapters::persistence::PgCharacterElementStore;
 use crate::business::character_element::CharacterElementFacade;
@@ -22,7 +27,7 @@ use crate::core::character_discipline::{DisciplineService, PgDisciplineStore};
 use crate::core::character_progress::CharacterProgressService;
 use crate::core::character_title::{PgTitleStore, TitleService};
 use crate::core::character_title_unlock::TitleUnlockService;
-use crate::core::config_table::ConfigTableRuntime;
+use crate::core::config_table::{ConfigTableRuntime, spawn_hot_reload_task};
 use crate::core::context::{ConnectionContext, PlayerRegistry, ServerSharedState, ServiceContext};
 use crate::core::logic::SharedRoomLogicFactory;
 use crate::core::online_route::{
@@ -47,9 +52,14 @@ use crate::metrics::METRICS;
 use crate::pb::SessionKickPush;
 use crate::protocol::{HEADER_LEN, MessageType, Packet, encode_packet, parse_header};
 use crate::session::{Session, SessionState};
+use crate::startup::{
+    CleanupExecutor, CleanupStep, LeaseWaitConfig, LeaseWaitError, OwnedResource, StartupOwnership,
+    run_cleanup, run_then_cleanup, shutdown_signal, wait_for_worker_lease,
+};
 
 pub const DEFAULT_DRAIN_MODE_REASON: &str = "rollout";
 pub const DEFAULT_DRAIN_MODE_SOURCE: &str = "admin";
+const CLEANUP_OPERATION_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Debug)]
 pub struct RuntimeConfig {
@@ -387,99 +397,339 @@ impl Drop for ConnectionCountGuard {
     }
 }
 
+struct GameServerResources {
+    health_state: HealthState,
+    redis_client: Option<redis::Client>,
+    worker_lease: Option<WorkerLease>,
+    registry_client: Option<Arc<RegistryClient>>,
+    registry_started: bool,
+    socket_names: Vec<String>,
+    tasks: Vec<JoinHandle<()>>,
+    connection_tasks: Arc<tokio::sync::Mutex<Vec<JoinHandle<()>>>>,
+    convergence_tasks: Vec<ConvergenceTask>,
+    db_store: Option<PgAuditStore>,
+    player_store: Option<PgPlayerStore>,
+    character_store: Option<PgCharacterElementStore>,
+    discipline_store: Option<PgDisciplineStore>,
+    title_store: Option<PgTitleStore>,
+}
+
+impl GameServerResources {
+    fn new(health_state: HealthState) -> Self {
+        Self {
+            health_state,
+            redis_client: None,
+            worker_lease: None,
+            registry_client: None,
+            registry_started: false,
+            socket_names: Vec::new(),
+            tasks: Vec::new(),
+            connection_tasks: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+            convergence_tasks: Vec::new(),
+            db_store: None,
+            player_store: None,
+            character_store: None,
+            discipline_store: None,
+            title_store: None,
+        }
+    }
+}
+
+async fn close_store_with_timeout<F>(name: &str, close: F, errors: &mut Vec<String>)
+where
+    F: Future<Output = ()>,
+{
+    if timeout(CLEANUP_OPERATION_TIMEOUT, close).await.is_err() {
+        errors.push(format!("timed out closing {name} store"));
+    }
+}
+
+fn collect_task_join_error(
+    name: &str,
+    result: Result<(), tokio::task::JoinError>,
+    errors: &mut Vec<String>,
+) {
+    if let Err(error) = result
+        && !error.is_cancelled()
+    {
+        errors.push(format!("{name} task failed: {error}"));
+    }
+}
+
+impl CleanupExecutor for GameServerResources {
+    async fn execute(&mut self, step: CleanupStep) -> Result<(), String> {
+        match step {
+            CleanupStep::StopBackgroundTasks => {
+                self.health_state.mark_shutting_down();
+                let mut errors = Vec::new();
+                for task in self.convergence_tasks.drain(..) {
+                    collect_task_join_error(
+                        "convergence",
+                        task.stop_and_wait_result().await,
+                        &mut errors,
+                    );
+                }
+                for task in self.tasks.drain(..) {
+                    task.abort();
+                    collect_task_join_error("background", task.await, &mut errors);
+                }
+                let connection_tasks = {
+                    let mut tasks = self.connection_tasks.lock().await;
+                    std::mem::take(&mut *tasks)
+                };
+                for task in connection_tasks {
+                    task.abort();
+                    collect_task_join_error("connection", task.await, &mut errors);
+                }
+                if errors.is_empty() {
+                    Ok(())
+                } else {
+                    Err(errors.join("; "))
+                }
+            }
+            CleanupStep::ReleaseListenersAndSockets => {
+                let mut errors = Vec::new();
+                for socket_name in self.socket_names.drain(..) {
+                    if let Err(error) = crate::local_socket::remove_socket_path(&socket_name) {
+                        errors.push(format!("failed to remove socket {socket_name}: {error}"));
+                    }
+                }
+                if errors.is_empty() {
+                    Ok(())
+                } else {
+                    Err(errors.join("; "))
+                }
+            }
+            CleanupStep::DeregisterInstance => {
+                if !self.registry_started {
+                    return Ok(());
+                }
+                self.registry_started = false;
+                let Some(client) = &self.registry_client else {
+                    return Ok(());
+                };
+                match timeout(CLEANUP_OPERATION_TIMEOUT, client.deregister()).await {
+                    Ok(result) => result.map_err(|error| error.to_string()),
+                    Err(_) => Err("timed out deregistering service instance".to_string()),
+                }
+            }
+            CleanupStep::ReleaseWorkerLease => {
+                let Some(lease) = self.worker_lease.take() else {
+                    return Ok(());
+                };
+                let Some(client) = &self.redis_client else {
+                    lease.deactivate();
+                    return Err("redis client unavailable during worker lease release".to_string());
+                };
+                lease.deactivate();
+                match timeout(CLEANUP_OPERATION_TIMEOUT, async {
+                    let mut redis = client
+                        .get_multiplexed_async_connection()
+                        .await
+                        .map_err(|error| error.to_string())?;
+                    match lease.release_redis(&mut redis).await {
+                        Ok(true) => Ok(()),
+                        Ok(false) => Err("worker lease token no longer owns the key".to_string()),
+                        Err(error) => Err(error.to_string()),
+                    }
+                })
+                .await
+                {
+                    Ok(result) => result,
+                    Err(_) => Err("timed out releasing worker lease".to_string()),
+                }
+            }
+            CleanupStep::CloseStores => {
+                let mut errors = Vec::new();
+                if let Some(store) = &self.player_store {
+                    close_store_with_timeout("player", store.close(), &mut errors).await;
+                }
+                if let Some(store) = &self.character_store {
+                    close_store_with_timeout("character", store.close(), &mut errors).await;
+                }
+                if let Some(store) = &self.discipline_store {
+                    close_store_with_timeout("discipline", store.close(), &mut errors).await;
+                }
+                if let Some(store) = &self.title_store {
+                    close_store_with_timeout("title", store.close(), &mut errors).await;
+                }
+                if let Some(store) = &self.db_store {
+                    close_store_with_timeout("audit", store.close(), &mut errors).await;
+                }
+                if errors.is_empty() {
+                    Ok(())
+                } else {
+                    Err(errors.join("; "))
+                }
+            }
+        }
+    }
+}
+
 pub async fn run(
     config: &Config,
-    db_store: PgAuditStore,
     config_tables: ConfigTableRuntime,
     health_state: HealthState,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let tcp_listener = TcpListener::bind(config.bind_addr()).await?;
-    let admin_listener = TcpListener::bind(config.admin_bind_addr()).await?;
-    let (local_socket_listener, internal_socket_listener) =
-        crate::local_socket::create_listener_pair(
-            &config.local_socket_name,
-            &config.internal_socket_name,
-        )?;
-    health_state.mark_ready("local-runtime", "server-listeners");
-    let redis_client = redis::Client::open(config.redis_url.clone())?;
-    let mut global_id_redis = redis_client.get_multiplexed_async_connection().await?;
-    let global_id_origin_id = u16::try_from(config.global_id_origin_id).map_err(|_| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            format!(
-                "GLOBAL_ID_ORIGIN_ID out of range: {}",
-                config.global_id_origin_id
-            ),
-        )
-    })?;
-    let global_id_worker_id = config
-        .global_id_worker_id
-        .map(|worker_id| {
-            u8::try_from(worker_id).map_err(|_| {
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    format!("GLOBAL_ID_WORKER_ID out of range: {worker_id}"),
-                )
+    let mut resources = GameServerResources::new(health_state.clone());
+    let run_result: Result<(), Box<dyn std::error::Error>> = async {
+        let lease_wait = LeaseWaitConfig::try_from_env()?;
+        let global_id_origin_id = u16::try_from(config.global_id_origin_id).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "GLOBAL_ID_ORIGIN_ID out of range: {}",
+                    config.global_id_origin_id
+                ),
+            )
+        })?;
+        let global_id_worker_id = config
+            .global_id_worker_id
+            .map(|worker_id| {
+                u8::try_from(worker_id).map_err(|_| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        format!("GLOBAL_ID_WORKER_ID out of range: {worker_id}"),
+                    )
+                })
             })
-        })
-        .transpose()?;
-    let worker_lease = WorkerLease::acquire_redis(
-        &mut global_id_redis,
-        &config.redis_key_prefix,
-        global_id_origin_id,
-        global_id_worker_id,
-        &config.service_name,
-        &config.service_instance_id,
-        DEFAULT_WORKER_LEASE_TTL_SECONDS,
-    )
-    .await
-    .map_err(|error| std::io::Error::other(error.to_string()))?;
-    let worker_lease_key = worker_lease.key.clone();
-    info!(
-        origin_id = worker_lease.origin_id,
-        worker_id = worker_lease.worker_id,
-        lease_key = %worker_lease_key,
-        "global id worker lease acquired"
-    );
-    health_state.mark_ready("local-runtime", "worker-lease");
-    let lease_renew_client = redis_client.clone();
-    let lease_for_renewal = worker_lease.clone();
-    let (lease_loss_tx, mut lease_loss_rx) = watch::channel(false);
-    let lease_renew_task = tokio::spawn(async move {
-        loop {
-            tokio::time::sleep(Duration::from_secs(
-                DEFAULT_WORKER_LEASE_RENEW_INTERVAL_SECONDS,
+            .transpose()?;
+
+        let registry_client = if config.registry_enabled {
+            Some(Arc::new(
+                RegistryClient::new_lazy(
+                    &config.registry_url,
+                    &config.service_name,
+                    &config.service_instance_id,
+                )
+                .map_err(|error| std::io::Error::other(error.to_string()))?
+                .with_key_prefix(config.registry_key_prefix.clone())
+                .with_heartbeat_interval(config.registry_heartbeat_interval_secs),
             ))
-            .await;
-            let lease_is_active = match lease_renew_client.get_multiplexed_async_connection().await
-            {
-                Ok(mut redis) => match lease_for_renewal.renew_redis(&mut redis).await {
-                    Ok(active) => active,
+        } else {
+            tracing::info!("service registry disabled");
+            None
+        };
+        resources.registry_client = registry_client.clone();
+
+        // Required external stores are initialized before claiming the worker identity.
+        let db_store = PgAuditStore::new(config).await?;
+        resources.db_store = Some(db_store.clone());
+        let db_player_store = PgPlayerStore::new(config).await?;
+        resources.player_store = Some(db_player_store.clone());
+        let character_element_store = PgCharacterElementStore::new(config).await?;
+        resources.character_store = Some(character_element_store.clone());
+        let discipline_store = PgDisciplineStore::new(config).await?;
+        resources.discipline_store = Some(discipline_store.clone());
+        let title_store = PgTitleStore::new(config).await?;
+        resources.title_store = Some(title_store.clone());
+        health_state.mark_ready("local-runtime", "gameplay-stores");
+
+        let redis_client = redis::Client::open(config.redis_url.clone())?;
+        resources.redis_client = Some(redis_client.clone());
+        let lease_redis_client = redis_client.clone();
+        let redis_key_prefix = config.redis_key_prefix.clone();
+        let service_name = config.service_name.clone();
+        let service_instance_id = config.service_instance_id.clone();
+        let worker_lease = wait_for_worker_lease(
+            lease_wait,
+            move || {
+                let client = lease_redis_client.clone();
+                let redis_key_prefix = redis_key_prefix.clone();
+                let service_name = service_name.clone();
+                let service_instance_id = service_instance_id.clone();
+                async move {
+                    let mut redis = client
+                        .get_multiplexed_async_connection()
+                        .await
+                        .map_err(|error| error.to_string())?;
+                    WorkerLease::acquire_redis(
+                        &mut redis,
+                        &redis_key_prefix,
+                        global_id_origin_id,
+                        global_id_worker_id,
+                        &service_name,
+                        &service_instance_id,
+                        DEFAULT_WORKER_LEASE_TTL_SECONDS,
+                    )
+                    .await
+                    .map_err(|error| error.to_string())
+                }
+            },
+            shutdown_signal(),
+        )
+        .await
+        .map_err(|error| match error {
+            LeaseWaitError::TimedOut { attempts, .. } => std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!("global id worker lease wait timed out after {attempts} attempts"),
+            ),
+            LeaseWaitError::Cancelled { attempts } => std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                format!("global id worker lease wait cancelled after {attempts} attempts"),
+            ),
+        })?;
+
+        let mut ownership = StartupOwnership::default();
+        ownership.claim(OwnedResource::WorkerLease)?;
+        info!(
+            origin_id = worker_lease.origin_id,
+            worker_id = worker_lease.worker_id,
+            lease_key = %worker_lease.key,
+            "global id worker lease acquired"
+        );
+        health_state.mark_ready("local-runtime", "worker-lease");
+        resources.worker_lease = Some(worker_lease.clone());
+
+        let lease_renew_client = redis_client.clone();
+        let lease_for_renewal = worker_lease.clone();
+        let (lease_loss_tx, mut lease_loss_rx) = watch::channel(false);
+        resources.tasks.push(tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(
+                    DEFAULT_WORKER_LEASE_RENEW_INTERVAL_SECONDS,
+                ))
+                .await;
+                let lease_is_active = match lease_renew_client
+                    .get_multiplexed_async_connection()
+                    .await
+                {
+                    Ok(mut redis) => match lease_for_renewal.renew_redis(&mut redis).await {
+                        Ok(active) => active,
+                        Err(error) => {
+                            warn!(lease_key = %lease_for_renewal.key, error = %error, "global id worker lease renewal failed");
+                            false
+                        }
+                    },
                     Err(error) => {
-                        warn!(
-                            lease_key = %lease_for_renewal.key,
-                            error = %error,
-                            "global id worker lease renewal failed"
-                        );
+                        lease_for_renewal.deactivate();
+                        warn!(lease_key = %lease_for_renewal.key, error = %error, "global id worker lease renewal failed");
                         false
                     }
-                },
-                Err(error) => {
-                    lease_for_renewal.deactivate();
-                    warn!(lease_key = %lease_for_renewal.key, error = %error, "global id worker lease renewal failed");
-                    false
+                };
+                if !lease_is_active {
+                    warn!(lease_key = %lease_for_renewal.key, "global id worker lease lost; requesting process shutdown");
+                    let _ = lease_loss_tx.send(true);
+                    break;
                 }
-            };
-            if !lease_is_active {
-                warn!(
-                    lease_key = %lease_for_renewal.key,
-                    "global id worker lease lost; requesting process shutdown"
-                );
-                let _ = lease_loss_tx.send(true);
-                break;
             }
-        }
-    });
+        }));
+
+        ownership.claim(OwnedResource::NetworkListeners)?;
+        let tcp_listener = TcpListener::bind(config.bind_addr()).await?;
+        let admin_listener = TcpListener::bind(config.admin_bind_addr()).await?;
+        ownership.claim(OwnedResource::LocalSockets)?;
+        let local_socket_listener =
+            crate::local_socket::create_listener(&config.local_socket_name)?;
+        resources
+            .socket_names
+            .push(config.local_socket_name.clone());
+        let internal_socket_listener =
+            crate::local_socket::create_listener(&config.internal_socket_name)?;
+        resources
+            .socket_names
+            .push(config.internal_socket_name.clone());
+        health_state.mark_ready("local-runtime", "server-listeners");
 
     // Initialize MatchClient for communicating with MatchService
     let match_client = crate::match_client::create_match_client_shared();
@@ -492,11 +742,13 @@ pub async fn run(
     } else {
         health_state.mark_ready("match-service", "grpc");
     }
-    let match_client_rediscovery_task = spawn_match_client_rediscovery(
+    if let Some(task) = spawn_match_client_rediscovery(
         match_client.clone(),
         match_client_config.clone(),
         health_state.clone(),
-    );
+    ) {
+        resources.convergence_tasks.push(task);
+    }
 
     let item_uid_generator =
         crate::core::global_id::ItemUidGenerator::from_worker_lease(&worker_lease)?;
@@ -535,13 +787,8 @@ pub async fn run(
         shutdown_signal: Arc::new(Notify::new()),
     };
 
-    // Initialize PostgreSQL-backed gameplay stores.
-    let db_player_store = PgPlayerStore::new(config).await?;
-    let character_element_store = PgCharacterElementStore::new(config).await?;
     let character_element_facade =
         CharacterElementFacade::new(Arc::new(character_element_store.clone()));
-    let discipline_store = PgDisciplineStore::new(config).await?;
-    let title_store = PgTitleStore::new(config).await?;
     let title_config_tables = config_tables.clone();
     let title_unlock_config_tables = config_tables.clone();
     let discipline_service = DisciplineService::new(discipline_store);
@@ -558,11 +805,10 @@ pub async fn run(
         title_service.clone(),
     );
     let character_push_service = crate::core::character_push::CharacterPushService::new();
-    health_state.mark_ready("local-runtime", "gameplay-stores");
-
     let player_registry: PlayerRegistry = PlayerRegistry::default();
 
-    let services = ServiceContext {
+        let hot_reload_runtime = config_tables.clone();
+        let services = ServiceContext {
         config: config.clone(),
         db_store: db_store.clone(),
         room_manager: shared_state.room_manager.clone(),
@@ -594,66 +840,156 @@ pub async fn run(
         "game server listening"
     );
 
-    let admin_task = tokio::spawn(crate::admin_server::run_listener(
-        admin_listener,
-        shared_state.room_manager.clone(),
-        shared_state.runtime_config.clone(),
-        shared_state.connection_count.clone(),
-        services.player_registry.clone(),
-        services.player_manager.clone(),
-        services.config_tables.clone(),
-        services.item_uid_generator.clone(),
-        redis_client.clone(),
-        config.redis_key_prefix.clone(),
-        config.service_instance_id.clone(),
-        config.admin_token.clone(),
-        crate::admin_server::AdminAssertionVerifier::new(
+        let health_task = service_registry::readiness::spawn_health_from_env(health_state.clone())
+            .await?
+            .into_iter();
+        resources.tasks.extend(health_task);
+
+        if let Some(client) = registry_client {
+            resources.registry_started = true;
+            resources.convergence_tasks.push(spawn_registry_publication(
+                client,
+                crate::build_service_instance(config),
+                health_state.clone(),
+                ConvergenceConfig {
+                    steady_interval: Duration::from_secs(1),
+                    ..ConvergenceConfig::default()
+                },
+            ));
+        }
+
+        if config.csv_reload_enabled {
+            resources.tasks.push(spawn_hot_reload_task(
+                hot_reload_runtime,
+                Duration::from_secs(config.csv_reload_interval_secs),
+            ));
+        } else {
+            tracing::info!(csv_dir = %config.csv_dir, "csv config hot reload disabled");
+        }
+        let metrics_nats_url = config.nats_url.clone();
+        let metrics_instance_id = config.service_instance_id.clone();
+        resources.tasks.push(tokio::spawn(async move {
+            crate::metrics::METRICS
+                .start_reporting(&metrics_nats_url, metrics_instance_id, 5)
+                .await;
+        }));
+
+        let (fatal_task_tx, mut fatal_task_rx) = mpsc::unbounded_channel::<String>();
+        let fatal_admin_tx = fatal_task_tx.clone();
+        let admin_shutdown_signal = shared_state.shutdown_signal.clone();
+        let admin_room_manager = shared_state.room_manager.clone();
+        let admin_runtime_config = shared_state.runtime_config.clone();
+        let admin_connection_count = shared_state.connection_count.clone();
+        let admin_player_registry = services.player_registry.clone();
+        let admin_player_manager = services.player_manager.clone();
+        let admin_config_tables = services.config_tables.clone();
+        let admin_item_uid_generator = services.item_uid_generator.clone();
+        let admin_redis_client = redis_client.clone();
+        let admin_redis_key_prefix = config.redis_key_prefix.clone();
+        let admin_owner_server_id = config.service_instance_id.clone();
+        let admin_token = config.admin_token.clone();
+        let admin_assertion_verifier = crate::admin_server::AdminAssertionVerifier::new(
             config.admin_assertion_issuer.clone(),
             &config.admin_assertion_public_keys,
             config.admin_assertion_max_ttl_ms,
-        ),
-        crate::admin_server::MailGrantAssertionVerifier::new(
+        );
+        let mail_assertion_verifier = crate::admin_server::MailGrantAssertionVerifier::new(
             config.mail_grant_assertion_issuer.clone(),
             &config.mail_grant_assertion_public_keys,
             config.mail_grant_assertion_max_ttl_ms,
-        ),
-        crate::admin_server::AdminAuditLogger::new(crate::admin_server::AdminAuditConfig::new(
-            config.admin_audit_enabled,
-            config.admin_audit_path.clone(),
-            config.admin_audit_require_actor,
-        )),
-        shared_state.shutdown_signal.clone(),
-    ));
+        );
+        let admin_audit_logger =
+            crate::admin_server::AdminAuditLogger::new(crate::admin_server::AdminAuditConfig::new(
+                config.admin_audit_enabled,
+                config.admin_audit_path.clone(),
+                config.admin_audit_require_actor,
+            ));
+        resources.tasks.push(tokio::spawn(async move {
+            if let Err(error) = crate::admin_server::run_listener(
+                admin_listener,
+                admin_room_manager,
+                admin_runtime_config,
+                admin_connection_count,
+                admin_player_registry,
+                admin_player_manager,
+                admin_config_tables,
+                admin_item_uid_generator,
+                admin_redis_client,
+                admin_redis_key_prefix,
+                admin_owner_server_id,
+                admin_token,
+                admin_assertion_verifier,
+                mail_assertion_verifier,
+                admin_audit_logger,
+                admin_shutdown_signal,
+            )
+            .await
+            {
+                error!(error = %error, "admin listener stopped unexpectedly");
+                let _ = fatal_admin_tx.send(format!("admin listener failed: {error}"));
+            }
+        }));
 
-    let local_socket_task = tokio::spawn(run_local_socket_listener(
-        local_socket_listener,
-        redis_client.clone(),
-        services.clone(),
-        shared_state.runtime_config.clone(),
-        shared_state.connection_count.clone(),
-    ));
-    let internal_socket_task = tokio::spawn(crate::internal_server::run_listener(
-        internal_socket_listener,
-        services.clone(),
-        config.internal_token.clone(),
-    ));
+        let fatal_local_tx = fatal_task_tx.clone();
+        let local_redis_client = resources.redis_client.as_ref().unwrap().clone();
+        let local_services = services.clone();
+        let local_runtime_config = shared_state.runtime_config.clone();
+        let local_connection_count = shared_state.connection_count.clone();
+        let local_connection_tasks = Arc::clone(&resources.connection_tasks);
+        resources.tasks.push(tokio::spawn(async move {
+            if let Err(error) = run_local_socket_listener(
+                local_socket_listener,
+                local_redis_client,
+                local_services,
+                local_runtime_config,
+                local_connection_count,
+                local_connection_tasks,
+            )
+            .await
+            {
+                error!(error = %error, "proxy-local listener stopped unexpectedly");
+                let _ = fatal_local_tx.send(format!("proxy-local listener failed: {error}"));
+            }
+        }));
 
-    let kick_task = tokio::spawn(crate::kick_subscriber::subscribe_session_kicks(
+        let fatal_internal_tx = fatal_task_tx.clone();
+        let internal_services = services.clone();
+        let internal_token = config.internal_token.clone();
+        resources.tasks.push(tokio::spawn(async move {
+            if let Err(error) = crate::internal_server::run_listener(
+                internal_socket_listener,
+                internal_services,
+                internal_token,
+            )
+            .await
+            {
+                error!(error = %error, "internal listener stopped unexpectedly");
+                let _ = fatal_internal_tx.send(format!("internal listener failed: {error}"));
+            }
+        }));
+        drop(fatal_task_tx);
+
+        resources.tasks.push(tokio::spawn(crate::kick_subscriber::subscribe_session_kicks(
         config.nats_url.clone(),
         player_registry.clone(),
-    ));
-    let gm_broadcast_task = tokio::spawn(crate::gm_broadcast::subscribe_gm_broadcasts(
+    )));
+        resources.tasks.push(tokio::spawn(crate::gm_broadcast::subscribe_gm_broadcasts(
         config.nats_url.clone(),
         player_registry,
-    ));
+    )));
     let mut next_session_id: u64 = 1;
     let mut lease_lost = false;
+    let mut fatal_task_error = None;
 
     loop {
         let accept_result = tokio::select! {
             result = tcp_listener.accept() => Some(result),
             _ = shared_state.shutdown_signal.notified() => None,
-            _ = tokio::signal::ctrl_c() => None,
+            _ = shutdown_signal() => None,
+            fatal = fatal_task_rx.recv() => {
+                fatal_task_error = Some(fatal.unwrap_or_else(|| "critical listener task channel closed".to_string()));
+                None
+            },
             changed = lease_loss_rx.changed() => {
                 if changed.is_err() || *lease_loss_rx.borrow_and_update() {
                     lease_lost = true;
@@ -683,55 +1019,39 @@ pub async fn run(
             shared_state.runtime_config.clone(),
             shared_state.connection_count.clone(),
             db_store.clone(),
+            Arc::clone(&resources.connection_tasks),
         )
         .await;
     }
 
-    admin_task.abort();
-    let _ = admin_task.await;
-    local_socket_task.abort();
-    let _ = local_socket_task.await;
-    internal_socket_task.abort();
-    let _ = internal_socket_task.await;
-    kick_task.abort();
-    let _ = kick_task.await;
-    gm_broadcast_task.abort();
-    let _ = gm_broadcast_task.await;
-    if let Some(task) = match_client_rediscovery_task {
-        task.stop_and_wait().await;
-    }
-    lease_renew_task.abort();
-    let _ = lease_renew_task.await;
-
-    match redis_client.get_multiplexed_async_connection().await {
-        Ok(mut redis) => {
-            if let Err(error) = worker_lease.release_redis(&mut redis).await {
-                warn!(
-                    lease_key = %worker_lease.key,
-                    error = %error,
-                    "failed to release global id worker lease"
-                );
-            }
-        }
-        Err(error) => {
-            warn!(
-                lease_key = %worker_lease.key,
-                error = %error,
-                "failed to connect redis for global id worker lease release"
-            );
+        if let Some(error) = fatal_task_error {
+            Err(std::io::Error::other(error).into())
+        } else if lease_lost {
+            Err(std::io::Error::other("global id worker lease lost").into())
+        } else {
+            Ok(())
         }
     }
+    .await;
 
-    services.player_manager.close().await;
-    character_element_store.close().await;
-    services.discipline_service.close().await;
-    services.title_service.close().await;
+    let (run_result, cleanup_report) =
+        run_then_cleanup(std::future::ready(run_result), &mut resources).await;
+    for (step, cleanup_error) in &cleanup_report.failures {
+        error!(cleanup_step = ?step, error = %cleanup_error, "game-server cleanup step failed");
+    }
+    info!(
+        cleanup_failures = cleanup_report.failures.len(),
+        "game server shutdown completed"
+    );
 
-    info!("game server shutdown completed");
-    if lease_lost {
-        Err(std::io::Error::other("global id worker lease lost").into())
-    } else {
-        Ok(())
+    match (run_result, cleanup_report.failures.is_empty()) {
+        (Err(error), _) => Err(error),
+        (Ok(()), true) => Ok(()),
+        (Ok(()), false) => Err(std::io::Error::other(format!(
+            "game-server shutdown cleanup failed in {} step(s)",
+            cleanup_report.failures.len()
+        ))
+        .into()),
     }
 }
 
@@ -741,6 +1061,7 @@ async fn run_local_socket_listener(
     services: ServiceContext,
     runtime_config: Arc<RwLock<RuntimeConfig>>,
     connection_count: Arc<AtomicU64>,
+    connection_tasks: Arc<tokio::sync::Mutex<Vec<JoinHandle<()>>>>,
 ) -> Result<(), std::io::Error> {
     let mut next_session_id = 1_000_000u64;
     loop {
@@ -756,6 +1077,7 @@ async fn run_local_socket_listener(
             runtime_config.clone(),
             connection_count.clone(),
             services.db_store.clone(),
+            Arc::clone(&connection_tasks),
         )
         .await;
     }
@@ -770,6 +1092,7 @@ async fn spawn_connection_task<S>(
     runtime_config: Arc<RwLock<RuntimeConfig>>,
     connection_count: Arc<AtomicU64>,
     db_store: PgAuditStore,
+    connection_tasks: Arc<tokio::sync::Mutex<Vec<JoinHandle<()>>>>,
 ) where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
@@ -779,7 +1102,7 @@ async fn spawn_connection_task<S>(
         .append_connection_event(session_id, None, Some(&peer_addr), "connected", None)
         .await;
 
-    tokio::spawn(async move {
+    let task = tokio::spawn(async move {
         let _connection_guard = ConnectionCountGuard { connection_count };
         if let Err(error) = handle_connection(
             socket,
@@ -794,6 +1117,9 @@ async fn spawn_connection_task<S>(
             warn!(session_id = session_id, error = %error, "connection task failed");
         }
     });
+    let mut tracked = connection_tasks.lock().await;
+    tracked.retain(|task| !task.is_finished());
+    tracked.push(task);
 }
 
 async fn handle_connection<S>(
@@ -1535,6 +1861,35 @@ pub fn current_unix_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn background_task_panic_is_reported_without_skipping_later_cleanup_steps() {
+        let health_state = HealthState::new(
+            "game-server",
+            "cleanup-test",
+            service_registry::HealthConfig::for_tests(1, 0, u64::MAX),
+            [],
+        );
+        let mut resources = GameServerResources::new(health_state);
+        let task = tokio::spawn(async {
+            panic!("injected background task failure");
+        });
+        while !task.is_finished() {
+            tokio::task::yield_now().await;
+        }
+        resources.tasks.push(task);
+
+        let report = run_cleanup(&mut resources).await;
+
+        assert_eq!(report.attempted.last(), Some(&CleanupStep::CloseStores));
+        assert_eq!(report.failures.len(), 1);
+        assert_eq!(report.failures[0].0, CleanupStep::StopBackgroundTasks);
+        assert!(
+            report.failures[0]
+                .1
+                .contains("injected background task failure")
+        );
+    }
 
     #[test]
     fn preauth_allows_auth_and_ping_before_authentication() {
