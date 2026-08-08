@@ -1,0 +1,106 @@
+{
+  "schemaVersion": 1,
+  "capturedFrom": "current-head-source-contract",
+  "dependencyContracts": [
+    {
+      "consumer": "game-server",
+      "dependency": "match-service",
+      "endpoint": "grpc",
+      "requirement": "required"
+    },
+    {
+      "consumer": "match-service",
+      "dependency": "game-server",
+      "endpoint": "internal",
+      "requirement": "optional_capability"
+    },
+    {
+      "consumer": "game-proxy",
+      "dependency": "game-server",
+      "endpoint": "proxy-local",
+      "requirement": "required"
+    }
+  ],
+  "scenarios": [
+    {
+      "id": "game-server-match-not-registered",
+      "service": "game-server",
+      "condition": {
+        "registryAvailable": true,
+        "dependency": "match-service",
+        "endpoint": "grpc",
+        "registeredInstances": []
+      },
+      "currentBehavior": {
+        "processOutcome": "panic",
+        "errorCode": "DEPENDENCY_PENDING",
+        "resourceStateAtFailure": ["player_listener_bound", "admin_listener_bound", "two_local_sockets_bound", "worker_lease_acquired"],
+        "source": "apps/game-server/src/match_client.rs:MatchClientConfig::from_env"
+      },
+      "targetBehavior": {
+        "state": "waiting_dependencies",
+        "ready": false,
+        "processAlive": true
+      }
+    },
+    {
+      "id": "game-server-worker-lease-unexpired",
+      "service": "game-server",
+      "condition": {
+        "leaseKey": "id:worker:0:0",
+        "leaseOwner": "previous-instance",
+        "ttlSecondsRemaining": 60
+      },
+      "currentBehavior": {
+        "processOutcome": "error_return",
+        "errorCode": "LEASE_UNAVAILABLE",
+        "acquireMode": "redis_set_nx_once",
+        "source": "packages/global-id/src/lib.rs:WorkerLease::acquire_redis"
+      },
+      "targetBehavior": {
+        "state": "waiting_dependencies",
+        "ready": false,
+        "processAlive": true
+      }
+    },
+    {
+      "id": "game-server-two-residual-local-sockets",
+      "service": "game-server",
+      "condition": {
+        "socketPaths": ["myserver-game-server.sock", "myserver-game-server-internal.sock"],
+        "socketState": "residual"
+      },
+      "currentBehavior": {
+        "processOutcome": "error_return",
+        "errorCode": "SOCKET_CONFLICT",
+        "createMode": "create_without_reclaim",
+        "source": "apps/game-server/src/local_socket.rs:create_listener"
+      },
+      "targetBehavior": {
+        "state": "starting",
+        "ready": false,
+        "processAlive": true
+      }
+    },
+    {
+      "id": "game-proxy-upstream-endpoint-missing",
+      "service": "game-proxy",
+      "condition": {
+        "registryAvailable": true,
+        "dependency": "game-server",
+        "endpoint": "proxy-local",
+        "eligibleEndpoints": []
+      },
+      "currentBehavior": {
+        "processOutcome": "error_return",
+        "errorCode": "DEPENDENCY_PENDING",
+        "source": "apps/game-proxy/src/proxy_server.rs:run"
+      },
+      "targetBehavior": {
+        "state": "waiting_dependencies",
+        "ready": false,
+        "processAlive": true
+      }
+    }
+  ]
+}

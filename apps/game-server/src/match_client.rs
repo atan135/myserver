@@ -90,7 +90,7 @@ impl MatchClientConfig {
             };
         }
 
-        let addr = resolve_match_service_addr(
+        let initial_discovery = resolve_match_service_addr(
             &registry_url,
             &registry_key_prefix,
             &service_name,
@@ -98,14 +98,8 @@ impl MatchClientConfig {
             discovery_required,
             local_discovery_fallback_enabled,
         )
-        .await
-        .unwrap_or_else(|error| {
-            panic!(
-                "required registry discovery failed for {}.grpc: {}",
-                service_name, error
-            )
-        })
-        .addr;
+        .await;
+        let addr = require_initial_match_discovery(&service_name, initial_discovery).addr;
 
         Self {
             addr,
@@ -123,6 +117,18 @@ impl MatchClientConfig {
     pub fn rediscovery_enabled(&self) -> bool {
         self.registry_enabled
     }
+}
+
+fn require_initial_match_discovery(
+    service_name: &str,
+    result: Result<ResolvedMatchServiceAddr, Box<dyn Error + Send + Sync>>,
+) -> ResolvedMatchServiceAddr {
+    result.unwrap_or_else(|error| {
+        panic!(
+            "required registry discovery failed for {}.grpc: {}",
+            service_name, error
+        )
+    })
 }
 
 /// MatchClient
@@ -824,6 +830,30 @@ mod tests {
 
         assert_eq!(config.rediscovery_interval_secs, 7);
         assert_eq!(config.addr, "http://127.0.0.1:19002");
+    }
+
+    #[tokio::test]
+    async fn missing_initial_match_discovery_panics_before_client_initialization() {
+        let task = tokio::spawn(async {
+            let error: Box<dyn Error + Send + Sync> =
+                std::io::Error::other("match-service grpc endpoint not found").into();
+            require_initial_match_discovery("match-service", Err(error))
+        });
+
+        let join_error = task
+            .await
+            .expect_err("missing initial match endpoint currently terminates startup");
+        assert!(join_error.is_panic());
+        let payload = join_error.into_panic();
+        let message = payload
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| payload.downcast_ref::<&str>().copied())
+            .unwrap_or("");
+        assert_eq!(
+            message,
+            "required registry discovery failed for match-service.grpc: match-service grpc endpoint not found"
+        );
     }
 
     #[tokio::test]

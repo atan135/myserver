@@ -109,25 +109,13 @@
 | NATS | metrics、session kick、邮件通知 | 生产高可用；内部事件通道 | HA、重放/持久化边界、消息幂等 |
 | PostgreSQL | 账号、审计、业务持久化 | 生产高可用；承载业务真持久化数据 | 备份、迁移、读写容量和事务边界 |
 
-### 5.1 测试/线上统一启动顺序
+### 5.1 测试/线上统一启动收敛契约
 
-测试、预发和线上环境必须先启动基础设施，再启动会注册或消费服务发现的内部服务，最后启动玩家入口和控制面。这里的 strict discovery 在部署侧必须显式设置 `REGISTRY_ENABLED=true`、`DISCOVERY_REQUIRED=true`；代码侧还会把 `NODE_ENV` / `APP_ENV` 进入测试、预发、线上等严格发现环境视为 required discovery。
+测试、预发和线上环境仍应先以健康门禁保证 Redis、NATS、PostgreSQL 等基础设施可用；基础设施门禁通过后，所有应用服务必须允许单次无序批量启动。应用服务之间不得用 Compose `depends_on`、脚本顺序或 restart loop 保证正确性。
 
-统一启动顺序如下：
+部署侧必须显式设置 `REGISTRY_ENABLED=true`、`DISCOVERY_REQUIRED=true`。应用进程启动后异步注册、发现并连接依赖：required endpoint 暂缺时保持进程存活和 not-ready，optional endpoint 暂缺时进入 degraded 并保留无关业务。发布系统统一等待全部 required readiness 和稳定窗口，而不是逐个启动并等待下一个服务。
 
-1. Redis registry / 业务 Redis：先提供 service registry、session、ticket、route store、metrics snapshot 等共享状态能力。
-2. NATS：再提供 metrics、session kick、邮件通知等内部事件通道。
-3. PostgreSQL：再提供账号、审计、公告、邮件等持久化数据入口。
-4. registry-dependent services：启动 `game-server`、`match-service`、`chat-server`、`mail-service`、`announce-service` 等内部能力服务。`game-server`、`match-service`、`chat-server` 在严格发现下需要 registry 可用并完成注册；`mail-service`、`announce-service` 当前 Node 注册失败仍主要依赖日志和后续健康检查兜底。`mail-service` 的附件发放请求依赖发现 `game-server.admin`，应在后续健康检查阶段验证。`metrics-collector` 不注册也不消费 service registry，但依赖 NATS metrics 和 Redis snapshots，应在 Redis / NATS 可用后随本批或紧随本批启动。
-5. gateway/control services：最后启动 `auth-http`、`game-proxy`、`admin-api`、`admin-web` 等入口和控制面。`game-proxy` 启动需要发现 `game-server.proxy-local`；`auth-http` 登录返回依赖发现 `game-proxy.client`；`admin-api` 控制面依赖发现 `game-server.admin` 和 `game-proxy.admin`。
-
-需要注意，`auth-http`、`admin-api`、`mail-service`、`announce-service` 等 Node 服务在严格发现配置下会拒绝 `REGISTRY_ENABLED=false`，但启动注册异常当前不能笼统表述为都会像 Rust 服务一样 fail-fast；部署 readiness 必须兜底验证自身 registry 记录和 heartbeat 可见。
-
-这样排序的原因是：registry-dependent services 需要 Redis registry 已经可写，才能发布自身 endpoint 并维持 heartbeat；gateway/control services 属于发现消费者，启动或请求时依赖上游 endpoint 已经存在；NATS 和 PostgreSQL 分别是事件通道和持久化基础设施，应在业务服务启动前就绪。
-
-本地开发可以继续使用 dev-stack 或现有脚本的默认顺序，并允许在非严格发现下使用文档标注的 local fallback。测试、预发和线上不能依赖本地默认 host/port 或 `REGISTRY_ENABLED=false` 跑通链路，必须先保证基础设施可用，并启用 strict discovery。
-
-启动完成后的下一阶段应继续做健康检查、endpoint 完整性检查、实例唯一性检查、route store 检查和接流量控制。本文本节只定义启动顺序，不实现健康检查或流量切换逻辑。
+当前实现仍有首次 discovery fail-fast、过早注册 healthy 和资源清理不完整等差距。详细的当前控制流、依赖分类、状态机、稳定错误码和故障 fixture 见 [应用服务启动契约与故障基线](./应用服务启动契约与故障基线.md)。在这些差距完成改造前，已有顺序启动只能作为临时兼容措施，不能继续作为目标架构或生产正确性前提。
 
 ### 5.2 注册后接流量门禁
 
@@ -151,7 +139,7 @@ rollout 或扩容时，新实例同样必须先完成 endpoint 注册、heartbea
 
 ### 5.3 健康检查必检项
 
-健康检查需要区分 liveness 与 readiness。liveness 只表示进程、事件循环或主线程仍存活，不代表实例已经可以接入流量；readiness 失败必须阻止实例进入 LB、DNS、网关 upstream、admin/control target 或 rollout 目标，但不必立即 kill 进程。只有在启动阶段要求严格发现 fail-fast 时，readiness 失败才应触发进程退出或部署回滚。
+健康检查需要区分 liveness 与 readiness。liveness 只表示进程、事件循环或主线程仍存活，不代表实例已经可以接入流量；readiness 失败必须阻止实例进入 LB、DNS、网关 upstream、admin/control target 或 rollout 目标，但不应 kill 进程。启动收敛超时由发布系统判定失败、报警或回滚，应用进程继续保持 not-ready，禁止依靠 restart loop 表达失败。
 
 readiness 必须至少验证以下 registry 相关条件：
 
@@ -167,7 +155,7 @@ readiness 必须至少验证以下 registry 相关条件：
 | `auth-http` | `game-proxy.client` |
 | `admin-api` | `game-server.admin`、`game-proxy.admin` |
 | `game-server` | `match-service.grpc` |
-| `match-service` | `game-server.internal` |
+| `match-service` | 无应用级 readiness required endpoint；`game-server.internal` 是建房请求级 capability，暂缺时 degraded 但 gRPC 仍可 Ready |
 | `mail-service` | `game-server.admin` |
 | `metrics-collector` | 不注册也不消费 service registry；依赖 Core NATS metrics 通道和 Redis metrics snapshots，不属于 registry endpoint 检查 |
 

@@ -393,9 +393,11 @@ pub async fn run(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let tcp_listener = TcpListener::bind(config.bind_addr()).await?;
     let admin_listener = TcpListener::bind(config.admin_bind_addr()).await?;
-    let local_socket_listener = crate::local_socket::create_listener(&config.local_socket_name)?;
-    let internal_socket_listener =
-        crate::local_socket::create_listener(&config.internal_socket_name)?;
+    let (local_socket_listener, internal_socket_listener) =
+        crate::local_socket::create_listener_pair(
+            &config.local_socket_name,
+            &config.internal_socket_name,
+        )?;
     let redis_client = redis::Client::open(config.redis_url.clone())?;
     let mut global_id_redis = redis_client.get_multiplexed_async_connection().await?;
     let global_id_origin_id = u16::try_from(config.global_id_origin_id).map_err(|_| {

@@ -95,6 +95,40 @@ pub struct WorkerLease {
     ttl_seconds: u64,
 }
 
+#[cfg(feature = "redis")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkerLeaseSetOutcome {
+    Acquired,
+    Occupied,
+}
+
+#[cfg(feature = "redis")]
+fn classify_worker_lease_set_result(
+    result: redis::RedisResult<Option<String>>,
+    origin_id: u16,
+    requested_worker_id: Option<u8>,
+) -> Result<WorkerLeaseSetOutcome, GlobalIdError> {
+    match result {
+        Ok(Some(_)) => Ok(WorkerLeaseSetOutcome::Acquired),
+        Ok(None) if requested_worker_id.is_some() => {
+            Err(worker_lease_unavailable(origin_id, requested_worker_id))
+        }
+        Ok(None) => Ok(WorkerLeaseSetOutcome::Occupied),
+        Err(error) => Err(GlobalIdError::WorkerLeaseUnavailable(error.to_string())),
+    }
+}
+
+#[cfg(feature = "redis")]
+fn worker_lease_unavailable(origin_id: u16, worker_id: Option<u8>) -> GlobalIdError {
+    GlobalIdError::WorkerLeaseUnavailable(format!(
+        "origin={} worker={}",
+        origin_id,
+        worker_id
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "*".to_string())
+    ))
+}
+
 impl GlobalIdGenerator {
     pub fn new(origin_id: u16, worker_id: u8) -> Result<Self, GlobalIdError> {
         if origin_id > MAX_ORIGIN_ID {
@@ -288,8 +322,8 @@ impl WorkerLease {
                 .query_async(redis)
                 .await;
 
-            match result {
-                Ok(Some(_)) => {
+            match classify_worker_lease_set_result(result, origin_id, worker_id)? {
+                WorkerLeaseSetOutcome::Acquired => {
                     return Ok(Self {
                         origin_id,
                         worker_id: candidate,
@@ -300,20 +334,11 @@ impl WorkerLease {
                         ttl_seconds: ttl,
                     });
                 }
-                Ok(None) => {}
-                Err(error) => {
-                    return Err(GlobalIdError::WorkerLeaseUnavailable(error.to_string()));
-                }
+                WorkerLeaseSetOutcome::Occupied => {}
             }
         }
 
-        Err(GlobalIdError::WorkerLeaseUnavailable(format!(
-            "origin={} worker={}",
-            origin_id,
-            worker_id
-                .map(|value| value.to_string())
-                .unwrap_or_else(|| "*".to_string())
-        )))
+        Err(worker_lease_unavailable(origin_id, worker_id))
     }
 
     #[cfg(feature = "redis")]
@@ -587,6 +612,19 @@ mod tests {
         assert_eq!(worker_lease_key(1, 2), "id:worker:1:2");
         assert_eq!(last_timestamp_key(1, 2), "id:last-ts:1:2");
         assert_eq!(origin_metadata_key(1), "id:origin:1");
+    }
+
+    #[cfg(feature = "redis")]
+    #[test]
+    fn occupied_requested_worker_lease_is_unavailable() {
+        let result = classify_worker_lease_set_result(Ok(None), 7, Some(8));
+
+        assert_eq!(
+            result,
+            Err(GlobalIdError::WorkerLeaseUnavailable(
+                "origin=7 worker=8".to_string()
+            ))
+        );
     }
 
     #[test]

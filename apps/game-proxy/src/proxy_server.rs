@@ -256,13 +256,7 @@ pub async fn run(
             discover_and_update_routes(&initial_client, &service_name, &route_store)
                 .await
                 .map_err(|error| std::io::Error::other(error.to_string()))?;
-        if initial_routes == 0 {
-            return Err(format!(
-                "required upstream discovery failed: {}.proxy-local endpoint not found",
-                service_name
-            )
-            .into());
-        }
+        validate_initial_upstream_routes(&service_name, initial_routes)?;
 
         tokio::spawn(async move {
             if let Err(error) = run_upstream_discovery(
@@ -410,6 +404,20 @@ pub async fn run(
             }
         }
     }
+}
+
+fn validate_initial_upstream_routes(
+    service_name: &str,
+    initial_routes: usize,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if initial_routes == 0 {
+        return Err(format!(
+            "required upstream discovery failed: {}.proxy-local endpoint not found",
+            service_name
+        )
+        .into());
+    }
+    Ok(())
 }
 
 async fn run_upstream_discovery(
@@ -1501,6 +1509,7 @@ mod tests {
         PreauthDecision, discover_proxy_local_routes, preauth_decision,
         refresh_routes_from_discovery_snapshot, replay_auth_to_upstream,
         restore_authenticated_after_local_routing_error, select_route_for_packet,
+        validate_initial_upstream_routes,
     };
     use crate::pb::{RoomJoinReq, RoomReconnectReq};
     use crate::protocol::{
@@ -1866,6 +1875,17 @@ mod tests {
         let routes = discover_proxy_local_routes(vec![instance]);
 
         assert!(routes.is_empty());
+    }
+
+    #[test]
+    fn zero_initial_routes_reproduce_required_upstream_startup_error() {
+        let error = validate_initial_upstream_routes("game-server", 0)
+            .expect_err("missing proxy-local endpoint must fail current startup");
+
+        assert_eq!(
+            error.to_string(),
+            "required upstream discovery failed: game-server.proxy-local endpoint not found"
+        );
     }
 
     #[tokio::test]
