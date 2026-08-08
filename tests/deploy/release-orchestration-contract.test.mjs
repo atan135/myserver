@@ -96,13 +96,15 @@ test("all docker compose one-shot runners are disposable and dependency-free", a
 });
 
 test("shared convergence covers registry TTL, stability and safe diagnostics", async () => {
-  const [helper, probe, bundle, common, restart, replace, rollback, deploy, upload, render, environment, compose, releaseGuide, automationGuide, simplifiedGuide] = await Promise.all([
+  const [helper, probe, bundle, installer, common, restart, replace, retire, rollback, deploy, upload, render, environment, compose, releaseGuide, automationGuide, simplifiedGuide] = await Promise.all([
     read("scripts/docker/readiness-convergence.sh"),
     read("scripts/docker/release-readiness-probe.mjs"),
     read("scripts/docker/create-release-bundle.sh"),
+    read("scripts/docker/install-ops-scripts.sh"),
     read("deploy/docker/scripts/ops-common.sh"),
     read("deploy/docker/scripts/ops-restart.sh"),
     read("deploy/docker/scripts/ops-replace.sh"),
+    read("deploy/docker/scripts/ops-retire.sh"),
     read("deploy/docker/scripts/ops-rollback.sh"),
     read("deploy/docker/scripts/ops-deploy.sh"),
     read("scripts/docker/upload-release-bundle.sh"),
@@ -128,9 +130,30 @@ test("shared convergence covers registry TTL, stability and safe diagnostics", a
   assert.doesNotMatch(probe, /\bendpoint\s*:/);
   assert.match(bundle, /readiness-convergence\.sh/);
   assert.match(bundle, /release-readiness-probe\.mjs/);
+  assert.match(bundle, /install-ops-scripts\.sh/);
+  assert.match(bundle, /server-apply-release\.sh/);
+  for (const script of [
+    "ops-common.sh", "ops-deploy.sh", "ops-disk-report.sh", "ops-health.sh", "ops-logs.sh",
+    "ops-replace.sh", "ops-restart.sh", "ops-retire.sh", "ops-rollback.sh", "ops-status.sh"
+  ]) {
+    assert.match(bundle, new RegExp(script.replace(".", "\\.")), `bundle must contain ${script}`);
+  }
   assert.match(common, /container_health[\s\S]+State\.Health/);
   assert.match(common, /wait_for_target_container[\s\S]+container_health/);
   assert.match(common, /readiness probe is unavailable/);
+  assert.match(common, /acquire_mutating_lock[\s\S]+flock -n/);
+  assert.match(common, /assert_no_pending_retire/);
+  assert.match(common, /assert_no_pending_ops_install/);
+  assert.match(installer, /source "\$source_dir\/ops-common\.sh"[\s\S]+acquire_mutating_lock/);
+  assert.match(installer, /pending-ops-install[\s\S]+rollback_pending/);
+  assert.match(installer, /allowed_target=\/home\/gameops\/script/);
+  assert.match(retire, /--instance-id[\s\S]+--revision[\s\S]+--confirm/);
+  assert.match(retire, /docker update --restart=no "\$container_id"/);
+  assert.match(retire, /exit_code" == 0 && "\$oom_killed" == false/);
+  assert.doesNotMatch(retire, /\bcurl\b|authorization:|--token|--nonce|access[_-]?token/i);
+  for (const source of [restart, replace, rollback, deploy]) {
+    assert.match(source, /acquire_mutating_lock[\s\S]+assert_no_pending_ops_install[\s\S]+assert_no_pending_retire/);
+  }
   for (const [name, operation, source] of [
     ["restart", 'compose restart "$service"', restart],
     ["replace", 'compose up -d --no-deps "$service"', replace]
@@ -148,6 +171,11 @@ test("shared convergence covers registry TTL, stability and safe diagnostics", a
   assert.match(deploy, /rollback_db_compatible=false[\s\S]+--rollback-db-compatible[\s\S]+exec \/data\/myserver\/apply-release\.sh[\s\S]+--rollback-db-compatible/);
   assert.match(rollback, /exec \/data\/myserver\/apply-release\.sh[\s\S]+--rollback-db-compatible --rollback-attempt[\s\S]+--readiness-source-release/);
   assert.match(upload, /server_command=.*--rollback-db-compatible/);
+  assert.match(upload, /"\$target\/scripts\/install-ops-scripts\.sh"\s+\\\s+--source "\$target\/scripts\/ops"\s+\\\s+--runner-source "\$target\/scripts\/server-apply-release\.sh"\s+\\\s+--target \/home\/gameops\/script/);
+  assert.doesNotMatch(upload, /install[^\n]*ops-\*|cp[^\n]*ops-\*/);
+  assert.doesNotMatch(upload, /sudo -n install -m 0755 "\$runner_source"/);
+  assert.match(upload, /Existing release identity does not match[\s\S]+resuming_verified_release/);
+  assert.ok(upload.indexOf("resuming_verified_release") < upload.indexOf('"$target/scripts/install-ops-scripts.sh"'));
   const releaseRunner = await read("scripts/docker/server-apply-release.sh");
   assert.match(releaseRunner, /verify_release_bundle\(\)[\s\S]+sha256sum --check --status SHA256SUMS/);
   const sourceVerificationIndex = releaseRunner.indexOf('verify_release_bundle "$readiness_source_dir" "$readiness_source_release_id"');
@@ -156,6 +184,9 @@ test("shared convergence covers registry TTL, stability and safe diagnostics", a
   assert.ok(sourceVerificationIndex >= 0 && sourceVerificationIndex < sourceProbeIndex);
   assert.ok(sourceVerificationIndex < sourceHelperIndex, "source bundle checksum must pass before helper/probe use");
   assert.match(releaseRunner, /--readiness-source-release "\$release_id"/);
+  assert.match(releaseRunner, /operations\.lock/);
+  assert.match(releaseRunner, /pending-ops-install/);
+  assert.match(releaseRunner, /pending-game-server-retire/);
   assert.match(releaseRunner, /rollback_attempt" == true && -z "\$readiness_source_release_id/);
   assert.match(releaseRunner, /if \[\[ "\$rollback_attempt" == false \]\][\s\S]+up -d postgres redis nats[\s\S]+else[\s\S]+database_migration_state=preserved/);
   assert.match(releaseRunner, /if \[\[ "\$rollback_attempt" == false \]\][\s\S]+migration-runner preflight[\s\S]+migration-runner apply/);

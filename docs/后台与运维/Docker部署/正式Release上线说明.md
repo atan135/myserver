@@ -60,6 +60,9 @@ db/
 apps/game-server/csv/
 apps/game-server/scene/
 scripts/initialize-production-secrets.sh
+scripts/install-ops-scripts.sh
+scripts/server-apply-release.sh
+scripts/ops/                 # 固定十文件运维脚本集合
 RELEASE
 SHA256SUMS
 ```
@@ -71,7 +74,7 @@ cd /data/myserver/release/<release-id>
 sha256sum --check SHA256SUMS
 ```
 
-Compose 会读取 `compose.production.env` 中指定的服务器本地 secret 文件，因此必须在下一节创建 secret 后才能执行 Compose 配置校验和镜像拉取。
+Compose 会读取 `compose.production.env` 中指定的服务器本地 secret 文件，因此必须在下一节创建 secret 后才能执行 Compose 配置校验和镜像拉取。标准 `upload-release-bundle.sh` 在服务端通过 `SHA256SUMS` 后，使用 bundle 内安装器校验固定十文件白名单，并在共享 operations lock 内事务化切换 `/home/gameops/script` 与 `/data/myserver/apply-release.sh`；不得手工用 glob 或逐文件复制。跨目录 rename 不是单条原子操作，SIGKILL 可能留下短暂 target 缺失或 backup，但 `pending-ops-install` journal 持久记录新旧内容哈希；下一次安装只在路径和 identity 精确匹配时回滚，无法匹配则保留现场并关闭失败。其他写运维操作在 journal 清除前拒绝执行。
 
 ## 4. 服务器本地密钥
 
@@ -139,6 +142,10 @@ docker compose --env-file compose.production.env -f compose.production.yml \
 ```
 
 `game-server`、`game-proxy`、`chat-server` 和 `match-service` 分别在 Docker internal network 的 `7600`、`7601`、`7602`、`7603` 提供健康监听。正式 release runner 和上述首次启动命令都会通过 bundle 内的统一 probe 检查这四个 `/readyz`，同时检查 required Node HTTP 服务的 `/healthz`。`GET /livez` 只证明 runtime 存活，发布与接流量判断必须使用 required readiness 收敛结果。这些端口不映射到宿主机公网。任一 required readiness 失败时，不要启动 Caddy，也不要手工修改 `_sqlx_migrations`、删除未知 registry key 或删除 socket 来绕过失败。
+
+game-server 旧实例的受控退出必须由已安装的 `/home/gameops/script/ops-retire.sh` 协调 Docker desired state。production 默认 Compose project 为 `myserver`，确认串是 `<instance-id>@<full-revision>@myserver`。隔离演练必须显式传 `--project <exact-project>`，该值同时用于 Compose lookup、容器 label 围栏、journal 和确认串，不接受宽松环境变量覆盖。候选实例连续 Ready 后，以旧实例 ID、旧镜像完整 Git revision、project 和组合确认串启动 stop hook；脚本进入 `awaiting_control_plane_shutdown` 后，管理员仍通过 admin-api 完成 drain、break-glass、预检、独立审批和 shutdown 执行。stop hook 不接收管理员凭据或审批 nonce，只等待同一旧容器安全退出，从而避免 `restart: unless-stopped` 将 self-graceful exit 重新拉起。超时、非零退出、OOM 或目标身份变化会失败并恢复原 policy；异常终止留下的 pending journal 会阻止其他写运维操作，必须使用相同 identity/revision/project 显式 `--recover`。recover 即使面对已经干净退出的旧容器，也会恢复 restart policy、重新启动旧实例并结束该次 retire；之后必须重新发起 retire，不能沿用旧等待周期。这一 helper 不创建 candidate，完整 old/new 创建与切流仍由部署平台灰度编排负责。
+
+共享运维锁的真实并发、同进程重入及 release runner 自动回滚子进程的 FD 继承，必须在 WSL 原生 Linux checkout 中运行 `tests/deploy/ops-lock-linux-fixture.test.mjs` 留证；Windows 下该夹具明确跳过，静态断言不能替代 Linux `flock` 证据。
 
 dependency-aware Rust 服务的 production 窗口固定为：启动收敛 `120s`、Ready 稳定 `10s`、依赖 stale `60s`。release runner 另有 `180s` 有界总等待，并要求所有 required 服务连续成功覆盖 registry heartbeat TTL `30s` 加 Ready 稳定窗口 `10s` 后才允许接流量。超时诊断只输出服务、实例 ID、dependency state 和错误码。常规更新仅在发布命令携带 `--rollback-db-compatible`、已确认上一应用 release 兼容前向迁移后的数据库时，才调用上一 release 的同一 runner 做单次版本回滚；回滚只替换应用版本，不回退 migration，也不使用旧 catalog 重跑 preflight/apply，而由发起回滚的 release migration-runner 对当前数据库和旧应用 readiness 做 postflight。最终仍保留原始发布失败状态。首次部署没有上一 release，超时后必须保持 Caddy 未启动和流量关闭，按诊断人工处置。不得通过容器 restart loop 重新碰运气。
 

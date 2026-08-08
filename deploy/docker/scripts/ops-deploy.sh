@@ -23,6 +23,9 @@ done
 [[ -n "$release_id" && -n "$confirmation" && "$rollback_db_compatible" == true ]] || usage
 release_dir_for "$release_id" >/dev/null
 require_confirmation "$release_id" "$confirmation"
+acquire_mutating_lock
+assert_no_pending_ops_install
+assert_no_pending_retire
 [[ -x /data/myserver/apply-release.sh ]] || die '/data/myserver/apply-release.sh is unavailable'
 
 exec /data/myserver/apply-release.sh --release-id "$release_id" --actor "$actor" \

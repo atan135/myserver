@@ -23,6 +23,9 @@ while [[ $# -gt 0 ]]; do
 done
 [[ "$timeout" =~ ^[1-9][0-9]*$ ]] || die '--timeout must be a positive integer'
 require_confirmation "$service" "$confirmation"
+acquire_mutating_lock
+assert_no_pending_ops_install
+assert_no_pending_retire
 load_release_readiness
 validate_release_readiness_window "$timeout"
 

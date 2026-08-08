@@ -49,9 +49,37 @@ case "$readiness_source_release_id" in *[!A-Za-z0-9._-]*) echo "Invalid readines
 
 release_root=/data/myserver/release
 release_dir="$release_root/$release_id"
-for command in docker sha256sum awk readlink date; do
+ops_state_root="${MYSERVER_OPS_STATE_ROOT:-/data/myserver/run}"
+ops_lock_file="$ops_state_root/operations.lock"
+ops_retire_journal="$ops_state_root/pending-game-server-retire"
+ops_install_journal="$ops_state_root/pending-ops-install"
+ops_lock_fd=9
+for command in docker sha256sum awk readlink date flock install; do
   command -v "$command" >/dev/null || { echo "Required command is unavailable: $command" >&2; exit 69; }
 done
+
+install -d -m 0700 "$ops_state_root"
+expected_lock_path="$(readlink -f "$ops_lock_file")"
+if [[ "${MYSERVER_OPS_LOCK_FD:-}" == "$ops_lock_fd" ]]; then
+  inherited_fd_path="$(readlink -f "/proc/$$/fd/$ops_lock_fd" 2>/dev/null || true)"
+  [[ -n "$inherited_fd_path" && "$inherited_fd_path" == "$expected_lock_path" ]] || {
+    echo "Inherited operations lock descriptor is invalid." >&2
+    exit 65
+  }
+  flock -n "$ops_lock_fd" || { echo "Inherited operations lock is not held." >&2; exit 75; }
+else
+  exec 9>"$ops_lock_file"
+  flock -n "$ops_lock_fd" || { echo "Another mutating operation is already running." >&2; exit 75; }
+  export MYSERVER_OPS_LOCK_FD="$ops_lock_fd"
+fi
+[[ ! -e "$ops_install_journal" ]] || {
+  echo "Pending ops install recovery is required before release apply." >&2
+  exit 75
+}
+[[ ! -e "$ops_retire_journal" ]] || {
+  echo "Pending game-server retire recovery is required before release apply." >&2
+  exit 75
+}
 
 verify_release_bundle() {
   local candidate_dir="$1"

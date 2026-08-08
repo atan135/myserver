@@ -104,7 +104,7 @@ if [ -e "$output" ] && [ -n "$(find "$output" -mindepth 1 -maxdepth 1 -print -qu
 fi
 
 install -d -m 0755 "$output"
-install -d -m 0755 "$output/config" "$output/postgres-bootstrap" "$output/db" "$output/apps/game-server" "$output/scripts"
+install -d -m 0755 "$output/config" "$output/postgres-bootstrap" "$output/db" "$output/apps/game-server" "$output/scripts" "$output/scripts/ops"
 install -m 0644 deploy/docker/compose.production.yml "$output/compose.production.yml"
 install -m 0644 deploy/docker/compose.production.env.example "$output/compose.production.env.example"
 install -m 0644 deploy/docker/images.lock.json "$output/images.lock.json"
@@ -117,6 +117,13 @@ cp -a apps/game-server/scene "$output/apps/game-server/scene"
 install -m 0755 scripts/docker/initialize-production-secrets.sh "$output/scripts/initialize-production-secrets.sh"
 install -m 0755 scripts/docker/readiness-convergence.sh "$output/scripts/readiness-convergence.sh"
 install -m 0644 scripts/docker/release-readiness-probe.mjs "$output/scripts/release-readiness-probe.mjs"
+install -m 0755 scripts/docker/install-ops-scripts.sh "$output/scripts/install-ops-scripts.sh"
+install -m 0755 scripts/docker/server-apply-release.sh "$output/scripts/server-apply-release.sh"
+for script in \
+  ops-common.sh ops-deploy.sh ops-disk-report.sh ops-health.sh ops-logs.sh \
+  ops-replace.sh ops-restart.sh ops-retire.sh ops-rollback.sh ops-status.sh; do
+  install -m 0755 "deploy/docker/scripts/$script" "$output/scripts/ops/$script"
+done
 
 node scripts/docker/render-release-env.mjs \
   --lock deploy/docker/images.lock.json \

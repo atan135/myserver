@@ -23,6 +23,9 @@ done
 [[ -n "$release_id" && -n "$confirmation" && "$db_compatible" == true ]] || usage
 release_dir_for "$release_id" >/dev/null
 require_confirmation "$release_id" "$confirmation"
+acquire_mutating_lock
+assert_no_pending_ops_install
+assert_no_pending_retire
 [[ "$(current_release_dir)" != "$(release_dir_for "$release_id")" ]] || die 'target release is already current'
 [[ -x /data/myserver/apply-release.sh ]] || die '/data/myserver/apply-release.sh is unavailable'
 readiness_source_release_id="$(basename "$(current_release_dir)")"

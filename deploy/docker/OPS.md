@@ -1,20 +1,24 @@
 # Docker 运维脚本
 
-脚本源码位于 `deploy/docker/scripts/`，部署到目标机 `/home/gameops/script` 后运行。它们仅操作当前正式 release：`/data/myserver/release/current`。
+脚本源码位于 `deploy/docker/scripts/`，由校验过完整 `SHA256SUMS` 的 release bundle 携带，并通过 `scripts/install-ops-scripts.sh` 按固定十文件白名单事务化安装到 `/home/gameops/script`。安装器全程持有 `/data/myserver/run/operations.lock`，同时切换 ops generation 与 `/data/myserver/apply-release.sh`。目录 rename 之间存在极短的 target 缺失窗口；durable `pending-ops-install` journal 记录新旧路径和内容哈希，普通失败立即回滚，SIGKILL 后下一次安装会先做路径和身份围栏恢复。journal 未恢复时其他写运维脚本关闭失败。安装过程拒绝缺失、额外或符号链接条目，不使用 `ops-*` glob 做增量覆盖。
 
 ```bash
-chmod 0755 /home/gameops/script/ops-*.sh
 /home/gameops/script/ops-status.sh
 /home/gameops/script/ops-logs.sh auth-http --tail 200
 /home/gameops/script/ops-health.sh
 /home/gameops/script/ops-restart.sh auth-http --confirm auth-http
 /home/gameops/script/ops-replace.sh auth-http --confirm auth-http
+/home/gameops/script/ops-retire.sh game-server \
+  --instance-id game-server-old --revision <full-git-sha> \
+  --confirm game-server-old@<full-git-sha>@myserver
 /home/gameops/script/ops-disk-report.sh
 ```
 
 `ops-restart.sh` 只重启现有容器，不重新读取 Compose 定义、环境文件或镜像。`ops-replace.sh` 使用当前 release 的 Compose 定义执行单服务 `up -d --no-deps`，不会连带重建依赖。两者先确认目标容器已运行且其可用 healthcheck 已通过，再复用当前 release 的统一 readiness 收敛函数；不能以容器 `running` 或单次 health 成功作为整个操作的完成条件。其余参数由脚本白名单校验，避免将服务名传递为任意 Docker 参数。
 
-新版 restart/replace 脚本依赖当前 release bundle 的 `scripts/readiness-convergence.sh`。升级时必须先通过 release runner 成功发布包含该文件的新 bundle，再更新 `/home/gameops/script`；脚本会在变更容器前检查 helper，旧 bundle 不满足条件时会关闭失败，不会先重启或替换服务。
+`ops-retire.sh` 是 game-server 滚动替换的部署平台 stop hook。候选实例 Ready 后先启动该脚本；它精确核验 Compose service/project、旧实例 ID 和完整镜像 Git revision，并将 project 纳入确认串，再将旧容器 restart policy 临时改为 `no`，然后只等待正式 admin-api 两人审批和 break-glass 链触发的 graceful shutdown。脚本不接受或读取管理员 token、nonce，也不调用 admin-api。只有同一容器以 exit code 0 且非 OOM 退出时才保留 stopped；失败会恢复原 restart policy 和运行期望。异常中断遗留的 pending journal 会阻止 deploy/restart/replace/rollback，必须使用相同 instance/revision/project/confirm 加 `--recover` 精确恢复。即使旧容器已经干净退出，`--recover` 也会恢复 `unless-stopped` 并重新启动旧实例，清除 journal 后本次 retire 即告结束；确认候选状态后必须发起新的 retire 周期，不能把 recover 当成继续等待。该 stop hook 不负责自动创建候选实例，当前 release runner 也不因此自动具备 old/new 灰度编排。
+
+新版 restart/replace 脚本依赖当前 release bundle 的 `scripts/readiness-convergence.sh`。`upload-release-bundle.sh` 在服务器校验 bundle 后调用同一事务安装器更新完整脚本集合与 apply runner；脚本会在变更容器前检查 helper，旧 bundle 不满足条件时会关闭失败，不会先重启或替换服务。
 
 正式发布必须先通过现有 bundle 流程上传 release，再执行：
 
