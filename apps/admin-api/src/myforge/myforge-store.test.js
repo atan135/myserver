@@ -1317,9 +1317,12 @@ test("myforge connection close preserves execute and cancel writer failure class
 });
 
 test("myforge schema is present in both bootstrap paths with state and active-task constraints", () => {
-  const dbClient = fs.readFileSync(new URL("../db-client.js", import.meta.url), "utf8");
+  const initialMigration = fs.readFileSync(
+    new URL("../../../../db/migrations/auth/20260718161350_initial_schema.sql", import.meta.url),
+    "utf8"
+  );
   const initSql = fs.readFileSync(new URL("../../../../db/init.sql", import.meta.url), "utf8");
-  for (const source of [dbClient, initSql]) {
+  for (const source of [initialMigration, initSql]) {
     assert.match(source, /CREATE TABLE IF NOT EXISTS myforge_agents/);
     assert.match(source, /CREATE TABLE IF NOT EXISTS myforge_task_runs/);
     assert.match(source, /rules_file varchar\(512\) NULL/);
