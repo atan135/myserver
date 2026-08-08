@@ -47,6 +47,7 @@ const DEFAULT_OPTIONS = {
   adminBaseUrl: "http://127.0.0.1:3001",
   adminToken: process.env.MYSERVER_ADMIN_TOKEN || process.env.ADMIN_API_TOKEN || "",
   gameServerInstanceId: process.env.MYSERVER_GAME_SERVER_INSTANCE_ID || "",
+  backupReference: process.env.MYSERVER_CONTROL_BACKUP_REFERENCE || "",
   adminLogLimit: 20,
   announceBaseUrl: "",
   mailBaseUrl: "",
@@ -219,6 +220,9 @@ export function parseArgs(argv) {
         break;
       case "--game-server-instance-id":
         ({ value: result.gameServerInstanceId, nextIndex: index } = collectOptionValue(argv, index));
+        break;
+      case "--backup-reference":
+        ({ value: result.backupReference, nextIndex: index } = collectOptionValue(argv, index));
         break;
       case "--admin-log-limit":
         result.adminLogLimit = Number.parseInt(collectOptionValue(argv, index).value, 10);

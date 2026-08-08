@@ -245,9 +245,11 @@ async function postGameServerControl(options, action, body) {
   return payload;
 }
 
-async function runGameServerControlOperation(options, action, input) {
+export async function runGameServerControlOperation(options, action, input) {
   const requestId = `mock-client-${action}-${randomUUID()}`;
-  const body = { ...input, requestId };
+  const explicitBackupReference = String(options.backupReference || "").trim();
+  const backupReference = explicitBackupReference || `${requestId}-recovery`;
+  const body = { ...input, requestId, backupReference };
   const preflight = await postGameServerControl(options, action, body);
   if (!preflight?.preflight?.nonce || !preflight?.preflight?.summarySha256) {
     throw new Error(`${action} game-server control preflight response is invalid`);

@@ -124,6 +124,11 @@ async function startIntegrationAdminControl({ adminPort, privateKeyPem }) {
     const chunks = [];
     for await (const chunk of req) chunks.push(chunk);
     const body = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
+    if (!/^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$/.test(String(body.backupReference || ""))) {
+      res.statusCode = 400;
+      res.end(JSON.stringify({ ok: false, error: "ADMIN_OPERATION_BACKUP_REFERENCE_REQUIRED" }));
+      return;
+    }
     if (!body.preflightNonce || !body.preflightSummarySha256) {
       res.end(JSON.stringify({
         ok: true,
