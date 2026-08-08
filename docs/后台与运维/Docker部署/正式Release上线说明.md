@@ -115,26 +115,32 @@ docker compose --env-file compose.production.env -f compose.production.yml \
 docker compose --env-file compose.production.env -f compose.production.yml ps
 
 docker compose --profile ops --env-file compose.production.env -f compose.production.yml \
-  run --rm migration-runner initialize --environment production \
+  run --rm --no-deps migration-runner initialize --environment production \
   --actor <release-operator> \
   --confirm-empty-databases initialize-empty-databases
 
 docker compose --env-file compose.production.env -f compose.production.yml \
-  up -d game-server match-service chat-server mail-service announce-service metrics-collector
-docker compose --env-file compose.production.env -f compose.production.yml \
-  up -d game-proxy auth-http admin-api
+  up -d game-server match-service chat-server mail-service announce-service \
+  metrics-collector game-proxy auth-http admin-api
+
+source ./scripts/readiness-convergence.sh
+release_compose_command() {
+  docker compose --profile ops --env-file compose.production.env \
+    -f compose.production.yml "$@"
+}
+wait_for_release_readiness
 
 docker compose --profile ops --env-file compose.production.env -f compose.production.yml \
-  run --rm migration-runner postflight --environment production \
+  run --rm --no-deps migration-runner postflight --environment production \
   --check-readiness --require-readiness
 
 docker compose --env-file compose.production.env -f compose.production.yml \
   up -d caddy
 ```
 
-`game-server`、`game-proxy`、`chat-server` 和 `match-service` 分别在 Docker internal network 的 `7600`、`7601`、`7602`、`7603` 提供健康监听。前三个已纳入现有数据库 postflight URL 清单；`match-service:7603/readyz` 在统一应用发布收敛门禁落地前需由发布侧单独核验。`GET /livez` 只证明 runtime 存活，发布与接流量判断必须使用 `GET /readyz`。这些端口不映射到宿主机公网；Node HTTP 服务使用自身 `/healthz`。任一 required readiness 失败时，不要启动 Caddy 或开放 `4000/UDP`、`80/TCP`、`443/TCP`，也不要手工修改 `_sqlx_migrations`。
+`game-server`、`game-proxy`、`chat-server` 和 `match-service` 分别在 Docker internal network 的 `7600`、`7601`、`7602`、`7603` 提供健康监听。正式 release runner 和上述首次启动命令都会通过 bundle 内的统一 probe 检查这四个 `/readyz`，同时检查 required Node HTTP 服务的 `/healthz`。`GET /livez` 只证明 runtime 存活，发布与接流量判断必须使用 required readiness 收敛结果。这些端口不映射到宿主机公网。任一 required readiness 失败时，不要启动 Caddy，也不要手工修改 `_sqlx_migrations`、删除未知 registry key 或删除 socket 来绕过失败。
 
-三个 dependency-aware Rust 服务的 production 窗口固定为：启动收敛 `120s`、Ready 稳定 `10s`、依赖 stale `60s`。启动收敛超时后进程保持运行且 `/readyz` 持续返回 503，由发布系统停止接流量并判定回滚；不得通过容器 restart loop 重新碰运气。依赖恢复后必须连续稳定 10 秒才可重新接流量。
+dependency-aware Rust 服务的 production 窗口固定为：启动收敛 `120s`、Ready 稳定 `10s`、依赖 stale `60s`。release runner 另有 `180s` 有界总等待，并要求所有 required 服务连续成功覆盖 registry heartbeat TTL `30s` 加 Ready 稳定窗口 `10s` 后才允许接流量。超时诊断只输出服务、实例 ID、dependency state 和错误码。常规更新仅在发布命令携带 `--rollback-db-compatible`、已确认上一应用 release 兼容前向迁移后的数据库时，才调用上一 release 的同一 runner 做单次版本回滚；回滚只替换应用版本，不回退 migration，也不使用旧 catalog 重跑 preflight/apply，而由发起回滚的 release migration-runner 对当前数据库和旧应用 readiness 做 postflight。最终仍保留原始发布失败状态。首次部署没有上一 release，超时后必须保持 Caddy 未启动和流量关闭，按诊断人工处置。不得通过容器 restart loop 重新碰运气。
 
 窗口变量只在未设置时使用默认值。发布配置若包含非数字、零、溢出值、超过 `600/120/600` 秒上限，或不满足 `stability <= convergence`、`stale > stability`，服务必须启动失败；不得通过删掉错误日志或依赖默认回退继续发布。
 
@@ -145,8 +151,8 @@ docker compose --env-file compose.production.env -f compose.production.yml \
 仅在以下条件都满足后，才开放公网入口：
 
 - `docker compose ps` 中基础设施为 healthy，业务服务无反复重启。
-- postflight 的五库 history、drift、关键表和所有 required readiness 均成功。
-- Redis registry 中的实例 endpoint 与 heartbeat 正确，且没有 legacy direct fallback。
+- postflight 的五库 history、drift、关键表均成功，统一 readiness probe 覆盖全部 required 服务并连续通过 TTL 加稳定窗口。
+- Redis registry heartbeat 已跨过一个完整 TTL 观察窗口，且没有 legacy direct fallback。
 - 实际运行镜像 digest 与 `images.lock.json` 完全一致。
 - 域名证书已由 Caddy 成功获取，且 API、后台和游戏入口的端到端检查通过。
 

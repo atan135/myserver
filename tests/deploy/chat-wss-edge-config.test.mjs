@@ -58,7 +58,7 @@ test("production Compose keeps both chat listeners off the host network", async 
   assert.doesNotMatch(chatService, /\n\s+ports:/);
   assert.match(caddyService, /CADDY_CHAT_HOST: \$\{CADDY_CHAT_HOST:\?set CADDY_CHAT_HOST\}/);
   assert.match(caddyService, /networks:\s*\n\s+- edge\s*\n\s+- internal/);
-  assert.match(caddyService, /chat-server:\s*\n\s+condition: service_started/);
+  assert.doesNotMatch(caddyService, /depends_on:/);
   assert.doesNotMatch(compose, /["']?9011:9011(?:\/tcp)?["']?/);
   assert.doesNotMatch(compose, /["']?9001:9001(?:\/tcp)?["']?/);
 });

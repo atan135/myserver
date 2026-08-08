@@ -161,9 +161,9 @@ DISALLOW_LEGACY_DIRECT_CONFIG=true
 首次发布和每次更新均按以下状态机执行：
 
 1. 拉取并以 digest 校验全部镜像；先启动 PostgreSQL、Redis、NATS，确认其容器健康、数据目录可写且不暴露公网端口。
-2. 使用独立的 migration runner 执行受支持的五库入口，而不是在服务器直接安装 Node 或 SQLx：`docker compose --profile ops ... run --rm migration-runner preflight --environment production`，审批完成后使用同一容器执行 `apply`。完整命令见[正式 Release 上线说明](./正式Release上线说明.md)。
-3. 先启动内部服务：`game-server`、`match-service`、`chat-server`、`mail-service`、`announce-service`、`metrics-collector`。每个注册实例都必须在 Redis registry 中具备正确 endpoint 和未过期 heartbeat。
-4. 启动入口和控制面内部组件：`game-proxy`、`auth-http`、`admin-api`。`game-proxy` 必须发现 `game-server.proxy-local`；`auth-http` 必须发现 `game-proxy.client`；`admin-api` 必须发现两个 admin endpoint。Caddy 必须在 postflight 成功后才启动；它托管已构建的 `admin-web` 静态文件并接收 `80/TCP`、`443/TCP` 流量。
+2. 使用独立的 migration runner 执行受支持的五库入口，而不是在服务器直接安装 Node 或 SQLx：`docker compose --profile ops ... run --rm --no-deps migration-runner preflight --environment production`，审批完成后使用同一容器执行 `apply`。完整命令见[正式 Release 上线说明](./正式Release上线说明.md)。
+3. 使用一次 `docker compose up -d` 批量启动 `game-server`、`match-service`、`chat-server`、`mail-service`、`announce-service`、`metrics-collector`、`game-proxy`、`auth-http`、`admin-api`。应用服务之间不通过 `depends_on` 表达固定启动顺序，只保留 PostgreSQL、Redis、NATS 和 socket 目录初始化等基础门禁。
+4. 统一等待 required readiness 连续覆盖 registry heartbeat TTL `30s` 与 Ready 稳定窗口 `10s`。只有全部服务收敛且数据库 postflight 通过后才启动 Caddy；超时按结构化安全字段诊断。常规更新只有在发布前显式确认上一应用 release 兼容本次前向数据库迁移时才调用上一 release 的同一流程做单次回滚；首次发布没有回滚目标，必须保持入口关闭。不得删除未知 registry key 或 socket 继续发布。
 5. 运行数据库 postflight，并在已配置的 staged readiness endpoint 上显式启用 `--check-readiness --require-readiness`。随后才将 Caddy 和游戏入口接入外部流量。
 
 数据库命令的真实输入、备份证据、退出码和失败恢复以[数据库部署准入说明](../../数据库/数据库部署准入说明.md)为准。不可逆 migration 必须先准备每个受影响数据库的备份 artifact ID 和 checksum；失败后不得手工修改 `_sqlx_migrations`、跳过失败库或自动回滚 schema。
@@ -223,8 +223,9 @@ Redis 保持 `maxmemory-policy noeviction`，因此达到 `maxmemory` 后会拒�
 验证 release bundle/digest
   -> docker compose pull
   -> 受控 migration preflight/apply
-  -> 分批更新内部服务并验证 registry/readiness
-  -> 更新 game-proxy、auth-http、admin-api/Caddy（含 admin-web 静态文件）
+  -> 单批启动应用服务并验证 registry/readiness
+  -> database postflight
+  -> 启动 Caddy（含 admin-web 静态文件）
   -> database postflight + 端到端入口检查
   -> 恢复接新流量并持续观察
 ```
@@ -238,6 +239,7 @@ Redis 保持 `maxmemory-policy noeviction`，因此达到 `maxmemory` 后会拒�
 ### 4.3 回滚
 
 - 仅应用镜像异常且数据库 migration 保持向后兼容时，可按 release manifest 回滚到上一个已验证 digest，并保持当前数据库 schema。
+- 应用版本回滚跳过旧 release 的 migration preflight/apply，复用发起回滚的当前 release migration-runner 对现有数据库 history、drift 和旧应用 required readiness 执行 postflight。
 - 已应用不可逆 migration、contract migration、数据回填或新状态机记录时，禁止自动回滚数据库。按 migration `Recovery command`、备份与经审批的恢复演练执行。
 - 回滚前保留至少一个能处理现有 mail workflow、game 幂等记录和数据库 schema 的兼容版本；不能因为回滚而删除 outbox、lease、route 或 registry 数据。
 - 若 game-server 未排空，先保持维护和入口隔离，按 drain/迁移流程处理；不能以回滚镜像为理由强杀进程。

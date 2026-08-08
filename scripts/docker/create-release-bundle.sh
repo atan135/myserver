@@ -115,6 +115,8 @@ cp -a db/. "$output/db/"
 cp -a apps/game-server/csv "$output/apps/game-server/csv"
 cp -a apps/game-server/scene "$output/apps/game-server/scene"
 install -m 0755 scripts/docker/initialize-production-secrets.sh "$output/scripts/initialize-production-secrets.sh"
+install -m 0755 scripts/docker/readiness-convergence.sh "$output/scripts/readiness-convergence.sh"
+install -m 0644 scripts/docker/release-readiness-probe.mjs "$output/scripts/release-readiness-probe.mjs"
 
 node scripts/docker/render-release-env.mjs \
   --lock deploy/docker/images.lock.json \

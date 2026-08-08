@@ -41,6 +41,7 @@ const serviceNames = [
 ];
 const values = new Map([
   ["RELEASE_ID", lock.releaseId],
+  ["RELEASE_ROOT", envValue("release-root")],
   ["POSTGRES_IMAGE", lock.infrastructure.postgres?.reference],
   ["REDIS_IMAGE", lock.infrastructure.redis?.reference],
   ["NATS_IMAGE", lock.infrastructure.nats?.reference],

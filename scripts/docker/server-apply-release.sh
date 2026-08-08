@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Usage: /data/myserver/apply-release.sh --release-id <id> [--actor <identity>]
+Usage: /data/myserver/apply-release.sh --release-id <id> --rollback-db-compatible [--actor <identity>]
 
 Applies an uploaded, checksummed release bundle. This is an update workflow fo
 an initialized production database; it never creates or replaces secret files.
@@ -11,40 +11,113 @@ EOF
 }
 
 release_id=""
+rollback_attempt=false
+rollback_db_compatible=false
+readiness_source_release_id=""
 actor="${USER:-operator}@$(hostname -s)"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --release-id) release_id="${2:?--release-id requires a value}"; shift 2 ;;
     --actor) actor="${2:?--actor requires a value}"; shift 2 ;;
+    --rollback-db-compatible) rollback_db_compatible=true; shift ;;
+    --rollback-attempt) rollback_attempt=true; shift ;;
+    --readiness-source-release) readiness_source_release_id="${2:?--readiness-source-release requires a value}"; shift 2 ;;
     --help|-h) usage; exit 0 ;;
     *) echo "Unknown option: $1" >&2; usage >&2; exit 64 ;;
   esac
 done
 
 [[ -n "$release_id" ]] || { usage >&2; exit 64; }
+[[ "$rollback_db_compatible" == true ]] || {
+  echo "--rollback-db-compatible is required: confirm the previous application release can run against forward-applied database migrations." >&2
+  exit 64
+}
+if [[ -n "$readiness_source_release_id" && "$rollback_attempt" != true ]]; then
+  echo "--readiness-source-release is restricted to an internal rollback attempt." >&2
+  exit 64
+fi
+if [[ "$rollback_attempt" == true && -z "$readiness_source_release_id" ]]; then
+  echo "--rollback-attempt requires --readiness-source-release." >&2
+  exit 64
+fi
 case "$release_id" in *[!A-Za-z0-9._-]*|'') echo "Invalid release ID: $release_id" >&2; exit 64 ;; esac
+case "$readiness_source_release_id" in *[!A-Za-z0-9._-]*) echo "Invalid readiness source release ID: $readiness_source_release_id" >&2; exit 64 ;; esac
+[[ -z "$readiness_source_release_id" || "$readiness_source_release_id" != "$release_id" ]] || {
+  echo "Readiness source release must differ from the rollback target." >&2
+  exit 64
+}
 
 release_root=/data/myserver/release
 release_dir="$release_root/$release_id"
-[[ -d "$release_dir" ]] || { echo "Release directory does not exist: $release_dir" >&2; exit 66; }
-[[ -f "$release_dir/RELEASE" && -f "$release_dir/SHA256SUMS" ]] || {
-  echo "Release bundle is incomplete: $release_dir" >&2
-  exit 65
-}
-actual_release_id="$(awk -F= '$1 == "release_id" { print $2 }' "$release_dir/RELEASE")"
-[[ "$actual_release_id" == "$release_id" ]] || {
-  echo "Release manifest mismatch: expected $release_id, got $actual_release_id" >&2
-  exit 65
-}
-
-for command in docker sha256sum awk readlink; do
+for command in docker sha256sum awk readlink date; do
   command -v "$command" >/dev/null || { echo "Required command is unavailable: $command" >&2; exit 69; }
 done
 
+verify_release_bundle() {
+  local candidate_dir="$1"
+  local expected_release_id="$2"
+  local actual_release_id
+  [[ -d "$candidate_dir" && -f "$candidate_dir/RELEASE" && -f "$candidate_dir/SHA256SUMS" ]] || {
+    echo "Release bundle is incomplete: $expected_release_id" >&2
+    return 65
+  }
+  actual_release_id="$(awk -F= '$1 == "release_id" { print $2 }' "$candidate_dir/RELEASE")"
+  [[ "$actual_release_id" == "$expected_release_id" ]] || {
+    echo "Release manifest identity mismatch: $expected_release_id" >&2
+    return 65
+  }
+  (cd "$candidate_dir" && sha256sum --check --status SHA256SUMS) || {
+    echo "Release bundle checksum failed: $expected_release_id" >&2
+    return 65
+  }
+}
+
+verify_release_bundle "$release_dir" "$release_id"
 cd "$release_dir"
-sha256sum --check --status SHA256SUMS
 compose=(docker compose --env-file compose.production.env -f compose.production.yml)
+readiness_source_dir="$release_dir"
+if [[ -n "$readiness_source_release_id" ]]; then
+  readiness_source_dir="$release_root/$readiness_source_release_id"
+  verify_release_bundle "$readiness_source_dir" "$readiness_source_release_id"
+fi
+[[ -r "$readiness_source_dir/scripts/readiness-convergence.sh" && \
+   -r "$readiness_source_dir/scripts/release-readiness-probe.mjs" && \
+   -r "$readiness_source_dir/compose.production.yml" && \
+   -r "$readiness_source_dir/compose.production.env" ]] || {
+  echo "Readiness source release is incomplete: ${readiness_source_release_id:-$release_id}" >&2
+  exit 65
+}
+export RELEASE_READINESS_PROBE_FILE="$readiness_source_dir/scripts/release-readiness-probe.mjs"
+source "$readiness_source_dir/scripts/readiness-convergence.sh"
+readiness_compose=(docker compose --env-file "$readiness_source_dir/compose.production.env" \
+  -f "$readiness_source_dir/compose.production.yml")
+release_compose_command() {
+  "${readiness_compose[@]}" "$@"
+}
 "${compose[@]}" config --quiet
+
+previous_release_dir="$(readlink -f "$release_root/current" 2>/dev/null || true)"
+previous_release_id=""
+if [[ -n "$previous_release_dir" && "$previous_release_dir" != "$release_dir" ]]; then
+  previous_release_id="${previous_release_dir##*/}"
+fi
+
+rollback_previous_release() {
+  if [[ "$rollback_attempt" == true || "$rollback_db_compatible" != true || -z "$previous_release_id" ]]; then
+    printf 'rollback_state=unavailable previous_release=%s\n' "${previous_release_id:-none}" >&2
+    return 1
+  fi
+  printf 'rollback_state=starting previous_release=%s failed_release=%s\n' \
+    "$previous_release_id" "$release_id" >&2
+  if /data/myserver/apply-release.sh --release-id "$previous_release_id" \
+      --actor "$actor" --rollback-db-compatible --rollback-attempt \
+      --readiness-source-release "$release_id"; then
+    printf 'rollback_state=converged previous_release=%s\n' "$previous_release_id" >&2
+    return 0
+  fi
+  printf 'rollback_state=failed previous_release=%s\n' "$previous_release_id" >&2
+  return 1
+}
 
 assert_chat_server_replica_count() {
   local expected="$1"
@@ -68,9 +141,19 @@ if (( ${#existing_chat_servers[@]} > 1 )); then
 fi
 
 "${compose[@]}" pull
-"${compose[@]}" --profile ops pull migration-runner
+"${readiness_compose[@]}" --profile ops pull migration-runner
+target_game_server_instance_id="$(
+  "${compose[@]}" config --format json | \
+    "${readiness_compose[@]}" --profile ops run --rm --no-deps -T --entrypoint node \
+      --volume "$RELEASE_READINESS_PROBE_FILE:/app/tools/release-readiness-probe.mjs:ro" \
+      migration-runner /app/tools/release-readiness-probe.mjs --extract-game-server-instance-id
+)"
+[[ "$target_game_server_instance_id" =~ ^[A-Za-z0-9_.:-]{1,128}$ ]] || {
+  echo "Invalid resolved game-server SERVICE_INSTANCE_ID." >&2
+  exit 65
+}
+export MYSERVER_RELEASE_GAME_SERVER_INSTANCE_ID="$target_game_server_instance_id"
 
-"${compose[@]}" up -d postgres redis nats
 wait_healthy() {
   local service="$1"
   local container status attempt
@@ -86,19 +169,37 @@ wait_healthy() {
   echo "Service did not become healthy: $service ($status)" >&2
   return 1
 }
+if [[ "$rollback_attempt" == false ]]; then
+  "${compose[@]}" up -d postgres redis nats
+else
+  printf 'database_migration_state=preserved readiness_source_release=%s\n' \
+    "$readiness_source_release_id"
+fi
 wait_healthy postgres
 wait_healthy redis
 wait_healthy nats
 
-# The runner refuses invalid history, pending unapproved migrations and missing backup evidence.
-"${compose[@]}" --profile ops run --rm migration-runner preflight --environment production
-"${compose[@]}" --profile ops run --rm migration-runner apply --environment production --actor "$actor"
+if [[ "$rollback_attempt" == false ]]; then
+  # The runner refuses invalid history, pending unapproved migrations and missing backup evidence.
+  "${compose[@]}" --profile ops run --rm --no-deps migration-runner preflight --environment production
+  "${compose[@]}" --profile ops run --rm --no-deps migration-runner apply --environment production --actor "$actor"
+fi
 
-"${compose[@]}" stop game-server
-"${compose[@]}" up -d game-server match-service chat-server mail-service announce-service metrics-collector
+"${compose[@]}" up -d game-server match-service chat-server mail-service announce-service \
+  metrics-collector game-proxy auth-http admin-api
 assert_chat_server_replica_count 1
-"${compose[@]}" up -d game-proxy auth-http admin-api
-"${compose[@]}" --profile ops run --rm migration-runner \
+
+if wait_for_release_readiness; then
+  :
+else
+  readiness_status=$?
+  printf 'release_failure release=%s stage=readiness error_code=READINESS_CONVERGENCE_TIMEOUT\n' \
+    "$release_id" >&2
+  rollback_previous_release || true
+  exit "$readiness_status"
+fi
+
+"${readiness_compose[@]}" --profile ops run --rm --no-deps migration-runner \
   postflight --environment production --check-readiness --require-readiness
 "${compose[@]}" up -d caddy
 

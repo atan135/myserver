@@ -158,8 +158,6 @@ services:
         condition: service_healthy
       nats:
         condition: service_healthy
-      game-server:
-        condition: service_started
     stop_grace_period: 45s
     mem_limit: 256m
 
@@ -239,8 +237,6 @@ services:
         condition: service_healthy
       nats:
         condition: service_healthy
-      game-server:
-        condition: service_started
     stop_grace_period: 60s
     mem_limit: 256m
 
@@ -324,8 +320,6 @@ services:
         condition: service_healthy
       nats:
         condition: service_healthy
-      game-server:
-        condition: service_started
     stop_grace_period: 45s
     mem_limit: 256m
 
@@ -360,8 +354,6 @@ services:
         condition: service_healthy
       nats:
         condition: service_healthy
-      game-proxy:
-        condition: service_started
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/healthz').then((r) => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
       interval: 15s
@@ -397,12 +389,6 @@ services:
         condition: service_healthy
       nats:
         condition: service_healthy
-      game-server:
-        condition: service_started
-      game-proxy:
-        condition: service_started
-      auth-http:
-        condition: service_healthy
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3001/healthz').then((r) => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
       interval: 15s
@@ -429,15 +415,6 @@ services:
     volumes:
       - caddy-data:/data
       - caddy-config:/config
-    depends_on:
-      auth-http:
-        condition: service_healthy
-      admin-api:
-        condition: service_healthy
-      chat-server:
-        condition: service_started
-      mail-service:
-        condition: service_started
     stop_grace_period: 30s
     mem_limit: 64m
 
@@ -451,16 +428,20 @@ services:
       MYSERVER_DB_DEPLOY_ADMIN_API_READINESS_URL: http://admin-api:3001/healthz
       MYSERVER_DB_DEPLOY_GAME_SERVER_READINESS_URL: http://game-server:7600/readyz
       MYSERVER_DB_DEPLOY_GAME_PROXY_READINESS_URL: http://game-proxy:7601/readyz
+      MYSERVER_RELEASE_MATCH_SERVICE_READINESS_URL: http://match-service:7603/readyz
       MYSERVER_DB_DEPLOY_CHAT_SERVER_READINESS_URL: http://chat-server:7602/readyz
       MYSERVER_DB_DEPLOY_ANNOUNCE_SERVICE_READINESS_URL: http://announce-service:9004/healthz
       MYSERVER_DB_DEPLOY_MAIL_SERVICE_READINESS_URL: http://mail-service:9003/healthz
       # Total startup allowance shared by every postflight readiness endpoint.
       MYSERVER_DB_DEPLOY_READINESS_TIMEOUT_MS: "120000"
+      MYSERVER_RELEASE_GAME_SERVER_INSTANCE_ID: ${GAME_SERVER_INSTANCE_ID:-game-server-1}
     depends_on:
       postgres:
         condition: service_healthy
     networks:
       - internal
+    volumes:
+      - ${RELEASE_ROOT:?set RELEASE_ROOT to the extracted release directory}/scripts/release-readiness-probe.mjs:/app/tools/release-readiness-probe.mjs:ro
     mem_limit: 256m
 
 volumes:

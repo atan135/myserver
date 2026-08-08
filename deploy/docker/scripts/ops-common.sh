@@ -66,24 +66,51 @@ container_health() {
   docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$1"
 }
 
-wait_for_healthy() {
+wait_for_target_container() {
   local service="$1"
-  local timeout_seconds="${2:-120}"
-  local started_at="$SECONDS"
-  local container_id state health
+  local timeout_seconds="$2"
+  local deadline container_id state health
+  deadline=$((SECONDS + timeout_seconds))
 
-  while (( SECONDS - started_at < timeout_seconds )); do
-    container_id="$(container_id_for "$service")"
-    state="$(container_state "$container_id")"
-    health="$(container_health "$container_id")"
-    printf '%s state=%s health=%s\n' "$service" "$state" "$health"
-
-    [[ "$state" == 'running' && ( "$health" == 'healthy' || "$health" == 'none' ) ]] && return 0
-    [[ "$state" == 'exited' || "$state" == 'dead' ]] && die "$service entered terminal state: $state"
+  while (( SECONDS < deadline )); do
+    container_id="$(compose ps -q "$service")"
+    if [[ -n "$container_id" ]]; then
+      state="$(container_state "$container_id")"
+      health="$(container_health "$container_id")"
+      if [[ "$state" == running && ( "$health" == healthy || "$health" == none ) ]]; then
+        return 0
+      fi
+      case "$state" in
+        dead|exited|removing)
+          printf 'target_container_failure service=%s state=%s health=%s\n' \
+            "$service" "$state" "$health" >&2
+          return 1
+          ;;
+      esac
+    else
+      state=missing
+      health=unknown
+    fi
     sleep 2
   done
 
-  die "timed out waiting for $service to become healthy"
+  printf 'target_container_timeout service=%s state=%s health=%s timeout_seconds=%s\n' \
+    "$service" "${state:-unknown}" "${health:-unknown}" "$timeout_seconds" >&2
+  return 1
+}
+
+release_compose_command() {
+  compose "$@"
+}
+
+load_release_readiness() {
+  local release_dir helper probe
+  release_dir="$(current_release_dir)"
+  helper="$release_dir/scripts/readiness-convergence.sh"
+  probe="$release_dir/scripts/release-readiness-probe.mjs"
+  [[ -r "$helper" ]] || die "current release readiness helper is unavailable: $helper"
+  [[ -r "$probe" ]] || die "current release readiness probe is unavailable: $probe"
+  source "$helper"
 }
 
 require_confirmation() {

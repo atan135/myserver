@@ -8,23 +8,28 @@ chmod 0755 /home/gameops/script/ops-*.sh
 /home/gameops/script/ops-logs.sh auth-http --tail 200
 /home/gameops/script/ops-health.sh
 /home/gameops/script/ops-restart.sh auth-http --confirm auth-http
+/home/gameops/script/ops-replace.sh auth-http --confirm auth-http
 /home/gameops/script/ops-disk-report.sh
 ```
 
-`ops-restart.sh` 只重启现有容器，不重新读取 Compose 定义、环境文件或镜像。其余参数由脚本白名单校验，避免将服务名传递为任意 Docker 参数。
+`ops-restart.sh` 只重启现有容器，不重新读取 Compose 定义、环境文件或镜像。`ops-replace.sh` 使用当前 release 的 Compose 定义执行单服务 `up -d --no-deps`，不会连带重建依赖。两者先确认目标容器已运行且其可用 healthcheck 已通过，再复用当前 release 的统一 readiness 收敛函数；不能以容器 `running` 或单次 health 成功作为整个操作的完成条件。其余参数由脚本白名单校验，避免将服务名传递为任意 Docker 参数。
+
+新版 restart/replace 脚本依赖当前 release bundle 的 `scripts/readiness-convergence.sh`。升级时必须先通过 release runner 成功发布包含该文件的新 bundle，再更新 `/home/gameops/script`；脚本会在变更容器前检查 helper，旧 bundle 不满足条件时会关闭失败，不会先重启或替换服务。
 
 正式发布必须先通过现有 bundle 流程上传 release，再执行：
 
 ```bash
-/home/gameops/script/ops-deploy.sh --release-id v0.1.0-<commit> --confirm v0.1.0-<commit>
+/home/gameops/script/ops-deploy.sh --release-id v0.1.0-<commit> --confirm v0.1.0-<commit> --rollback-db-compatible
 ```
 
-该脚本调用 `/data/myserver/apply-release.sh`，保留 digest 拉取、迁移和 readiness 校验。不要直接对单个服务执行 `docker compose pull` 或 `up` 作为正式发布。
+该脚本调用 `/data/myserver/apply-release.sh`，保留 digest 拉取、迁移、应用服务单次批量启动以及 registry TTL + Ready 稳定窗口校验。`--rollback-db-compatible` 表示操作者已确认：本次前向迁移执行后，上一应用 release 仍能使用当前数据库 schema；未确认时 runner 拒绝发布。readiness 超时时 runner 输出结构化安全诊断，并在存在上一 release 时调用其同一流程做单次版本回滚；原始发布仍明确失败。不要直接对单个服务执行 `docker compose pull` 或 `up` 作为正式发布，也不要删除未知 registry key 或 socket 绕过收敛失败。
 
 回滚同样调用 release runner，数据库迁移不会自动回退，因此必须先人工确认目标 release 与当前数据库兼容：
 
 ```bash
 /home/gameops/script/ops-rollback.sh --release-id v0.1.0-<previous> --confirm v0.1.0-<previous> --db-compatible
 ```
+
+回滚模式只替换应用版本，不用旧 release 的 migration catalog 重跑 preflight/apply。目标 release 与发起回滚的当前/失败 source release 都会重新核对 manifest identity 和完整 `SHA256SUMS`；通过后才复用 source release migration-runner 校验现有数据库 history、drift、required readiness 和稳定窗口，避免把已应用的新 migration 误判为旧版本 catalog 的未知记录。
 
 脚本不包含 `docker system prune`、删除 volume 或数据库修复命令。

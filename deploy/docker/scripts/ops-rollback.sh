@@ -25,7 +25,10 @@ release_dir_for "$release_id" >/dev/null
 require_confirmation "$release_id" "$confirmation"
 [[ "$(current_release_dir)" != "$(release_dir_for "$release_id")" ]] || die 'target release is already current'
 [[ -x /data/myserver/apply-release.sh ]] || die '/data/myserver/apply-release.sh is unavailable'
+readiness_source_release_id="$(basename "$(current_release_dir)")"
 
 printf 'rollback_release=%s\n' "$release_id"
 printf 'database compatibility was explicitly confirmed; this does not reverse database migrations.\n' >&2
-exec /data/myserver/apply-release.sh --release-id "$release_id" --actor "$actor"
+exec /data/myserver/apply-release.sh --release-id "$release_id" --actor "$actor" \
+  --rollback-db-compatible --rollback-attempt \
+  --readiness-source-release "$readiness_source_release_id"

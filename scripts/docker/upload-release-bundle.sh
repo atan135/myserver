@@ -165,5 +165,5 @@ tar -xzf "$archive" -C "$release_root"
 )
 sudo -n install -m 0755 "$runner_source" /data/myserver/apply-release.sh
 rm -f "$archive" "$runner_source"
-printf 'uploaded_release=%s\nserver_command=/data/myserver/apply-release.sh --release-id %s\n' "$target" "$RELEASE_ID"
+printf 'uploaded_release=%s\nserver_command=/data/myserver/apply-release.sh --release-id %s --rollback-db-compatible\n' "$target" "$RELEASE_ID"
 REMOTE
