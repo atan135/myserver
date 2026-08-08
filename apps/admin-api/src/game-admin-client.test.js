@@ -214,6 +214,32 @@ function createDiscoveryRedis(instances) {
   }
 
   return {
+    async zrangebyscore() {
+      return [...hashes.keys()]
+        .map((key) => key.match(/^service:game-server:instances:([^:]+):data$/)?.[1])
+        .filter(Boolean)
+        .sort();
+    },
+    pipeline() {
+      const commands = [];
+      const pipeline = {
+        hget(key, field) {
+          commands.push(["hget", key, field]);
+          return pipeline;
+        },
+        exists(key) {
+          commands.push(["exists", key]);
+          return pipeline;
+        },
+        async exec() {
+          return commands.map(([command, key, field]) => [
+            null,
+            command === "hget" ? hashes.get(`${key}:${field}`) || null : keys.has(key) ? 1 : 0
+          ]);
+        }
+      };
+      return pipeline;
+    },
     async scan(cursor, _match, pattern) {
       if (cursor !== "0") {
         return ["0", []];
@@ -263,6 +289,185 @@ function gameServerInstance(id, host, port) {
     healthy: true
   };
 }
+
+function protoVarint(value) {
+  let remaining = BigInt(value);
+  const bytes = [];
+  do {
+    let byte = Number(remaining & 0x7fn);
+    remaining >>= 7n;
+    if (remaining) byte |= 0x80;
+    bytes.push(byte);
+  } while (remaining);
+  return Buffer.from(bytes);
+}
+
+function protoString(field, value) {
+  const body = Buffer.from(value, "utf8");
+  return Buffer.concat([protoVarint((field << 3) | 2), protoVarint(body.length), body]);
+}
+
+function protoBool(field, value) {
+  return value ? Buffer.from([(field << 3), 1]) : Buffer.alloc(0);
+}
+
+function protoUint(field, value) {
+  return value ? Buffer.concat([Buffer.from([(field << 3)]), protoVarint(value)]) : Buffer.alloc(0);
+}
+
+function protoFixed(field, wireType, byteLength) {
+  return Buffer.concat([protoVarint((field << 3) | wireType), Buffer.alloc(byteLength, 0xa5)]);
+}
+
+function decodeTestStringFields(body) {
+  const result = {};
+  let offset = 0;
+  while (offset < body.length) {
+    const tag = body[offset++];
+    assert.equal(tag & 7, 2);
+    const length = body[offset++];
+    result[tag >> 3] = body.subarray(offset, offset + length).toString("utf8");
+    offset += length;
+  }
+  return result;
+}
+
+test("GameAdminClient encodes drain protobuf and preserves shutdown blocker state", async () => {
+  const requests = [];
+  const server = net.createServer((socket) => {
+    let buffer = Buffer.alloc(0);
+    socket.on("data", (chunk) => {
+      buffer = Buffer.concat([buffer, chunk]);
+      while (buffer.length >= HEADER_LEN) {
+        const bodyLength = buffer.readUInt32BE(10);
+        const packetLength = HEADER_LEN + bodyLength;
+        if (buffer.length < packetLength) return;
+        const messageType = buffer.readUInt16BE(4);
+        const seq = buffer.readUInt32BE(6);
+        const body = buffer.subarray(HEADER_LEN, packetLength);
+        buffer = buffer.subarray(packetLength);
+        if ([MESSAGE_TYPE.ADMIN_UPDATE_CONFIG_REQ, MESSAGE_TYPE.REQUEST_SERVER_SHUTDOWN_REQ].includes(messageType)) {
+          requests.push({ messageType, body });
+        }
+        if (messageType === MESSAGE_TYPE.ADMIN_UPDATE_CONFIG_REQ) {
+          socket.write(encodeTestPacket(
+            MESSAGE_TYPE.ADMIN_UPDATE_CONFIG_RES,
+            seq,
+            Buffer.concat([
+              protoUint(1, 2),
+              protoFixed(90, 5, 4)
+            ])
+          ));
+        }
+        if (messageType === MESSAGE_TYPE.REQUEST_SERVER_SHUTDOWN_REQ) {
+          socket.write(encodeTestPacket(
+            MESSAGE_TYPE.REQUEST_SERVER_SHUTDOWN_RES,
+            seq,
+            Buffer.concat([
+              protoString(2, "SHUTDOWN_CONNECTIONS_REMAIN"),
+              protoUint(3, 2),
+              protoBool(6, true),
+              protoBool(8, true),
+              protoFixed(91, 1, 8)
+            ])
+          ));
+        }
+      }
+    });
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = server.address().port;
+  const assertionService = {
+    async issue(context, service, instanceId) {
+      return {
+        version: 1,
+        operationId: `op-${context.requestId}`,
+        requestId: context.requestId,
+        traceId: context.traceId,
+        issuer: "admin-api",
+        keyId: "test-v1",
+        actorId: String(context.actorId),
+        permission: context.permission,
+        scope: {},
+        target: {},
+        service,
+        instanceId,
+        issuedAtMs: 1,
+        expiresAtMs: 2,
+        payloadSha256: "fixture",
+        signature: "fixture"
+      };
+    }
+  };
+  const client = new GameAdminClient({
+    registryDiscoveryEnabled: true,
+    registryDiscoveryRequired: true,
+    gameAdminConnectTimeoutMs: 1000,
+    gameAdminWriteTimeoutMs: 1000,
+    gameAdminReadTimeoutMs: 1000,
+    gameAdminMaxResponseBytes: 4096
+  }, createDiscoveryRedis([gameServerInstance("game-server-a", "127.0.0.1", port)]), assertionService);
+  const assertionContext = {
+    actorId: "admin-7",
+    permission: "game.config.write",
+    scope: {},
+    target: { targetType: "service", targetIds: ["game-server-a"] },
+    requestId: "request-control-1",
+    traceId: "trace-control-1"
+  };
+
+  try {
+    const update = await client.updateConfig("drain_mode", "on", {
+      targetInstanceId: "game-server-a",
+      requireRegistryTarget: true,
+      assertionContext
+    });
+    assert.deepEqual({ ok: update.ok, errorCode: update.errorCode }, { ok: true, errorCode: "" });
+    const shutdown = await client.requestServerShutdown("rolling replacement", {
+      targetInstanceId: "game-server-a",
+      requireRegistryTarget: true,
+      assertionContext: { ...assertionContext, requestId: "request-control-2" }
+    });
+    assert.deepEqual({
+      ok: shutdown.ok,
+      error_code: shutdown.error_code,
+      shutdown_armed: shutdown.shutdown_armed,
+      connection_count: shutdown.connection_count,
+      drain_mode_enabled: shutdown.drain_mode_enabled
+    }, {
+      ok: false,
+      error_code: "SHUTDOWN_CONNECTIONS_REMAIN",
+      shutdown_armed: true,
+      connection_count: 2,
+      drain_mode_enabled: true
+    });
+    assert.deepEqual(decodeTestStringFields(requests[0].body), { 1: "drain_mode", 2: "on" });
+    assert.deepEqual(decodeTestStringFields(requests[1].body), { 1: "rolling replacement" });
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test("GameAdminClient registry-only writes reject direct endpoint overrides", async () => {
+  const client = new GameAdminClient({
+    registryDiscoveryEnabled: true,
+    registryDiscoveryRequired: true
+  });
+  const options = {
+    endpoint: { host: "127.0.0.1", port: 7500, instanceId: "bypass" },
+    targetInstanceId: "game-server-a",
+    requireRegistryTarget: true
+  };
+
+  await assert.rejects(
+    client.updateConfig("drain_mode", "on", options),
+    { code: "GAME_SERVER_ADMIN_DIRECT_ENDPOINT_FORBIDDEN" }
+  );
+  await assert.rejects(
+    client.requestServerShutdown("rolling replacement", options),
+    { code: "GAME_SERVER_ADMIN_DIRECT_ENDPOINT_FORBIDDEN" }
+  );
+});
 
 test("GameAdminClient lists discovered game-server admin endpoints", async () => {
   const client = new GameAdminClient(

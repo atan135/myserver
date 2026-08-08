@@ -1183,7 +1183,6 @@ pub async fn run(
 
     loop {
         let mut drain_state_changed = false;
-        let draining = *drain_state_rx.borrow();
         let accept_result = tokio::select! {
             biased;
             changed = drain_state_rx.changed() => {
@@ -1194,7 +1193,7 @@ pub async fn run(
                 }
                 None
             },
-            result = tcp_listener.accept(), if !draining => Some(result),
+            result = tcp_listener.accept() => Some(result),
             _ = shared_state.shutdown_signal.notified() => None,
             _ = shutdown_signal() => None,
             fatal = fatal_task_rx.recv() => {
@@ -1216,7 +1215,7 @@ pub async fn run(
                     "server-listeners",
                     StartupErrorCode::DependencyPending,
                 );
-                info!("drain mode active; player listeners stopped accepting new connections");
+                info!("drain mode active; player listeners remain available for existing-session reconnects");
             } else {
                 health_state.mark_ready("local-runtime", "server-listeners");
                 info!("drain mode disabled; player listeners resumed accepting connections");
@@ -1292,14 +1291,13 @@ async fn run_local_socket_listener(
 ) -> Result<(), std::io::Error> {
     let mut next_session_id = 1_000_000u64;
     loop {
-        let draining = *drain_state_rx.borrow_and_update();
         let socket = tokio::select! {
             biased;
             changed = drain_state_rx.changed() => {
                 changed.map_err(|_| std::io::Error::other("drain state channel closed"))?;
                 continue;
             }
-            socket = listener.accept(), if !draining => socket?,
+            socket = listener.accept() => socket?,
         };
         let session_id = next_session_id;
         next_session_id = next_session_id.saturating_add(1);

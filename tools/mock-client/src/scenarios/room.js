@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+
 import {
   MESSAGE_TYPE
 } from "../constants.js";
@@ -106,6 +108,20 @@ export async function authenticateClient(
   }
 }
 
+async function authenticateClientExpectError(client, options, login, expectedErrorCode, seq = 1) {
+  const { encodeAuthReq } = await import("../messages.js");
+  await refreshTicketIfNeeded(options, login);
+  await client.send(MESSAGE_TYPE.AUTH_REQ, seq, encodeAuthReq(login.ticket));
+  const packet = await client.readNextPacket(options.timeoutMs);
+  const auth = printResponse(`${client.label}.authRejected`, packet);
+  if (packet.messageType !== MESSAGE_TYPE.AUTH_RES) {
+    throw new Error(`${client.label} auth expected messageType ${MESSAGE_TYPE.AUTH_RES}, got ${packet.messageType}`);
+  }
+  if (auth.ok || auth.errorCode !== expectedErrorCode) {
+    throw new Error(`${client.label} expected auth error ${expectedErrorCode}, got ${auth.errorCode || "success"}`);
+  }
+}
+
 /**
  * Wait for frame bundle matching expected action
  */
@@ -149,22 +165,13 @@ async function waitForRoomStatePush(client, timeoutMs, expectedEvent, label = "r
 }
 
 async function updateGameServerConfig(options, key, value) {
-  const headers = { "content-type": "application/json" };
-  if (options.serviceToken) {
-    headers["x-service-token"] = options.serviceToken;
+  if (key !== "drain_mode") {
+    throw new Error(`unsupported game-server control-plane config key: ${key}`);
   }
-
-  const response = await fetch(`${options.httpBaseUrl}/api/v1/internal/game-server/config`, {
-    method: "POST",
-    headers,
-    body: JSON.stringify({ key, value })
+  const payload = await runGameServerControlOperation(options, "drain", {
+    enabled: value === "on",
+    reason: options.shutdownReason || "mock-client drain verification"
   });
-
-  if (!response.ok) {
-    throw new Error(`update game-server config failed with status ${response.status}`);
-  }
-
-  const payload = await response.json();
   if (!payload.ok) {
     throw new Error(`update game-server config failed: ${payload.errorCode || JSON.stringify(payload)}`);
   }
@@ -211,23 +218,45 @@ export async function fetchRolloutDrainStatus(options) {
 }
 
 export async function requestServerShutdown(options) {
-  const headers = { "content-type": "application/json" };
-  if (options.serviceToken) {
-    headers["x-service-token"] = options.serviceToken;
-  }
-
-  const response = await fetch(`${options.httpBaseUrl}/api/v1/internal/game-server/shutdown-if-drained`, {
-    method: "POST",
-    headers,
-    body: JSON.stringify({ reason: options.shutdownReason || "mock-client" })
+  return runGameServerControlOperation(options, "shutdown", {
+    reason: options.shutdownReason || "mock-client"
   });
-  const payload = await response.json();
+}
 
-  if (!response.ok) {
-    throw new Error(`request server shutdown failed with status ${response.status}: ${JSON.stringify(payload)}`);
+async function postGameServerControl(options, action, body) {
+  const baseUrl = String(options.adminBaseUrl || "").replace(/\/+$/, "");
+  const instanceId = String(options.gameServerInstanceId || "").trim();
+  const token = String(options.adminToken || "").trim();
+  if (!baseUrl || !instanceId || !token) {
+    throw new Error("adminBaseUrl, adminToken and gameServerInstanceId are required for game-server writes");
   }
-
+  const response = await fetch(
+    `${baseUrl}/api/v1/rollouts/game-server/${encodeURIComponent(instanceId)}/${action}`,
+    {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      body: JSON.stringify(body)
+    }
+  );
+  const payload = await response.json().catch(() => ({ ok: false, error: "INVALID_CONTROL_PLANE_RESPONSE" }));
+  if (!response.ok) {
+    throw new Error(`${action} game-server control request failed with status ${response.status}: ${JSON.stringify(payload)}`);
+  }
   return payload;
+}
+
+async function runGameServerControlOperation(options, action, input) {
+  const requestId = `mock-client-${action}-${randomUUID()}`;
+  const body = { ...input, requestId };
+  const preflight = await postGameServerControl(options, action, body);
+  if (!preflight?.preflight?.nonce || !preflight?.preflight?.summarySha256) {
+    throw new Error(`${action} game-server control preflight response is invalid`);
+  }
+  return postGameServerControl(options, action, {
+    ...body,
+    preflightNonce: preflight.preflight.nonce,
+    preflightSummarySha256: preflight.preflight.summarySha256
+  });
 }
 
 function isWindows() {
@@ -1286,10 +1315,11 @@ export async function runDrainNewRoomRejected(options) {
   await client.connect();
 
   try {
+    await authenticateClient(client, options, login, 1);
+
     await setDrainMode(options, true);
     drainEnabled = true;
 
-    await authenticateClient(client, options, login, 1);
     await client.send(MESSAGE_TYPE.ROOM_JOIN_REQ, 2, encodeRoomJoinReq(options.roomId));
 
     const packet = await client.readNextPacket(options.timeoutMs);
@@ -1328,6 +1358,7 @@ export async function runDrainExistingRoomJoin(options) {
 
   try {
     await authenticateClient(clientA, options, loginA, 1);
+    await authenticateClient(clientB, options, loginB, 1);
     const joinedA = await joinRoomExpectSuccess(clientA, options, options.roomId, 2);
     if (joinedA.push.snapshot?.ownerCharacterId !== loginA.characterId) {
       throw new Error(`expected ${loginA.characterId} to be room owner before drain`);
@@ -1336,7 +1367,6 @@ export async function runDrainExistingRoomJoin(options) {
     await setDrainMode(options, true);
     drainEnabled = true;
 
-    await authenticateClient(clientB, options, loginB, 1);
     await clientB.send(MESSAGE_TYPE.ROOM_JOIN_REQ, 2, encodeRoomJoinReq(options.roomId));
 
     const joinPacketB = await clientB.readNextPacket(options.timeoutMs);
@@ -1373,9 +1403,11 @@ export async function runDrainExistingRoomJoin(options) {
 export async function runDrainExistingRoomReconnect(options) {
   const loginA = await fetchTicket(options, { guestId: `${options.roomId}-drain-reconnect-a` });
   const loginB = await fetchTicket(options, { guestId: `${options.roomId}-drain-reconnect-b` });
+  const loginC = await fetchTicket(options, { guestId: `${options.roomId}-third` });
   const clientA = new TcpProtocolClient(options, "clientA");
   const clientB = new TcpProtocolClient(options, "clientB");
   let clientA2 = null;
+  let clientC = null;
   let drainEnabled = false;
 
   await clientA.connect();
@@ -1446,6 +1478,17 @@ export async function runDrainExistingRoomReconnect(options) {
     await setDrainMode(options, true);
     drainEnabled = true;
 
+    clientC = new TcpProtocolClient(options, "clientC");
+    await clientC.connect();
+    await authenticateClientExpectError(
+      clientC,
+      options,
+      loginC,
+      "SERVER_DRAINING_REJECT_NEW_SESSION",
+      3
+    );
+    clientC.close();
+
     clientA2 = new TcpProtocolClient(options, "clientA2");
     await clientA2.connect();
     await authenticateClient(clientA2, options, loginA, 3);
@@ -1498,6 +1541,7 @@ export async function runDrainExistingRoomReconnect(options) {
     clientA.close();
     clientB.close();
     clientA2?.close();
+    clientC?.close();
     if (drainEnabled) {
       await setDrainMode(options, false);
     }
@@ -1519,12 +1563,12 @@ export async function runDrainExistingRoomObserver(options) {
 
   try {
     await authenticateClient(host, options, loginHost, 1);
+    await authenticateClient(observer, options, loginObserver, 1);
     await joinRoomExpectSuccess(host, options, options.roomId, 2);
 
     await setDrainMode(options, true);
     drainEnabled = true;
 
-    await authenticateClient(observer, options, loginObserver, 1);
     await observer.send(MESSAGE_TYPE.ROOM_JOIN_AS_OBSERVER_REQ, 2, encodeRoomJoinAsObserverReq(options.roomId));
 
     const observerPacket = await observer.readNextPacket(options.timeoutMs);
@@ -1564,10 +1608,11 @@ export async function runDrainCreateMatchedRoomRejected(options) {
   await client.connect();
 
   try {
+    await authenticateClient(client, options, login, 1);
+
     await setDrainMode(options, true);
     drainEnabled = true;
 
-    await authenticateClient(client, options, login, 1);
     await client.send(
       MESSAGE_TYPE.CREATE_MATCHED_ROOM_REQ,
       2,

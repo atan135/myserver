@@ -14,6 +14,8 @@ const MESSAGE_TYPE = {
   ADMIN_SERVER_STATUS_RES: 2002,
   ADMIN_UPDATE_CONFIG_REQ: 2003,
   ADMIN_UPDATE_CONFIG_RES: 2004,
+  REQUEST_SERVER_SHUTDOWN_REQ: 1617,
+  REQUEST_SERVER_SHUTDOWN_RES: 1618,
   ADMIN_OPERATION_ASSERTION_REQ: 2098,
   ADMIN_AUTH_REQ: 2099,
   // GM Commands
@@ -78,6 +80,115 @@ function decodeError(body) {
   }
 
   return { errorCode, message };
+}
+
+function encodeVarint(value) {
+  let remaining = BigInt(value);
+  const bytes = [];
+  do {
+    let byte = Number(remaining & 0x7fn);
+    remaining >>= 7n;
+    if (remaining !== 0n) byte |= 0x80;
+    bytes.push(byte);
+  } while (remaining !== 0n);
+  return Buffer.from(bytes);
+}
+
+function encodeStringField(fieldNumber, value) {
+  const bytes = Buffer.from(String(value), "utf8");
+  return Buffer.concat([encodeVarint((fieldNumber << 3) | 2), encodeVarint(bytes.length), bytes]);
+}
+
+function encodeUpdateConfigReq(key, value) {
+  return Buffer.concat([encodeStringField(1, key), encodeStringField(2, value)]);
+}
+
+function encodeRequestServerShutdownReq(reason) {
+  return encodeStringField(1, reason);
+}
+
+function decodeVarint(bytes, startOffset) {
+  let value = 0n;
+  let shift = 0n;
+  let offset = startOffset;
+  while (offset < bytes.length) {
+    const byte = BigInt(bytes[offset++]);
+    value |= (byte & 0x7fn) << shift;
+    if ((byte & 0x80n) === 0n) return { value, offset };
+    shift += 7n;
+    if (shift > 63n) throw createAdminError("INVALID_PROTOBUF", "protobuf varint is too large");
+  }
+  throw createAdminError("INVALID_PROTOBUF", "protobuf varint is truncated");
+}
+
+function decodeSimpleProtobuf(body) {
+  const bytes = body instanceof Uint8Array ? body : new Uint8Array(body);
+  const fields = new Map();
+  let offset = 0;
+  while (offset < bytes.length) {
+    const tag = decodeVarint(bytes, offset);
+    offset = tag.offset;
+    const fieldNumber = Number(tag.value >> 3n);
+    const wireType = Number(tag.value & 7n);
+    if (wireType === 0) {
+      const decoded = decodeVarint(bytes, offset);
+      fields.set(fieldNumber, decoded.value);
+      offset = decoded.offset;
+      continue;
+    }
+    if (wireType === 2) {
+      const length = decodeVarint(bytes, offset);
+      offset = length.offset;
+      const end = offset + Number(length.value);
+      if (end > bytes.length) throw createAdminError("INVALID_PROTOBUF", "protobuf field is truncated");
+      fields.set(fieldNumber, Buffer.from(bytes.subarray(offset, end)));
+      offset = end;
+      continue;
+    }
+    if (wireType === 1 || wireType === 5) {
+      const byteLength = wireType === 1 ? 8 : 4;
+      const end = offset + byteLength;
+      if (end > bytes.length) throw createAdminError("INVALID_PROTOBUF", "protobuf fixed-width field is truncated");
+      offset = end;
+      continue;
+    }
+    throw createAdminError("INVALID_PROTOBUF", `unsupported protobuf wire type: ${wireType}`);
+  }
+  return fields;
+}
+
+function protobufBool(fields, number) {
+  const value = fields.get(number);
+  return typeof value === "bigint" && value !== 0n;
+}
+
+function protobufString(fields, number) {
+  const value = fields.get(number);
+  return Buffer.isBuffer(value) ? value.toString("utf8") : "";
+}
+
+function protobufCount(fields, number) {
+  const value = fields.get(number);
+  return typeof value === "bigint" ? Number(value) : 0;
+}
+
+function decodeUpdateConfigRes(body) {
+  const fields = decodeSimpleProtobuf(body);
+  return { ok: protobufBool(fields, 1), errorCode: protobufString(fields, 2) };
+}
+
+function decodeRequestServerShutdownRes(body) {
+  const fields = decodeSimpleProtobuf(body);
+  return {
+    ok: protobufBool(fields, 1),
+    error_code: protobufString(fields, 2),
+    connection_count: protobufCount(fields, 3),
+    owned_room_count: protobufCount(fields, 4),
+    migrating_room_count: protobufCount(fields, 5),
+    drain_mode_enabled: protobufBool(fields, 6),
+    retired_room_count: protobufCount(fields, 7),
+    shutdown_armed: protobufBool(fields, 8)
+  };
 }
 
 function nextSeq() {
@@ -405,6 +516,12 @@ export class GameAdminClient {
   }
 
   async resolveAdminEndpoint(options = {}) {
+    if (options.requireRegistryTarget && options.endpoint) {
+      throw createAdminError(
+        "GAME_SERVER_ADMIN_DIRECT_ENDPOINT_FORBIDDEN",
+        "direct game-server admin endpoint is forbidden when a registry target is required"
+      );
+    }
     if (options.endpoint) {
       return options.endpoint;
     }
@@ -425,6 +542,12 @@ export class GameAdminClient {
         throw createAdminError(
           "GAME_SERVER_ADMIN_TARGET_NOT_FOUND",
           `game-server admin target instance not found: ${targetInstanceId}`
+        );
+      }
+      if (options.requireRegistryTarget && (selected.fallback || selected.source !== "registry" || selected.healthy === false)) {
+        throw createAdminError(
+          "GAME_SERVER_ADMIN_TARGET_NOT_FOUND",
+          `healthy registry game-server admin target not found: ${targetInstanceId}`
         );
       }
       return selected;
@@ -470,8 +593,7 @@ export class GameAdminClient {
   }
 
   async updateConfig(key, value, options = {}) {
-    // Simple string-based for now, real impl would use protobuf
-    const payload = Buffer.from(JSON.stringify({ key, value }));
+    const payload = encodeUpdateConfigReq(key, value);
     const endpoint = await this.resolveAdminEndpoint({ ...options, requireExplicitTarget: true });
     try {
       const requestOptions = await this.writeRequestOptions(
@@ -480,18 +602,47 @@ export class GameAdminClient {
         payload,
         options
       );
-      await sendRequest(
+      const body = await sendRequest(
         this.config,
         MESSAGE_TYPE.ADMIN_UPDATE_CONFIG_REQ,
         payload,
         MESSAGE_TYPE.ADMIN_UPDATE_CONFIG_RES,
         requestOptions
       );
+      const result = decodeUpdateConfigRes(body);
+      const endpointSummary = describeAdminEndpoint(endpoint);
+      return { ...result, instanceId: endpointSummary?.instanceId || "", endpoint: endpointSummary };
     } catch (error) {
       throw attachEndpointToError(error, endpoint);
     }
-    const endpointSummary = describeAdminEndpoint(endpoint);
-    return { ok: true, instanceId: endpointSummary?.instanceId || "", endpoint: endpointSummary };
+  }
+
+  async requestServerShutdown(reason, options = {}) {
+    const payload = encodeRequestServerShutdownReq(reason);
+    const endpoint = await this.resolveAdminEndpoint({ ...options, requireExplicitTarget: true });
+    try {
+      const requestOptions = await this.writeRequestOptions(
+        endpoint,
+        MESSAGE_TYPE.REQUEST_SERVER_SHUTDOWN_REQ,
+        payload,
+        options
+      );
+      const body = await sendRequest(
+        this.config,
+        MESSAGE_TYPE.REQUEST_SERVER_SHUTDOWN_REQ,
+        payload,
+        MESSAGE_TYPE.REQUEST_SERVER_SHUTDOWN_RES,
+        requestOptions
+      );
+      const endpointSummary = describeAdminEndpoint(endpoint);
+      return {
+        ...decodeRequestServerShutdownRes(body),
+        instance_id: endpointSummary?.instanceId || "",
+        endpoint: endpointSummary
+      };
+    } catch (error) {
+      throw attachEndpointToError(error, endpoint);
+    }
   }
 
   async broadcast(title, content, sender = "System", options = {}) {

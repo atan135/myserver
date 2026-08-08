@@ -197,15 +197,19 @@ test("phase 5 derives per-instance sockets and proxy consumes only healthy publi
   assert.doesNotMatch(compose, /rm -f \/run\/myserver\/myserver-game-server/);
 });
 
-test("drain disables new player accepts and drives unhealthy publication without aborting sessions", () => {
+test("drain keeps reconnect transport while rejecting new sessions and driving unhealthy publication", () => {
   const server = source("apps/game-server/src/server.rs");
+  const coreService = source("apps/game-server/src/core/service/core_service.rs");
   const runtime = source("apps/game-server/src/admin_server/runtime_config.rs");
   const shutdown = source("apps/game-server/src/admin_server/rollout_status.rs");
+  const proxy = source("apps/game-proxy/src/proxy_server.rs");
 
   assert.match(runtime, /drain_state_tx\.send_replace\(parsed\)/);
-  assert.match(server, /tcp_listener\.accept\(\), if !draining/);
-  assert.match(server, /socket = listener\.accept\(\), if !draining/);
+  assert.match(server, /result = tcp_listener\.accept\(\) => Some\(result\)/);
+  assert.match(server, /socket = listener\.accept\(\) => socket\?/);
+  assert.match(coreService, /drain_mode_enabled[\s\S]+find_room_by_offline_character[\s\S]+SERVER_DRAINING_REJECT_NEW_SESSION/);
   assert.match(server, /mark_degraded\([\s\S]+"server-listeners"[\s\S]+StartupErrorCode::DependencyPending/);
+  assert.match(proxy, /endpoint\.name == "proxy-local" && endpoint\.healthy && endpoint\.is_valid\(\)/);
   assert.match(server, /run_drain_shutdown_monitor/);
   assert.match(server, /arm_rx\.recv\(\)\.await/);
   assert.match(server, /DrainShutdownDecision::TimedOut[\s\S]+active sessions and rooms remain protected/);

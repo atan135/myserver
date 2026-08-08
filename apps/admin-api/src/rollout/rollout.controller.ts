@@ -1,11 +1,11 @@
-import { Body, Controller, HttpCode, HttpStatus, Inject, Post, Req, UseGuards } from "@nestjs/common";
+import { Body, Controller, HttpCode, HttpStatus, Inject, Param, Post, Req, UseGuards } from "@nestjs/common";
 import { ApiBearerAuth, ApiTags } from "@nestjs/swagger";
 
 import { JwtAuthGuard } from "../auth/jwt-auth.guard.js";
 import { AdminPolicyGuard } from "../auth/admin-policy.guard.js";
 import { Permissions } from "../auth/roles.decorator.js";
 import { ApiHttpException } from "../common/http-exception.js";
-import { ADMIN_HIGH_RISK_OPERATIONS } from "../tokens.js";
+import { ADMIN_GAME_ADMIN_CLIENT, ADMIN_HIGH_RISK_OPERATIONS } from "../tokens.js";
 import { RoomTransferService } from "./room-transfer.service.js";
 
 function rolloutError(error: any) {
@@ -13,12 +13,56 @@ function rolloutError(error: any) {
   const code = typeof error?.code === "string" ? error.code : "ROLLOUT_OPERATION_FAILED";
   const status = code === "ADMIN_OPERATION_PERMISSION_DENIED" || code === "ADMIN_OPERATION_SCOPE_DENIED"
     ? 403
-    : code === "ROLLOUT_TARGET_NOT_FOUND"
+    : code === "ROLLOUT_TARGET_NOT_FOUND" || code === "GAME_SERVER_ADMIN_TARGET_NOT_FOUND"
       ? 404
-      : code === "SERVICE_DISCOVERY_REQUIRED"
+      : code === "SERVICE_DISCOVERY_REQUIRED" || code === "SERVICE_DISCOVERY_UNAVAILABLE" ||
+          code === "GAME_SERVER_ADMIN_ENDPOINT_NOT_FOUND"
         ? 503
+        : code.startsWith("GAME_ADMIN_")
+          ? 502
         : 400;
   return new ApiHttpException(status, { ok: false, error: code, message: error?.message || code });
+}
+
+const INSTANCE_ID = /^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$/;
+
+function requireInstanceId(value: unknown) {
+  const normalized = typeof value === "string" ? value.trim() : "";
+  if (!INSTANCE_ID.test(normalized)) {
+    const error: any = new Error("game-server instanceId is invalid");
+    error.code = "ROLLOUT_INPUT_INVALID";
+    throw error;
+  }
+  return normalized;
+}
+
+function requestId(body: any) {
+  const value = body?.requestId ?? body?.request_id;
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function gameServerAssertionContext(
+  req: any,
+  body: any,
+  instanceId: string,
+  targetType: "config" | "service",
+  targetIds: string[]
+) {
+  const id = requestId(body);
+  return {
+    actorId: req.admin?.sub,
+    permission: "game.config.write",
+    scope: {
+      serviceName: "game-server",
+      instanceId,
+      targetType,
+      targetIds,
+      targetCount: targetIds.length
+    },
+    target: { targetType, targetIds },
+    requestId: id,
+    traceId: `trace-${id}`
+  };
 }
 
 @ApiTags("rollouts")
@@ -28,8 +72,104 @@ function rolloutError(error: any) {
 export class RolloutController {
   constructor(
     private readonly roomTransfer: RoomTransferService,
-    @Inject(ADMIN_HIGH_RISK_OPERATIONS) private readonly highRiskOperations: any
+    @Inject(ADMIN_HIGH_RISK_OPERATIONS) private readonly highRiskOperations: any,
+    @Inject(ADMIN_GAME_ADMIN_CLIENT) private readonly gameAdminClient: any
   ) {}
+
+  @Post("game-server/:instanceId/drain")
+  @Permissions("game.config.write")
+  @HttpCode(HttpStatus.OK)
+  async setGameServerDrain(
+    @Param("instanceId") rawInstanceId: string,
+    @Body() body: any,
+    @Req() req: any
+  ) {
+    try {
+      const instanceId = requireInstanceId(rawInstanceId);
+      if (typeof body?.enabled !== "boolean") {
+        const error: any = new Error("enabled must be a boolean");
+        error.code = "ROLLOUT_INPUT_INVALID";
+        throw error;
+      }
+      const enabled = body.enabled;
+      const outcome = await this.highRiskOperations.run({
+        request: req,
+        permission: "game.config.write",
+        scope: {
+          serviceName: "game-server",
+          instanceId,
+          targetType: "config",
+          targetIds: ["drain_mode"],
+          targetCount: 1
+        },
+        targetSummary: { targetType: "config", targetIds: ["drain_mode"], instanceId },
+        payload: { action: "game_server_drain", enabled, instanceId },
+        impactSummary: { action: "game_server_drain", enabled, instanceId, targetCount: 1 },
+        reason: body?.reason,
+        execute: () => this.gameAdminClient.updateConfig("drain_mode", enabled ? "on" : "off", {
+          targetInstanceId: instanceId,
+          requireRegistryTarget: true,
+          assertionContext: gameServerAssertionContext(req, body, instanceId, "config", ["drain_mode"])
+        }),
+        resultSummary: (result: any) => ({
+          action: "game_server_drain",
+          instanceId,
+          enabled,
+          ok: result?.ok === true,
+          errorCode: result?.errorCode || ""
+        })
+      });
+      return outcome.state === "executed" ? outcome.result : outcome.response;
+    } catch (error: any) {
+      throw rolloutError(error);
+    }
+  }
+
+  @Post("game-server/:instanceId/shutdown")
+  @Permissions("game.config.write")
+  @HttpCode(HttpStatus.OK)
+  async shutdownGameServer(
+    @Param("instanceId") rawInstanceId: string,
+    @Body() body: any,
+    @Req() req: any
+  ) {
+    try {
+      const instanceId = requireInstanceId(rawInstanceId);
+      const outcome = await this.highRiskOperations.run({
+        request: req,
+        permission: "game.config.write",
+        scope: {
+          serviceName: "game-server",
+          instanceId,
+          targetType: "service",
+          targetIds: [instanceId],
+          targetCount: 1
+        },
+        targetSummary: { targetType: "service", targetIds: [instanceId], instanceId },
+        payload: { action: "game_server_shutdown", instanceId },
+        impactSummary: { action: "game_server_shutdown", instanceId, targetCount: 1 },
+        reason: body?.reason,
+        execute: () => this.gameAdminClient.requestServerShutdown(body?.reason, {
+          targetInstanceId: instanceId,
+          requireRegistryTarget: true,
+          assertionContext: gameServerAssertionContext(req, body, instanceId, "service", [instanceId])
+        }),
+        resultSummary: (result: any) => ({
+          action: "game_server_shutdown",
+          instanceId,
+          ok: result?.ok === true,
+          errorCode: result?.error_code || "",
+          shutdownArmed: result?.shutdown_armed === true,
+          connectionCount: result?.connection_count || 0,
+          ownedRoomCount: result?.owned_room_count || 0,
+          migratingRoomCount: result?.migrating_room_count || 0
+        })
+      });
+      return outcome.state === "executed" ? outcome.result : outcome.response;
+    } catch (error: any) {
+      throw rolloutError(error);
+    }
+  }
 
   @Post("room-transfer")
   @Permissions("game.room.transfer")

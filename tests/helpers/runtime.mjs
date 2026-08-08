@@ -1078,6 +1078,9 @@ export async function runMockClientScenario({
   ticketB,
   ticketC,
   characterId,
+  adminBaseUrl,
+  adminToken,
+  gameServerInstanceId,
   timeoutMs = 5000,
   maxBodyLen = 4096,
   gameHost,
@@ -1099,6 +1102,10 @@ export async function runMockClientScenario({
     "--max-body-len",
     String(maxBodyLen)
   ];
+
+  if (adminBaseUrl) args.push("--admin-base-url", adminBaseUrl);
+  if (adminToken) args.push("--admin-token", adminToken);
+  if (gameServerInstanceId) args.push("--game-server-instance-id", gameServerInstanceId);
 
   if (gameHost) {
     args.push("--game-host", gameHost);
@@ -1295,5 +1302,4 @@ export async function startGameProxy({
     }
   };
 }
-
 

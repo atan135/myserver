@@ -133,6 +133,46 @@ pub async fn handle_auth(
                 return Ok(());
             }
 
+            let drain_mode_enabled = services.runtime_config.read().await.drain_mode_enabled;
+            if drain_mode_enabled
+                && services
+                    .room_manager
+                    .find_room_by_offline_character(&character_id)
+                    .await
+                    .is_none()
+            {
+                let error_code = "SERVER_DRAINING_REJECT_NEW_SESSION";
+                tracing::info!(
+                    account_player_id = %account_player_id,
+                    character_id = %character_id,
+                    session_id = connection.session.id,
+                    error_code,
+                    "game auth rejected while drain mode only permits existing-room reconnects"
+                );
+                connection.queue_message(
+                    MessageType::AuthRes,
+                    packet.header.seq,
+                    auth_response(false, String::new(), error_code.to_string()),
+                )?;
+                services
+                    .db_store
+                    .append_connection_event_with_identity(
+                        connection.session.id,
+                        Some(&account_player_id),
+                        Some(&account_player_id),
+                        Some(&character_id),
+                        Some(&connection.peer_addr),
+                        "auth_drain_rejected",
+                        Some(serde_json::json!({
+                            "seq": packet.header.seq,
+                            "errorCode": error_code,
+                            "worldId": world_id
+                        })),
+                    )
+                    .await;
+                return Ok(());
+            }
+
             let previous_account_player_id = connection.session.account_player_id.clone();
             let previous_character_id = connection.session.character_id.clone();
             let previous_authority = connection.session.online_authority.clone();

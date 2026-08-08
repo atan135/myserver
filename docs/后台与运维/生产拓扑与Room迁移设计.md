@@ -187,13 +187,15 @@ Node 服务当前可能出现注册失败只打日志的情况，因此 readines
 
 滚动发布、缩容或实例替换时，旧实例的正常退出必须走显式下线流程，不能只依赖进程退出或 registry TTL 过期。下线流程至少包含以下阶段：
 
-1. 移出接新流量：对旧 `game-server` 开启 drain 后，玩家 TCP 和 `proxy-local` 立即停止 accept，registry publication 转为 unhealthy，proxy 后续发现不再把旧 socket 作为健康默认 route；已有连接任务、房间以及 admin/internal 控制通道继续运行。其他服务同样应先从 LB、DNS、gateway upstream、admin/control target 或 rollout target 移除，禁止新连接、新房间、新匹配分配或新的控制面写操作继续选中旧实例。
+1. 移出接新流量：对旧 `game-server` 开启 drain 后，registry publication 转为 unhealthy，proxy 后续发现不再把旧 socket 作为健康默认 route；玩家 TCP 和 `proxy-local` listener 仅为已有 room 的离线成员保留鉴权和 reconnect transport，`AuthReq` 拒绝不属于本实例离线 room 的新角色并返回 `SERVER_DRAINING_REJECT_NEW_SESSION`，业务层同时拒绝创建新 room、匹配建房等新分配。已有连接任务、房间以及 admin/internal 控制通道继续运行。其他服务同样应先从 LB、DNS、gateway upstream、admin/control target 或 rollout target 移除，禁止新房间、新匹配分配或新的普通流量继续选中旧实例。
 2. 等待业务收敛：等待旧实例现有连接、房间、匹配分配、邮件附件发放、异步通知和控制面操作达到安全收敛。`game-server` 必须先进入 drain，再由已鉴权 `RequestServerShutdownReq` 显式武装退出；控制面可在 blocker 清零前发出请求进入有界等待，不需要用轮询竞态抢占“刚好归零”的瞬间。
 3. 安全停服并统一清理：`RequestServerShutdownRes` 使用三态：`ok=true, shutdown_armed=true` 表示无 blocker 并立即 graceful shutdown；`ok=false, shutdown_armed=true` 表示连接或 room blocker 仍在但已接受默认 `300s` 有界等待；`ok=false, shutdown_armed=false` 表示拒绝或未能武装。等待超时不会强杀现有会话或 room，而会解除武装，控制面可在状态继续收敛后重试；重复请求不会重置当前期限。退出后统一 cleanup 释放本实例 listener/socket、deregister、compare-and-delete 本实例 lease 并关闭 stores。异常退出时 heartbeat TTL 可以作为最终摘除兜底，但 TTL 不能作为正常滚动发布下线的主路径。
 4. 清理或降级 route store：移除或标记旧实例对应的 upstream、room route、player route 和 rollout target，确保新请求不会继续被导向旧实例。若 route store 清理失败，必须降级为旧实例不可接新流量、不可选，并保留故障状态供重试或人工处理，不能因为清理失败而重新放开旧实例。
 5. 完成验证：确认旧实例在 registry 中不可发现，route store 不再把新连接、新建房、重连、匹配或控制面请求导向旧实例，并保留 drain、deregister、route store 更新或降级结果的日志和审计记录。
 
-本节只定义滚动发布和扩缩容时的旧实例退出状态机，不展开部署平台 stop hook 如何定位目标实例，也不实现具体脚本或控制面接口。
+`game-server` 的正式写入口由 admin-api 提供：`POST /api/v1/rollouts/game-server/:instanceId/drain` 和 `POST /api/v1/rollouts/game-server/:instanceId/shutdown`。两者都要求 Bearer/JWT、`game.config.write`、high-risk preflight/execute 二阶段确认、签名断言和审计；`:instanceId` 必须显式给出，admin-api 只从 Redis registry 的健康 `game-server.admin` endpoint 精确解析目标，不接受固定内部地址或 direct endpoint override。`auth-http` 对应历史写接口继续返回 `410 CONTROL_PLANE_ONLY`，只读状态接口不受影响。审计记录身份、目标、原因和结果，不记录 token、断言签名或内部 endpoint 凭据。
+
+本节定义滚动发布和扩缩容时的旧实例退出状态机及当前 admin-api 控制入口；部署平台 stop hook 的调用编排仍由发布流程实现。
 
 ### 5.6 stop hook 目标实例发现
 

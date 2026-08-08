@@ -1,7 +1,14 @@
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
+import http from "node:http";
+import { register } from "node:module";
+import path from "node:path";
 import { after, before, test } from "node:test";
+import { pathToFileURL } from "node:url";
 import Redis from "ioredis";
+
+import { createServiceInstancePayload } from "../../packages/service-registry/node/registry-schema.js";
+import { GameAdminClient } from "../../apps/admin-api/src/game-admin-client.js";
 
 import {
   cleanupRedisPrefix,
@@ -17,11 +24,168 @@ const redisUrl = process.env.TEST_REDIS_URL || "redis://127.0.0.1:6379";
 const ticketSecret = "test-only-ticket-secret";
 const redisKeyPrefix = `test:integration:${randomId("redis")}:`;
 const proxyAdminToken = "dev-only-change-this-proxy-admin-token";
+const gameServerInstanceId = "game-server-integration";
+const adminApiToken = "integration-admin-api-token";
+const gameAdminToken = "dev-only-change-this-game-admin-token";
+
+process.env.TS_NODE_PROJECT = path.resolve("apps/admin-api/tsconfig.json");
+process.env.TS_NODE_TRANSPILE_ONLY = "true";
+register("ts-node/esm", pathToFileURL("./"));
+const { AdminOperationAssertionService } = await import(
+  "../../apps/admin-api/src/auth/admin-operation-assertion.service.ts"
+);
 
 let authServer;
 let gameServer;
 let gameProxy;
+let adminControl;
 let ticketCounter = 1;
+
+function integrationGameServerRegistryInstance(adminPort) {
+  return createServiceInstancePayload({
+    id: gameServerInstanceId,
+    name: "game-server",
+    host: "127.0.0.1",
+    port: 0,
+    admin_port: adminPort,
+    healthy: true,
+    metadata: {
+      service_name: "game-server",
+      service_instance_id: gameServerInstanceId,
+      server_id: gameServerInstanceId,
+      zone: "integration",
+      build_version: "integration"
+    },
+    endpoints: [
+      {
+        name: "admin",
+        protocol: "tcp",
+        host: "127.0.0.1",
+        port: adminPort,
+        visibility: "admin",
+        healthy: true,
+        metadata: {}
+      }
+    ]
+  });
+}
+
+async function registerIntegrationGameServer(adminPort) {
+  const redis = new Redis(redisUrl, { lazyConnect: true, maxRetriesPerRequest: 1 });
+  await redis.connect();
+  const instance = integrationGameServerRegistryInstance(adminPort);
+  await redis.hset(
+    `${redisKeyPrefix}service:game-server:instances:${gameServerInstanceId}`,
+    "data",
+    JSON.stringify(instance)
+  );
+  await redis.set(`${redisKeyPrefix}heartbeat:game-server:${gameServerInstanceId}`, "1", "EX", 300);
+  await redis.zadd(
+    `${redisKeyPrefix}service:game-server:instance-index`,
+    Math.floor(Date.now() / 1000),
+    gameServerInstanceId
+  );
+  return redis;
+}
+
+async function startIntegrationAdminControl({ adminPort, privateKeyPem }) {
+  const redis = await registerIntegrationGameServer(adminPort);
+  const config = {
+    registryDiscoveryEnabled: true,
+    registryDiscoveryRequired: true,
+    localDiscoveryFallbackEnabled: false,
+    registryKeyPrefix: redisKeyPrefix,
+    gameAdminToken,
+    gameAdminConnectTimeoutMs: 1000,
+    gameAdminWriteTimeoutMs: 1000,
+    gameAdminReadTimeoutMs: 3000,
+    gameAdminMaxResponseBytes: 64 * 1024,
+    adminAssertionIssuer: "admin-api",
+    adminAssertionKeyId: "integration-v1",
+    adminAssertionPrivateKey: privateKeyPem,
+    adminAssertionTtlMs: 60_000
+  };
+  const policy = { async authorize() { return { allowed: true }; } };
+  const assertions = new AdminOperationAssertionService(config, policy);
+  const client = new GameAdminClient(config, redis, assertions);
+  const server = http.createServer(async (req, res) => {
+    res.setHeader("content-type", "application/json");
+    if (req.headers.authorization !== `Bearer ${adminApiToken}`) {
+      res.statusCode = 401;
+      res.end(JSON.stringify({ ok: false, error: "UNAUTHORIZED" }));
+      return;
+    }
+    const match = req.url?.match(/^\/api\/v1\/rollouts\/game-server\/([^/]+)\/(drain|shutdown)$/);
+    if (req.method !== "POST" || !match || decodeURIComponent(match[1]) !== gameServerInstanceId) {
+      res.statusCode = 404;
+      res.end(JSON.stringify({ ok: false, error: "GAME_SERVER_ADMIN_TARGET_NOT_FOUND" }));
+      return;
+    }
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const body = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
+    if (!body.preflightNonce || !body.preflightSummarySha256) {
+      res.end(JSON.stringify({
+        ok: true,
+        preflight: { nonce: `nonce-${body.requestId}`, summarySha256: `summary-${body.requestId}` }
+      }));
+      return;
+    }
+    await redis.set(`${redisKeyPrefix}heartbeat:game-server:${gameServerInstanceId}`, "1", "EX", 300);
+    await redis.zadd(
+      `${redisKeyPrefix}service:game-server:instance-index`,
+      Math.floor(Date.now() / 1000),
+      gameServerInstanceId
+    );
+    const targetType = match[2] === "drain" ? "config" : "service";
+    const targetIds = match[2] === "drain" ? ["drain_mode"] : [gameServerInstanceId];
+    const assertionContext = {
+      actorId: "integration-admin",
+      permission: "game.config.write",
+      scope: {
+        serviceName: "game-server",
+        instanceId: gameServerInstanceId,
+        targetType,
+        targetIds,
+        targetCount: 1
+      },
+      target: { targetType, targetIds },
+      requestId: body.requestId,
+      traceId: `trace-${body.requestId}`
+    };
+    try {
+      const result = match[2] === "drain"
+        ? await client.updateConfig("drain_mode", body.enabled ? "on" : "off", {
+            targetInstanceId: gameServerInstanceId,
+            requireRegistryTarget: true,
+            assertionContext
+          })
+        : await client.requestServerShutdown(body.reason || "integration", {
+            targetInstanceId: gameServerInstanceId,
+            requireRegistryTarget: true,
+            assertionContext
+          });
+      res.end(JSON.stringify(result));
+    } catch (error) {
+      res.statusCode = 502;
+      res.end(JSON.stringify({ ok: false, error: error.code || "GAME_ADMIN_ERROR" }));
+    }
+  });
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      server.off("error", reject);
+      resolve();
+    });
+  });
+  return {
+    baseUrl: `http://127.0.0.1:${server.address().port}`,
+    async close() {
+      await new Promise((resolve) => server.close(resolve));
+      await redis.quit();
+    }
+  };
+}
 
 function hashTicket(ticket) {
   return crypto.createHash("sha256").update(ticket).digest("hex");
@@ -73,6 +237,9 @@ async function runIntegrationMockClientScenario(options) {
     ticketA: ticketA.ticket,
     ticketB: ticketB.ticket,
     ticketC: ticketC.ticket,
+    adminBaseUrl: adminControl.baseUrl,
+    adminToken: adminApiToken,
+    gameServerInstanceId,
     ...options
   });
 }
@@ -87,6 +254,9 @@ before(async () => {
   const localSocketName = process.platform === "win32"
     ? randomId("game-server")
     : randomId("game-server") + ".sock";
+  const { privateKey, publicKey } = crypto.generateKeyPairSync("ed25519");
+  const privateKeyPem = privateKey.export({ format: "pem", type: "pkcs8" }).toString();
+  const publicKeyRaw = publicKey.export({ format: "der", type: "spki" }).subarray(-32).toString("base64url");
 
   gameServer = await startGameServer({
     host: "127.0.0.1",
@@ -95,7 +265,18 @@ before(async () => {
     localSocketName,
     ticketSecret,
     redisUrl,
-    redisKeyPrefix
+    redisKeyPrefix,
+    envOverrides: {
+      SERVICE_INSTANCE_ID: gameServerInstanceId,
+      GAME_ADMIN_TOKEN: gameAdminToken,
+      ADMIN_ASSERTION_ISSUER: "admin-api",
+      ADMIN_ASSERTION_PUBLIC_KEYS_JSON: JSON.stringify({ "integration-v1": publicKeyRaw })
+    }
+  });
+
+  adminControl = await startIntegrationAdminControl({
+    adminPort,
+    privateKeyPem
   });
 
   gameProxy = await startGameProxy({
@@ -118,6 +299,9 @@ before(async () => {
 });
 
 after(async () => {
+  if (adminControl) {
+    await adminControl.close();
+  }
   if (gameProxy) {
     await gameProxy.close();
   }
@@ -130,7 +314,7 @@ after(async () => {
   await cleanupRedisPrefix(redisUrl, redisKeyPrefix);
 });
 
-test("auth-http proxies protobuf admin calls to game-server", async () => {
+test("auth-http keeps game-server writes retired while admin control uses signed protobuf", async () => {
   const statusResponse = await fetch(`${authServer.baseUrl}/api/v1/internal/game-server/status`);
   assert.equal(statusResponse.status, 200);
   const statusPayload = await statusResponse.json();
@@ -144,17 +328,14 @@ test("auth-http proxies protobuf admin calls to game-server", async () => {
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ key: "max_body_len", value: "8192" })
   });
-  assert.equal(updateResponse.status, 200);
-  assert.deepEqual(await updateResponse.json(), {
-    ok: true,
-    errorCode: ""
-  });
+  assert.equal(updateResponse.status, 410);
+  assert.equal((await updateResponse.json()).error, "CONTROL_PLANE_ONLY");
 
-  const updatedStatusResponse = await fetch(`${authServer.baseUrl}/api/v1/internal/game-server/status`);
-  assert.equal(updatedStatusResponse.status, 200);
-  const updatedStatusPayload = await updatedStatusResponse.json();
-  assert.equal(updatedStatusPayload.ok, true);
-  assert.equal(updatedStatusPayload.maxBodyLen, 8192);
+  const drainResult = await runIntegrationMockClientScenario({
+    scenario: "drain-new-room-rejected",
+    roomId: randomId("room-admin-control")
+  });
+  assert.match(drainResult.stdout, /scenario completed: drain-new-room-rejected/);
 });
 
 test("game-proxy exposes active upstream status", async () => {
