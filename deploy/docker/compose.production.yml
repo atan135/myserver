@@ -220,6 +220,7 @@ services:
       HOST: 0.0.0.0
       SERVICE_BIND_HOST: 0.0.0.0
       SERVICE_PUBLIC_HOST: mail-service
+      DB_ENABLED: "true"
       LOG_ENABLE_FILE: "false"
       REGISTRY_ENABLED: "true"
       DISCOVERY_REQUIRED: "true"

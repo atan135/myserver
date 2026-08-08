@@ -52,6 +52,11 @@ test("production compose has no application-layer startup dependencies", async (
   }
 });
 
+test("production mail service enables its required database adapter", async () => {
+  const compose = await read("deploy/docker/compose.production.yml");
+  assert.match(serviceBlock(compose, "mail-service"), /^      DB_ENABLED: "true"$/m);
+});
+
 test("release runner batch-starts applications and gates traffic on bounded convergence", async () => {
   const source = await read("scripts/docker/server-apply-release.sh");
   const logical = source.replace(/\\\r?\n\s*/g, " ");
