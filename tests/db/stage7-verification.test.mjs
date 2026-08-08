@@ -29,22 +29,11 @@ class MetricsRedisCapture {
     this.hashes = new Map();
   }
 
-  pipeline() {
-    const redis = this;
-    const commands = [];
-    return {
-      hset(key, fields) {
-        commands.push(["hset", key, fields]);
-        return this;
-      },
-      expire() { return this; },
-      set() { return this; },
-      async exec() {
-        for (const [command, key, fields] of commands) {
-          if (command === "hset") redis.hashes.set(key, { ...(redis.hashes.get(key) || {}), ...fields });
-        }
-      }
-    };
+  async eval(_script, keyCount, ...arguments_) {
+    const keys = arguments_.slice(0, keyCount);
+    const argv = arguments_.slice(keyCount);
+    this.hashes.set(keys[0], JSON.parse(argv[0]));
+    return ["ok", "1", "0"];
   }
 }
 
@@ -158,7 +147,12 @@ test("migration metrics adapter publishes a collector-compatible, redacted versi
   assert.equal(JSON.stringify(payload).includes("password"), false);
 
   const redis = new MetricsRedisCapture();
-  await writeMetrics(redis, { metricsTtlSeconds: 60, heartbeatTtlSeconds: 30 }, { data: messages[0].data });
+  const write = await writeMetrics(redis, {
+    metricsTtlSeconds: 60,
+    heartbeatTtlSeconds: 30,
+    nowSeconds: 1_700_000_001
+  }, { data: messages[0].data });
+  assert.deepEqual(write, { schemaVersion: 2, latestUpdated: true, legacyWritten: false });
   const stored = [...redis.hashes.values()][0];
   assert.equal(stored.database_key, "auth");
   assert.equal(stored.target_migration_version, "20260718161350");
