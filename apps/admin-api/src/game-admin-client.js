@@ -575,7 +575,7 @@ export class GameAdminClient {
       }
       const invalidRegistryTarget = selected.fallback || selected.source !== "registry" ||
         (allowLiveUnhealthyAdminTarget
-          ? selected.endpointHealthy !== true || selected.reason !== "live_admin_control"
+          ? selected.reason !== "live_admin_control"
           : selected.healthy === false);
       if (options.requireRegistryTarget && invalidRegistryTarget) {
         throw createAdminError(

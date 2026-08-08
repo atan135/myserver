@@ -312,8 +312,7 @@ export async function discoverLiveGameServerAdminEndpoints(redis, registryKeyPre
     .filter((endpoint) =>
       endpoint.name === GAME_SERVER_ADMIN_ENDPOINT_NAME &&
       endpoint.visibility === ADMIN_ENDPOINT_VISIBILITY &&
-      GAME_SERVER_ADMIN_PROTOCOLS.has(endpoint.protocol) &&
-      endpoint.healthy === true
+      GAME_SERVER_ADMIN_PROTOCOLS.has(endpoint.protocol)
     )
     .map((endpoint) => ({
       service: GAME_SERVER_SERVICE_NAME,
@@ -326,7 +325,7 @@ export async function discoverLiveGameServerAdminEndpoints(redis, registryKeyPre
       port: endpoint.port,
       healthy: instance.healthy !== false,
       instanceHealthy: instance.healthy !== false,
-      endpointHealthy: true,
+      endpointHealthy: endpoint.healthy === true,
       weight: instance.weight,
       metadata: endpoint.metadata || {},
       fallback: false,

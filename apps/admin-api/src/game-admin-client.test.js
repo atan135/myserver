@@ -498,6 +498,7 @@ test("GameAdminClient shutdown reaches an exact live drained registry target", a
   const port = server.address().port;
   const drained = gameServerInstance("game-server-drained", "127.0.0.1", port);
   drained.healthy = false;
+  drained.endpoints[0].healthy = false;
   const client = new GameAdminClient({
     registryDiscoveryEnabled: true,
     registryDiscoveryRequired: true,
@@ -563,7 +564,7 @@ test("GameAdminClient live-unhealthy discovery remains shutdown-only", async () 
   );
 });
 
-test("GameAdminClient live shutdown rejects expired heartbeat and unhealthy admin endpoint", async () => {
+test("GameAdminClient live shutdown rejects expired heartbeat and invalid admin transport metadata", async () => {
   const expired = gameServerInstance("game-server-expired", "127.0.0.1", 7500);
   expired.healthy = false;
   const expiredRedis = createDiscoveryRedis([expired]);
@@ -583,17 +584,24 @@ test("GameAdminClient live shutdown rejects expired heartbeat and unhealthy admi
     { code: "GAME_SERVER_ADMIN_ENDPOINT_NOT_FOUND" }
   );
 
-  const badEndpoint = gameServerInstance("game-server-bad-admin", "127.0.0.1", 7501);
-  badEndpoint.healthy = false;
-  badEndpoint.endpoints[0].healthy = false;
-  const badClient = new GameAdminClient(
-    { registryDiscoveryEnabled: true, registryDiscoveryRequired: true, registryDiscoveryCacheTtlMs: 0 },
-    createDiscoveryRedis([badEndpoint])
-  );
-  await assert.rejects(
-    badClient.requestServerShutdown("test", { ...options, targetInstanceId: badEndpoint.id }),
-    { code: "GAME_SERVER_ADMIN_ENDPOINT_NOT_FOUND" }
-  );
+  const invalidInstances = [
+    ["game-server-missing-admin", { name: "client" }],
+    ["game-server-wrong-visibility", { visibility: "internal" }],
+    ["game-server-wrong-protocol", { protocol: "http" }]
+  ];
+  for (const [instanceId, endpointOverrides] of invalidInstances) {
+    const instance = gameServerInstance(instanceId, "127.0.0.1", 7501);
+    instance.healthy = false;
+    Object.assign(instance.endpoints[0], endpointOverrides, { healthy: false });
+    const client = new GameAdminClient(
+      { registryDiscoveryEnabled: true, registryDiscoveryRequired: true, registryDiscoveryCacheTtlMs: 0 },
+      createDiscoveryRedis([instance])
+    );
+    await assert.rejects(
+      client.requestServerShutdown("test", { ...options, targetInstanceId: instance.id }),
+      { code: "GAME_SERVER_ADMIN_ENDPOINT_NOT_FOUND" }
+    );
+  }
 });
 
 test("GameAdminClient lists discovered game-server admin endpoints", async () => {

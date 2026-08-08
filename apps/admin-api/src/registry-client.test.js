@@ -330,14 +330,20 @@ test("discoverGameServerAdminEndpoints requires admin visibility and never falls
   ]);
 });
 
-test("live game-server admin discovery includes drained instances but only healthy admin endpoints", async () => {
+test("live game-server admin discovery includes drained instances regardless of projected endpoint health", async () => {
   const redis = createRedisCapture();
   putInstance(redis, registryInstance("game-server", "game-server-drained", [
     networkEndpoint("client", "tcp", "public", "10.0.0.20", 7000),
-    networkEndpoint("admin", "tcp", "admin", "10.0.0.20", 7500)
+    { ...networkEndpoint("admin", "tcp", "admin", "10.0.0.20", 7500), healthy: false }
   ], { healthy: false }));
-  putInstance(redis, registryInstance("game-server", "game-server-bad-admin", [
-    { ...networkEndpoint("admin", "tcp", "admin", "10.0.0.21", 7501), healthy: false }
+  putInstance(redis, registryInstance("game-server", "game-server-wrong-name", [
+    networkEndpoint("client", "tcp", "admin", "10.0.0.21", 7501)
+  ], { healthy: false }));
+  putInstance(redis, registryInstance("game-server", "game-server-wrong-visibility", [
+    networkEndpoint("admin", "tcp", "internal", "10.0.0.22", 7502)
+  ], { healthy: false }));
+  putInstance(redis, registryInstance("game-server", "game-server-wrong-protocol", [
+    networkEndpoint("admin", "http", "admin", "10.0.0.23", 7503)
   ], { healthy: false }));
 
   assert.deepEqual(await discoverGameServerAdminEndpoints(redis), []);
@@ -347,7 +353,7 @@ test("live game-server admin discovery includes drained instances but only healt
   })), [{
     instanceId: "game-server-drained",
     healthy: false,
-    endpointHealthy: true,
+    endpointHealthy: false,
     reason: "live_admin_control"
   }]);
 });
