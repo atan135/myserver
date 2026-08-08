@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { register } from "node:module";
 import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -15,6 +16,19 @@ const { AdminHighRiskOperationService } = await import("../operations/admin-high
 const { AdminBreakglassService } = await import("../operations/admin-breakglass.service.ts");
 const { AdminOperationController } = await import("../operations/admin-operation.controller.ts");
 const { PERMISSIONS_KEY, POLICY_SCOPE_RESOLVER_KEY } = await import("../auth/roles.decorator.ts");
+
+test("admin-api shutdown assertion permission matches the Rust game-server contract", () => {
+  const source = readFileSync(
+    new URL("../../../game-server/src/admin_server.rs", import.meta.url),
+    "utf8"
+  );
+  const requirement = source.match(/fn admin_write_requirement[\s\S]*?\n}\n\nfn is_emergency_asset_correction/)?.[0] || "";
+
+  assert.match(
+    requirement,
+    /MessageType::RequestServerShutdownReq\s*=>\s*\("service\.shutdown",\s*"service"\)/
+  );
+});
 
 const ROOT_SCOPE = {
   world_ids: ["*"],

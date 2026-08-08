@@ -1064,9 +1064,10 @@ fn admin_write_requirement(packet: &crate::protocol::Packet) -> (&'static str, &
             | MessageType::ImportRoomTransferReq
             | MessageType::ConfirmRoomOwnershipReq
             | MessageType::RetireTransferredRoomReq => ("game.room.transfer", "room"),
-            MessageType::TriggerServerRedirectReq
-            | MessageType::TriggerRolloutDrainNoticeReq
-            | MessageType::RequestServerShutdownReq => ("game.config.write", "service"),
+            MessageType::TriggerServerRedirectReq | MessageType::TriggerRolloutDrainNoticeReq => {
+                ("game.config.write", "service")
+            }
+            MessageType::RequestServerShutdownReq => ("service.shutdown", "service"),
             _ => ("", ""),
         },
         None => ("", ""),

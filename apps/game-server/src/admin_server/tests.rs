@@ -539,6 +539,21 @@ fn admin_shutdown_request_is_write_action() {
 }
 
 #[test]
+fn rollout_and_shutdown_writes_keep_distinct_downstream_permissions() {
+    let drain_packet = json_packet(MessageType::TriggerRolloutDrainNoticeReq, r#"{}"#);
+    let shutdown_packet = json_packet(MessageType::RequestServerShutdownReq, r#"{}"#);
+
+    assert_eq!(
+        admin_write_requirement(&drain_packet),
+        ("game.config.write", "service")
+    );
+    assert_eq!(
+        admin_write_requirement(&shutdown_packet),
+        ("service.shutdown", "service")
+    );
+}
+
+#[test]
 fn emergency_asset_correction_keeps_its_distinct_downstream_permission() {
     let packet = json_packet(
         MessageType::GmSendItemReq,
