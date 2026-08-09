@@ -103,6 +103,10 @@ verify_release_bundle() {
 verify_release_bundle "$release_dir" "$release_id"
 cd "$release_dir"
 compose=(docker compose --env-file compose.production.env -f compose.production.yml)
+application_services=(
+  game-server match-service chat-server mail-service announce-service
+  metrics-collector game-proxy auth-http admin-api caddy
+)
 readiness_source_dir="$release_dir"
 if [[ -n "$readiness_source_release_id" ]]; then
   readiness_source_dir="$release_root/$readiness_source_release_id"
@@ -168,7 +172,7 @@ if (( ${#existing_chat_servers[@]} > 1 )); then
   exit 65
 fi
 
-"${compose[@]}" pull
+"${compose[@]}" pull "${application_services[@]}"
 "${readiness_compose[@]}" --profile ops pull migration-runner
 target_game_server_instance_id="$(
   "${compose[@]}" config --format json | \
@@ -182,30 +186,104 @@ target_game_server_instance_id="$(
 }
 export MYSERVER_RELEASE_GAME_SERVER_INSTANCE_ID="$target_game_server_instance_id"
 
-wait_healthy() {
+resolved_infrastructure_images="$(
+  "${compose[@]}" config --format json | \
+    "${readiness_compose[@]}" --profile ops run --rm --no-deps -T --entrypoint node \
+      --volume "$RELEASE_READINESS_PROBE_FILE:/app/tools/release-readiness-probe.mjs:ro" \
+      --volume "$release_dir/images.lock.json:/app/release/images.lock.json:ro" \
+      migration-runner /app/tools/release-readiness-probe.mjs \
+        --extract-infrastructure-images /app/release/images.lock.json
+)"
+declare -A expected_infrastructure_images=()
+while IFS=$'\t' read -r service image_reference; do
+  [[ -n "$service" && -n "$image_reference" ]] || continue
+  case "$service" in
+    postgres|redis|nats) expected_infrastructure_images["$service"]="$image_reference" ;;
+    *)
+      printf 'infrastructure_gate_failure service=%s reason=unexpected_lock_service\n' "$service" >&2
+      exit 65
+      ;;
+  esac
+done <<< "$resolved_infrastructure_images"
+if (( ${#expected_infrastructure_images[@]} != 3 )); then
+  printf 'infrastructure_gate_failure service=all reason=incomplete_schema_v2_lock expected=3 actual=%s\n' \
+    "${#expected_infrastructure_images[@]}" >&2
+  exit 65
+fi
+
+assert_existing_infrastructure_healthy() {
   local service="$1"
-  local container status attempt
-  container="$("${compose[@]}" ps -q "$service")"
-  [[ -n "$container" ]] || { echo "No container for service: $service" >&2; return 1; }
+  local expected_image="$2"
+  local container expected_image_id running_image_id running_image_reference running status attempt
+  local -a containers=()
+  mapfile -t containers < <("${compose[@]}" ps --all --quiet "$service")
+  if (( ${#containers[@]} != 1 )); then
+    printf 'infrastructure_gate_failure service=%s reason=container_count expected=1 actual=%s\n' \
+      "$service" "${#containers[@]}" >&2
+    return 1
+  fi
+  container="${containers[0]}"
+  if ! running="$(docker inspect --format '{{.State.Running}}' "$container")"; then
+    printf 'infrastructure_gate_failure service=%s reason=container_inspect_failed\n' \
+      "$service" >&2
+    return 1
+  fi
+  if [[ "$running" != true ]]; then
+    printf 'infrastructure_gate_failure service=%s reason=not_running\n' "$service" >&2
+    return 1
+  fi
+  if ! running_image_reference="$(docker inspect --format '{{.Config.Image}}' "$container")"; then
+    printf 'infrastructure_gate_failure service=%s reason=container_image_inspect_failed\n' \
+      "$service" >&2
+    return 1
+  fi
+  if [[ "$running_image_reference" != "$expected_image" ]]; then
+    printf 'infrastructure_gate_failure service=%s reason=image_mismatch\n' "$service" >&2
+    return 1
+  fi
+  if ! expected_image_id="$(docker image inspect --format '{{.Id}}' "$expected_image")"; then
+    printf 'infrastructure_gate_failure service=%s reason=expected_image_unavailable\n' \
+      "$service" >&2
+    return 1
+  fi
+  if ! running_image_id="$(docker inspect --format '{{.Image}}' "$container")"; then
+    printf 'infrastructure_gate_failure service=%s reason=runtime_image_inspect_failed\n' \
+      "$service" >&2
+    return 1
+  fi
+  if [[ "$running_image_id" != "$expected_image_id" ]]; then
+    printf 'infrastructure_gate_failure service=%s reason=runtime_image_id_mismatch\n' \
+      "$service" >&2
+    return 1
+  fi
   for attempt in $(seq 1 45); do
     status="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$container")"
     if [[ "$status" == healthy ]]; then
-      return 0
+      mapfile -t containers < <("${compose[@]}" ps --all --quiet "$service")
+      if (( ${#containers[@]} == 1 )) && [[ "${containers[0]}" == "$container" ]]; then
+        printf 'infrastructure_gate_pass service=%s state=running health=healthy image_match=true\n' \
+          "$service"
+        return 0
+      fi
+      printf 'infrastructure_gate_failure service=%s reason=container_changed_during_gate\n' \
+        "$service" >&2
+      return 1
     fi
     sleep 2
   done
-  echo "Service did not become healthy: $service ($status)" >&2
+  printf 'infrastructure_gate_failure service=%s reason=health_timeout health=%s\n' \
+    "$service" "$status" >&2
   return 1
 }
-if [[ "$rollback_attempt" == false ]]; then
-  "${compose[@]}" up -d postgres redis nats
-else
+for infrastructure_service in postgres redis nats; do
+  assert_existing_infrastructure_healthy \
+    "$infrastructure_service" \
+    "${expected_infrastructure_images[$infrastructure_service]}"
+done
+if [[ "$rollback_attempt" == true ]]; then
   printf 'database_migration_state=preserved readiness_source_release=%s\n' \
     "$readiness_source_release_id"
 fi
-wait_healthy postgres
-wait_healthy redis
-wait_healthy nats
 
 if [[ "$rollback_attempt" == false ]]; then
   # The runner refuses invalid history, pending unapproved migrations and missing backup evidence.
@@ -213,7 +291,7 @@ if [[ "$rollback_attempt" == false ]]; then
   "${compose[@]}" --profile ops run --rm --no-deps migration-runner apply --environment production --actor "$actor"
 fi
 
-"${compose[@]}" up -d game-server match-service chat-server mail-service announce-service \
+"${compose[@]}" up -d --no-deps game-server match-service chat-server mail-service announce-service \
   metrics-collector game-proxy auth-http admin-api
 assert_chat_server_replica_count 1
 
@@ -229,7 +307,7 @@ fi
 
 "${readiness_compose[@]}" --profile ops run --rm --no-deps migration-runner \
   postflight --environment production --check-readiness --require-readiness
-"${compose[@]}" up -d caddy
+"${compose[@]}" up -d --no-deps caddy
 
 ln -sfn "$release_dir" "$release_root/current"
 printf 'current_release=%s\n' "$(readlink -f "$release_root/current")"

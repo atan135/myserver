@@ -40,7 +40,7 @@ test("production game services share instance-specific absolute local socket pat
   assert.doesNotMatch(compose, /^  game-socket-clean:$/m);
   assert.doesNotMatch(applyScript, /game-socket-clean/);
   assert.doesNotMatch(applyScript, /stop game-server/);
-  assert.match(applyScript, /up -d game-server match-service chat-server/);
+  assert.match(applyScript, /up -d --no-deps game-server match-service chat-server/);
   assert.match(
     gameServer,
     /^      game-socket-init:\r?\n        condition: service_completed_successfully$/m

@@ -108,7 +108,7 @@ docker compose --profile ops --env-file compose.production.env -f compose.produc
 
 ## 5. 首次启动顺序
 
-以下命令都在 bundle 根目录执行：
+以下命令都在 bundle 根目录执行。`up -d postgres redis nats` 只属于服务器首次初始化：它创建基础设施容器和 volume，不得复制到常规应用更新或 rollback 流程。初始化完成后，基础设施版本升级必须使用独立、经审批且带备份/恢复方案的运维流程。
 
 ```bash
 cd /data/myserver/release/<release-id>
@@ -143,11 +143,15 @@ docker compose --env-file compose.production.env -f compose.production.yml \
 
 `game-server`、`game-proxy`、`chat-server` 和 `match-service` 分别在 Docker internal network 的 `7600`、`7601`、`7602`、`7603` 提供健康监听。正式 release runner 和上述首次启动命令都会通过 bundle 内的统一 probe 检查这四个 `/readyz`，同时检查 required Node HTTP 服务的 `/healthz`。`GET /livez` 只证明 runtime 存活，发布与接流量判断必须使用 required readiness 收敛结果。这些端口不映射到宿主机公网。任一 required readiness 失败时，不要启动 Caddy，也不要手工修改 `_sqlx_migrations`、删除未知 registry key 或删除 socket 来绕过失败。
 
+常规应用更新和应用 rollback 不创建、启动、停止或重建 PostgreSQL、Redis、NATS。runner 在 migration 和应用更新前 fail-closed 验证目标 Compose project 对每个基础设施服务恰好存在一个容器，且容器为 running/healthy、运行时 image reference 与目标 schema v2 `images.lock.json` 及解析后的 Compose digest reference 精确一致。容器缺失、重复、停止、不健康或 digest 不匹配时发布立即停止，由独立基础设施流程处理；不得让应用 release 自动修复。
+
 game-server 旧实例的受控退出必须由已安装的 `/home/gameops/script/ops-retire.sh` 协调 Docker desired state。production 默认 Compose project 为 `myserver`，确认串是 `<instance-id>@<full-revision>@myserver`。隔离演练必须显式传 `--project <exact-project>`，该值同时用于 Compose lookup、容器 label 围栏、journal 和确认串，不接受宽松环境变量覆盖。候选实例连续 Ready 后，以旧实例 ID、旧镜像完整 Git revision、project 和组合确认串启动 stop hook；脚本进入 `awaiting_control_plane_shutdown` 后，管理员仍通过 admin-api 完成 drain、break-glass、预检、独立审批和 shutdown 执行。drain 后旧实例按设计发布 unhealthy，普通 healthy discovery、readiness、玩家路由及其他 GM 写操作都继续拒绝它；只有 `service.shutdown` controller 显式启用隔离的 live admin discovery，在 heartbeat/TTL 仍活跃、service/instance identity 精确匹配且 endpoint 声明 `name=admin`、`visibility=admin`、`protocol=tcp` 时尝试停服。endpoint 的 `healthy` 随实例整体 readiness 投影，drain 后允许为 false；控制面仍必须实际连通并通过签名断言认证、收到停机响应，任何连接、认证或响应失败均 fail-closed。该能力不允许 fallback 或 direct endpoint，也不会把旧实例重新纳入业务流量。stop hook 不接收管理员凭据或审批 nonce，只等待同一旧容器安全退出，从而避免 `restart: unless-stopped` 将 self-graceful exit 重新拉起。超时、非零退出、OOM 或目标身份变化会失败并恢复原 policy；异常终止留下的 pending journal 会阻止其他写运维操作，必须使用相同 identity/revision/project 显式 `--recover`。recover 即使面对已经干净退出的旧容器，也会恢复 restart policy、重新启动旧实例并结束该次 retire；之后必须重新发起 retire，不能沿用旧等待周期。这一 helper 不创建 candidate，完整 old/new 创建与切流仍由部署平台灰度编排负责。
 
 共享运维锁的真实并发、同进程重入及 release runner 自动回滚子进程的 FD 继承，必须在 WSL 原生 Linux checkout 中运行 `tests/deploy/ops-lock-linux-fixture.test.mjs` 留证；Windows 下该夹具明确跳过，静态断言不能替代 Linux `flock` 证据。
 
 dependency-aware Rust 服务的 production 窗口固定为：启动收敛 `120s`、Ready 稳定 `10s`、依赖 stale `60s`。release runner 另有 `180s` 有界总等待，并要求所有 required 服务连续成功覆盖 registry heartbeat TTL `30s` 加 Ready 稳定窗口 `10s` 后才允许接流量。超时诊断只输出服务、实例 ID、dependency state 和错误码。常规更新仅在发布命令携带 `--rollback-db-compatible`、已确认上一应用 release 兼容前向迁移后的数据库时，才调用上一 release 的同一 runner 做单次版本回滚；回滚只替换应用版本，不回退 migration，也不使用旧 catalog 重跑 preflight/apply，而由发起回滚的 release migration-runner 对当前数据库和旧应用 readiness 做 postflight。最终仍保留原始发布失败状态。首次部署没有上一 release，超时后必须保持 Caddy 未启动和流量关闭，按诊断人工处置。不得通过容器 restart loop 重新碰运气。
+
+`match-service` 获取全局 ID worker lease 时同样使用 `GLOBAL_ID_WORKER_LEASE_WAIT_TIMEOUT_SECS=120`、`GLOBAL_ID_WORKER_LEASE_RETRY_INITIAL_MS=250`、`GLOBAL_ID_WORKER_LEASE_RETRY_MAX_MS=5000`。lease 暂时被上一实例占用或 Redis 短暂不可用时，进程保持 live/not-ready 并持续退避重试；120 秒窗口到期只记录一次结构化收敛超时，不退出进程。取得 lease 后才初始化发号器并开放 gRPC listener；非法 ID/等待配置、Redis client/auth 配置错误仍立即失败，运行期 ownership 丢失仍触发 fatal shutdown。
 
 窗口变量只在未设置时使用默认值。发布配置若包含非数字、零、溢出值、超过 `600/120/600` 秒上限，或不满足 `stability <= convergence`、`stale > stability`，服务必须启动失败；不得通过删掉错误日志或依赖默认回退继续发布。
 

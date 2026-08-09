@@ -1,3 +1,37 @@
+import { readFile } from "node:fs/promises";
+
+if (process.argv[2] === "--extract-infrastructure-images") {
+  try {
+    const lockPath = process.argv[3];
+    if (!lockPath) throw new Error("missing lock path");
+    const chunks = [];
+    for await (const chunk of process.stdin) chunks.push(chunk);
+    const config = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    const lock = JSON.parse(await readFile(lockPath, "utf8"));
+    if (lock?.schemaVersion !== 2 || lock?.platform !== "linux/amd64") {
+      throw new Error("release lock must use schema v2 for linux/amd64");
+    }
+    const services = ["postgres", "redis", "nats"];
+    const lines = services.map((service) => {
+      const lockReference = lock?.infrastructure?.[service]?.reference;
+      const composeReference = config?.services?.[service]?.image;
+      if (
+        typeof lockReference !== "string" ||
+        !/@sha256:[a-f0-9]{64}$/.test(lockReference) ||
+        composeReference !== lockReference
+      ) {
+        throw new Error(`invalid infrastructure image reference for ${service}`);
+      }
+      return `${service}\t${lockReference}`;
+    });
+    process.stdout.write(`${lines.join("\n")}\n`);
+    process.exit(0);
+  } catch {
+    process.stderr.write("unable to validate resolved infrastructure image references\n");
+    process.exit(65);
+  }
+}
+
 if (process.argv[2] === "--extract-game-server-instance-id") {
   try {
     const chunks = [];

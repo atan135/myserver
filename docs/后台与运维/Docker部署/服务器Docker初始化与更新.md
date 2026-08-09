@@ -158,9 +158,9 @@ DISCOVERY_REQUIRED=true
 DISALLOW_LEGACY_DIRECT_CONFIG=true
 ```
 
-首次发布和每次更新均按以下状态机执行：
+首次发布和常规应用更新共享 migration/readiness 状态机，但基础设施所有权边界不同：只有首次初始化或独立基础设施变更流程可以创建、启动或重建 PostgreSQL、Redis、NATS；应用 release 和应用 rollback 只能验证并使用既有基础设施。
 
-1. 拉取并以 digest 校验全部镜像；先启动 PostgreSQL、Redis、NATS，确认其容器健康、数据目录可写且不暴露公网端口。
+1. 拉取并以 digest 校验应用镜像。首次初始化先启动 PostgreSQL、Redis、NATS 并确认其数据目录和网络边界；常规更新/rollback 则 fail-closed 验证目标 Compose project 中每项基础设施恰好一个既有容器、running、healthy，且运行 image reference 与目标 schema v2 lock 和 Compose digest 精确一致，不执行任何基础设施 `up`/create/recreate。
 2. 使用独立的 migration runner 执行受支持的五库入口，而不是在服务器直接安装 Node 或 SQLx：`docker compose --profile ops ... run --rm --no-deps migration-runner preflight --environment production`，审批完成后使用同一容器执行 `apply`。完整命令见[正式 Release 上线说明](./正式Release上线说明.md)。
 3. 使用一次 `docker compose up -d` 批量启动 `game-server`、`match-service`、`chat-server`、`mail-service`、`announce-service`、`metrics-collector`、`game-proxy`、`auth-http`、`admin-api`。应用服务之间不通过 `depends_on` 表达固定启动顺序，只保留 PostgreSQL、Redis、NATS 和 socket 目录初始化等基础门禁。
 4. 统一等待 required readiness 连续覆盖 registry heartbeat TTL `30s` 与 Ready 稳定窗口 `10s`。只有全部服务收敛且数据库 postflight 通过后才启动 Caddy；超时按结构化安全字段诊断。常规更新只有在发布前显式确认上一应用 release 兼容本次前向数据库迁移时才调用上一 release 的同一流程做单次回滚；首次发布没有回滚目标，必须保持入口关闭。不得删除未知 registry key 或 socket 继续发布。
@@ -189,7 +189,7 @@ DISALLOW_LEGACY_DIRECT_CONFIG=true
 
 本单机部署中，Redis 是 session、ticket、route、registry 和 worker lease 的运行时存储，PostgreSQL 才是业务数据的权威持久化来源。`deploy/docker/config/redis.conf` 必须保留 `appendonly yes` 和 `appendfsync everysec`，并显式设置 `save ""` 禁用默认 RDB snapshot 规则。这样避免高频 RDB fork/save 与 AOF fsync 争抢磁盘 I/O，导致 worker lease 在 TTL 内无法续租。
 
-全局 ID worker lease 使用 90 秒 TTL、每 30 秒续租。任一续租 Redis 错误或 ownership 丢失都会令对应服务以非零状态退出；Compose 的 `restart: unless-stopped` 会在 Redis 恢复后重新启动服务并重新申请 lease。出现这类重启时，先检查 Redis AOF 延迟、磁盘空间和 I/O，再恢复或扩大流量；不要在运行中的旧进程里手工恢复发号。
+全局 ID worker lease 使用 90 秒 TTL、每 30 秒续租。启动阶段暂时无法取得 lease 时，`game-server` 和 `match-service` 保持 live/not-ready 并在有界退避下继续恢复，不依赖 Compose restart loop 等待旧 TTL；收敛窗口到期只产生结构化告警。取得 ownership 后，任一续租 Redis 错误或 ownership 丢失仍会令对应服务以非零状态退出，避免继续发号。出现运行期 lease loss 时，先检查 Redis AOF 延迟、磁盘空间和 I/O，再恢复或扩大流量；不要在运行中的旧进程里手工恢复发号。
 
 ### 3.6 Redis `maxmemory` 与 legacy metrics 恢复
 

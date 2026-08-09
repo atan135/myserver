@@ -60,9 +60,16 @@ test("production mail service enables its required database adapter", async () =
 test("release runner batch-starts applications and gates traffic on bounded convergence", async () => {
   const source = await read("scripts/docker/server-apply-release.sh");
   const logical = source.replace(/\\\r?\n\s*/g, " ");
-  const batches = [...logical.matchAll(/^"\$\{compose\[@\]\}" up -d ([^\r\n]+)$/gm)]
+  const batches = [...logical.matchAll(/^"\$\{compose\[@\]\}" up -d --no-deps ([^\r\n]+)$/gm)]
     .map((match) => match[1])
     .filter((command) => command.includes("game-server"));
+  const upCommands = [...logical.matchAll(/^"\$\{compose\[@\]\}" up ([^\r\n]+)$/gm)]
+    .map((match) => match[1]);
+  assert.ok(upCommands.length >= 2, "release runner must update applications and Caddy");
+  for (const command of upCommands) {
+    assert.match(command, /^-d --no-deps /, "every release runner up must be dependency-free");
+    assert.doesNotMatch(command, /(?:^|\s)(?:postgres|redis|nats)(?:\s|$)/);
+  }
   assert.equal(batches.length, 1, "application services must use one compose up batch");
   for (const service of [
     "game-server", "match-service", "chat-server", "mail-service", "announce-service",
@@ -74,9 +81,17 @@ test("release runner batch-starts applications and gates traffic on bounded conv
   assert.match(source, /wait_for_release_readiness/);
   assert.match(source, /release_failure[\s\S]+READINESS_CONVERGENCE_TIMEOUT/);
   assert.match(source, /rollback_previous_release/);
-  assert.ok(source.indexOf("wait_for_release_readiness") < source.lastIndexOf('up -d caddy'));
-  assert.ok(source.lastIndexOf("postflight --environment production") < source.lastIndexOf('up -d caddy'));
-  assert.ok(source.lastIndexOf('up -d caddy') < source.indexOf('ln -sfn "$release_dir"'));
+  assert.doesNotMatch(source, /up -d (?:postgres|redis|nats)|up -d postgres redis nats/);
+  assert.match(source, /assert_existing_infrastructure_healthy/);
+  assert.match(source, /ps --all --quiet "\$service"/);
+  assert.match(source, /\.Config\.Image/);
+  assert.match(source, /docker image inspect --format '\{\{\.Id\}\}'/);
+  assert.match(source, /docker inspect --format '\{\{\.Image\}\}'/);
+  assert.match(source, /infrastructure_gate_failure[\s\S]+image_mismatch/);
+  assert.match(source, /infrastructure_gate_failure[\s\S]+health_timeout/);
+  assert.ok(source.indexOf("wait_for_release_readiness") < source.lastIndexOf('up -d --no-deps caddy'));
+  assert.ok(source.lastIndexOf("postflight --environment production") < source.lastIndexOf('up -d --no-deps caddy'));
+  assert.ok(source.lastIndexOf('up -d --no-deps caddy') < source.indexOf('ln -sfn "$release_dir"'));
 });
 
 test("all docker compose one-shot runners are disposable and dependency-free", async () => {
@@ -188,7 +203,12 @@ test("shared convergence covers registry TTL, stability and safe diagnostics", a
   assert.match(releaseRunner, /pending-ops-install/);
   assert.match(releaseRunner, /pending-game-server-retire/);
   assert.match(releaseRunner, /rollback_attempt" == true && -z "\$readiness_source_release_id/);
-  assert.match(releaseRunner, /if \[\[ "\$rollback_attempt" == false \]\][\s\S]+up -d postgres redis nats[\s\S]+else[\s\S]+database_migration_state=preserved/);
+  assert.doesNotMatch(releaseRunner, /up -d (?:postgres|redis|nats)|up -d postgres redis nats/);
+  assert.match(releaseRunner, /--extract-infrastructure-images[\s\S]+images\.lock\.json/);
+  assert.match(releaseRunner, /assert_existing_infrastructure_healthy[\s\S]+\.State\.Running[\s\S]+\.Config\.Image/);
+  assert.match(releaseRunner, /for infrastructure_service in postgres redis nats; do[\s\S]+assert_existing_infrastructure_healthy/);
+  assert.match(probe, /schemaVersion\s*!== 2[\s\S]+platform\s*!== "linux\/amd64"/);
+  assert.match(probe, /composeReference !== lockReference/);
   assert.match(releaseRunner, /if \[\[ "\$rollback_attempt" == false \]\][\s\S]+migration-runner preflight[\s\S]+migration-runner apply/);
   assert.match(releaseRunner, /readiness_compose\[@\][\s\S]+postflight --environment production/);
   assert.match(releaseRunner, /SERVICE_INSTANCE_ID[\s\S]+export MYSERVER_RELEASE_GAME_SERVER_INSTANCE_ID/);
