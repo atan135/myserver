@@ -28,6 +28,9 @@ pub struct Config {
     pub redis_key_prefix: String,
     pub global_id_origin_id: u64,
     pub global_id_worker_id: Option<u64>,
+    pub global_id_worker_lease_wait_timeout_secs: u64,
+    pub global_id_worker_lease_retry_initial_ms: u64,
+    pub global_id_worker_lease_retry_max_ms: u64,
     pub nats_url: String,
     pub registry_enabled: bool,
     pub discovery_required: bool,
@@ -169,6 +172,24 @@ impl Config {
             redis_key_prefix: std::env::var("REDIS_KEY_PREFIX").unwrap_or_default(),
             global_id_origin_id: parse_u64_env("GLOBAL_ID_ORIGIN_ID", 0),
             global_id_worker_id: parse_optional_u64_env("GLOBAL_ID_WORKER_ID"),
+            global_id_worker_lease_wait_timeout_secs: parse_bounded_u64_env(
+                "GLOBAL_ID_WORKER_LEASE_WAIT_TIMEOUT_SECS",
+                120,
+                1,
+                600,
+            ),
+            global_id_worker_lease_retry_initial_ms: parse_bounded_u64_env(
+                "GLOBAL_ID_WORKER_LEASE_RETRY_INITIAL_MS",
+                250,
+                1,
+                30_000,
+            ),
+            global_id_worker_lease_retry_max_ms: parse_bounded_u64_env(
+                "GLOBAL_ID_WORKER_LEASE_RETRY_MAX_MS",
+                5_000,
+                1,
+                30_000,
+            ),
             nats_url: std::env::var("NATS_URL")
                 .unwrap_or_else(|_| "nats://127.0.0.1:4222".to_string()),
             registry_enabled: std::env::var("REGISTRY_ENABLED")
@@ -295,10 +316,26 @@ fn parse_u64_env(name: &str, default: u64) -> u64 {
 }
 
 fn parse_optional_u64_env(name: &str) -> Option<u64> {
-    std::env::var(name)
+    let value = std::env::var(name).ok()?;
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+    Some(
+        value
+            .parse()
+            .unwrap_or_else(|_| panic!("{name} must be an unsigned integer")),
+    )
+}
+
+fn parse_bounded_u64_env(name: &str, default: u64, minimum: u64, maximum: u64) -> u64 {
+    let value = std::env::var(name).unwrap_or_else(|_| default.to_string());
+    value
+        .trim()
+        .parse::<u64>()
         .ok()
-        .filter(|value| !value.trim().is_empty())
-        .and_then(|value| value.parse().ok())
+        .filter(|value| (minimum..=maximum).contains(value))
+        .unwrap_or_else(|| panic!("{name} must be an integer in {minimum}..={maximum}"))
 }
 
 fn is_production_env() -> bool {
@@ -410,6 +447,12 @@ fn validate_discovery_config(config: &Config) {
 }
 
 fn validate_production_config(config: &Config) {
+    if config.global_id_worker_lease_retry_initial_ms > config.global_id_worker_lease_retry_max_ms {
+        panic!(
+            "GLOBAL_ID_WORKER_LEASE_RETRY_INITIAL_MS must not exceed GLOBAL_ID_WORKER_LEASE_RETRY_MAX_MS"
+        );
+    }
+
     if !is_production_env() {
         return;
     }
@@ -448,6 +491,9 @@ mod tests {
         "REDIS_KEY_PREFIX",
         "GLOBAL_ID_ORIGIN_ID",
         "GLOBAL_ID_WORKER_ID",
+        "GLOBAL_ID_WORKER_LEASE_WAIT_TIMEOUT_SECS",
+        "GLOBAL_ID_WORKER_LEASE_RETRY_INITIAL_MS",
+        "GLOBAL_ID_WORKER_LEASE_RETRY_MAX_MS",
     ];
     const SERVICE_BUILD_VERSION_ENV_NAMES: &[&str] = &[
         "NODE_ENV",
@@ -557,6 +603,55 @@ mod tests {
 
         assert_eq!(config.global_id_origin_id, 7);
         assert_eq!(config.global_id_worker_id, Some(6));
+    }
+
+    #[test]
+    fn global_id_worker_lease_wait_config_is_bounded() {
+        let _guard = env_lock().lock().unwrap();
+        let _env = EnvGuard::capture(GLOBAL_ID_ENV_NAMES);
+
+        unsafe {
+            env::remove_var("NODE_ENV");
+            env::remove_var("APP_ENV");
+            env::remove_var("GLOBAL_ID_WORKER_LEASE_RETRY_INITIAL_MS");
+            env::remove_var("GLOBAL_ID_WORKER_LEASE_RETRY_MAX_MS");
+            env::set_var("GLOBAL_ID_WORKER_LEASE_WAIT_TIMEOUT_SECS", "0");
+        }
+
+        let error = panic_message(catch_config_from_env());
+        assert!(error.contains("GLOBAL_ID_WORKER_LEASE_WAIT_TIMEOUT_SECS"));
+    }
+
+    #[test]
+    fn malformed_global_id_worker_id_is_rejected() {
+        let _guard = env_lock().lock().unwrap();
+        let _env = EnvGuard::capture(GLOBAL_ID_ENV_NAMES);
+
+        unsafe {
+            env::remove_var("NODE_ENV");
+            env::remove_var("APP_ENV");
+            env::set_var("GLOBAL_ID_WORKER_ID", "not-a-number");
+        }
+
+        let error = panic_message(catch_config_from_env());
+        assert!(error.contains("GLOBAL_ID_WORKER_ID"));
+    }
+
+    #[test]
+    fn global_id_worker_lease_retry_initial_must_not_exceed_max() {
+        let _guard = env_lock().lock().unwrap();
+        let _env = EnvGuard::capture(GLOBAL_ID_ENV_NAMES);
+
+        unsafe {
+            env::remove_var("NODE_ENV");
+            env::remove_var("APP_ENV");
+            env::set_var("GLOBAL_ID_WORKER_LEASE_WAIT_TIMEOUT_SECS", "120");
+            env::set_var("GLOBAL_ID_WORKER_LEASE_RETRY_INITIAL_MS", "5000");
+            env::set_var("GLOBAL_ID_WORKER_LEASE_RETRY_MAX_MS", "250");
+        }
+
+        let error = panic_message(catch_config_from_env());
+        assert!(error.contains("RETRY_INITIAL_MS"));
     }
 
     #[test]

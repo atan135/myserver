@@ -148,6 +148,32 @@ test("game-server lease wait and cleanup are bounded, cancellable, and ownership
   assert.match(server, /match \(run_result, cleanup_report\.failures\.is_empty\(\)\)/);
 });
 
+test("match-service keeps worker lease convergence live and not-ready without restart-loop recovery", () => {
+  const config = source("apps/match-service/src/config.rs");
+  const server = source("apps/match-service/src/server.rs");
+  const compose = source("deploy/docker/compose.production.yml");
+  const waiter = server.slice(
+    indexOfOrFail(server, "async fn wait_for_worker_lease", "match worker lease waiter"),
+    indexOfOrFail(server, "async fn shutdown_signal", "match shutdown signal")
+  );
+
+  assert.match(config, /GLOBAL_ID_WORKER_LEASE_WAIT_TIMEOUT_SECS/);
+  assert.match(config, /GLOBAL_ID_WORKER_LEASE_RETRY_INITIAL_MS/);
+  assert.match(config, /GLOBAL_ID_WORKER_LEASE_RETRY_MAX_MS/);
+  assert.match(server, /wait_for_worker_lease\([\s\S]+shutdown_signal\(\)/);
+  assert.match(server, /mark_pending\([\s\S]+"worker-lease"[\s\S]+StartupErrorCode::LeaseUnavailable/);
+  assert.match(server, /mark_degraded\([\s\S]+"worker-lease"[\s\S]+StartupErrorCode::DependencyTimeout/);
+  assert.match(server, /service remains live and not ready/);
+  assert.equal((waiter.match(/warn!\(/g) ?? []).length, 1, "lease waiter timeout must warn once");
+  assert.doesNotMatch(waiter, /error\s*=/, "lease waiter diagnostics must not expose raw errors");
+  assert.match(server, /LeaseAcquireError::Fatal/);
+  assert.match(server, /wait_for_worker_lease[\s\S]+mark_ready\("local-runtime", "worker-lease"\)[\s\S]+bind_grpc_incoming/);
+  assert.match(server, /global id worker lease lost; requesting process shutdown/);
+  assert.match(compose, /GLOBAL_ID_WORKER_LEASE_WAIT_TIMEOUT_SECS: "120"/);
+  assert.match(compose, /GLOBAL_ID_WORKER_LEASE_RETRY_INITIAL_MS: "250"/);
+  assert.match(compose, /GLOBAL_ID_WORKER_LEASE_RETRY_MAX_MS: "5000"/);
+});
+
 test("socket pair source preserves lease-first local-before-internal bootstrap order", () => {
   const server = source("apps/game-server/src/server.rs");
   const localSocket = source("apps/game-server/src/local_socket.rs");
