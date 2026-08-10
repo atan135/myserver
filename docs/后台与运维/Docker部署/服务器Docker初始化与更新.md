@@ -63,6 +63,7 @@ docker info
 ```text
 /data/myserver/
   docker/         # Docker daemon data-root，由 daemon 管理
+  containerd/     # 独立 containerd 的 root，由 containerd 管理
   release/        # 已审阅的 release bundle，按 release ID 分目录
   secrets/        # 仅服务器本地，0700 目录、0600 文件
   backups/
@@ -70,7 +71,7 @@ docker info
   sockets/        # 临时 local socket，不备份、不跨主机复制
 ```
 
-当前生产 Compose 使用命名 volume，实际数据位于 Docker `data-root` 下；不得使用匿名 volume，也不得手工修改 `/data/myserver/docker` 中的 volume 内容。Caddy 的状态数据保存自动 HTTPS 证书和 ACME 账户，必须跨容器重建保留。若后续改为 bind mount，先用已锁定镜像确认容器运行 UID/GID，再仅对对应目录授予最小权限；不要猜测 UID 后执行递归 `chown`。数据目录不放入 Git、不随 release 清理，也不作为镜像构建上下文。
+当前生产 Compose 使用命名 volume，实际数据位于 Docker `data-root` 下；Docker 使用独立 `containerd.service` 时，镜像 content store 与 overlayfs 快照还会位于 containerd `root`。两者都必须位于 `/data/myserver/`，不能只配置 Docker `data-root` 后默认让 `/var/lib/containerd` 占用系统根分区。不得使用匿名 volume，也不得手工修改 `/data/myserver/docker` 或 `/data/myserver/containerd` 中的受管内容。Caddy 的状态数据保存自动 HTTPS 证书和 ACME 账户，必须跨容器重建保留。若后续改为 bind mount，先用已锁定镜像确认容器运行 UID/GID，再仅对对应目录授予最小权限；不要猜测 UID 后执行递归 `chown`。数据目录不放入 Git、不随 release 清理，也不作为镜像构建上下文。
 
 `secrets/` 保存 production env 文件、Compose secret 文件、registry 拉取凭据引用和 TLS 私钥。它们不能同步回开发机、上传到镜像仓库、写入 `images.lock.json` 或通过 `docker inspect` 的环境变量明文暴露。优先使用 Compose secrets 或外部 secret manager；若暂时使用 env file，文件权限必须为 `0600`，且仅由受控运维账号读取。
 
