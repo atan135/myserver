@@ -115,8 +115,9 @@ export class AuthService {
       throw badRequest("INVALID_LOGIN_NAME", "loginName must be a non-empty string");
     }
 
+    let normalizedLoginName: string;
     try {
-      assertValidLoginName(loginName);
+      normalizedLoginName = assertValidLoginName(loginName);
     } catch (err: any) {
       throw badRequest("INVALID_LOGIN_NAME", err.message);
     }
@@ -136,12 +137,12 @@ export class AuthService {
     await this.assertNotInMaintenance();
 
     if (this.config.accountLockEnabled && this.accountLockout) {
-      const lockStatus = await this.accountLockout.getLockStatus(loginName);
+      const lockStatus = await this.accountLockout.getLockStatus(normalizedLoginName);
       if (lockStatus.locked) {
         this.dbStore?.appendSecurityAudit?.({
           eventType: "account_locked_login_attempt",
           targetType: "account",
-          targetValue: loginName,
+          targetValue: normalizedLoginName,
           clientIp,
           severity: "critical",
           details: { remainingSeconds: lockStatus.remainingSeconds }
@@ -158,10 +159,10 @@ export class AuthService {
 
     let session;
     try {
-      session = await this.authStore.createPasswordSession(loginName, password, clientIp);
+      session = await this.authStore.createPasswordSession(normalizedLoginName, password, clientIp);
 
       if (this.config.accountLockEnabled && this.accountLockout) {
-        await this.accountLockout.clearFailedAttempts(loginName);
+        await this.accountLockout.clearFailedAttempts(normalizedLoginName);
       }
     } catch (error: any) {
       if (error.code === "PLAYER_BLOCKED") {
@@ -173,13 +174,13 @@ export class AuthService {
       }
 
       if (this.config.accountLockEnabled && this.accountLockout) {
-        const { locked, attempts } = await this.accountLockout.recordFailedAttempt(loginName);
+        const { locked, attempts } = await this.accountLockout.recordFailedAttempt(normalizedLoginName);
 
         if (locked) {
           this.dbStore?.appendSecurityAudit?.({
             eventType: "account_locked",
             targetType: "account",
-            targetValue: loginName,
+            targetValue: normalizedLoginName,
             clientIp,
             severity: "critical",
             details: { attempts }
@@ -191,7 +192,7 @@ export class AuthService {
         this.dbStore?.appendSecurityAudit?.({
           eventType: "login_failed",
           targetType: "account",
-          targetValue: loginName,
+          targetValue: normalizedLoginName,
           clientIp,
           severity: "warning",
           details: { reason: error.code }
