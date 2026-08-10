@@ -12,19 +12,24 @@ function createRequest() {
 
 function createService({ lockStatus, loginError, recordResult }: any) {
   const audits: any[] = [];
+  const loginNames: Array<[string, string]> = [];
   const lockout = {
-    async getLockStatus() {
+    async getLockStatus(loginName: string) {
+      loginNames.push(["getLockStatus", loginName]);
       return lockStatus;
     },
-    async recordFailedAttempt() {
+    async recordFailedAttempt(loginName: string) {
+      loginNames.push(["recordFailedAttempt", loginName]);
       return recordResult;
     },
-    async clearFailedAttempts() {
+    async clearFailedAttempts(loginName: string) {
+      loginNames.push(["clearFailedAttempts", loginName]);
       throw new Error("successful login must not clear attempts in this test");
     }
   };
   const authStore = {
-    async createPasswordSession() {
+    async createPasswordSession(loginName: string) {
+      loginNames.push(["createPasswordSession", loginName]);
       throw loginError;
     }
   };
@@ -49,7 +54,7 @@ function createService({ lockStatus, loginError, recordResult }: any) {
     { async getStatus() { return { enabled: false }; } }
   );
 
-  return { service, audits };
+  return { service, audits, loginNames };
 }
 
 test("AuthService records an invalid password and preserves the stable credential error", async () => {
@@ -94,4 +99,27 @@ test("AuthService rejects a locked account before credential verification and re
   );
   assert.equal(headers.get("Retry-After"), "42");
   assert.deepEqual(audits.map((entry) => entry.eventType), ["account_locked_login_attempt"]);
+});
+
+test("AuthService aggregates login attempts by normalized login name", async () => {
+  const invalidCredentials = Object.assign(new Error("invalid credentials"), {
+    code: "INVALID_LOGIN_CREDENTIALS"
+  });
+  const { service, audits, loginNames } = createService({
+    lockStatus: { locked: false, remainingSeconds: 0 },
+    loginError: invalidCredentials,
+    recordResult: { locked: false, attempts: 1 }
+  });
+
+  await assert.rejects(
+    () => service.login({ loginName: "  Locked_User  ", password: "wrong-password" }, createRequest(), {}),
+    (error: any) => error.getStatus() === 401 && error.getResponse().error === "INVALID_LOGIN_CREDENTIALS"
+  );
+
+  assert.deepEqual(loginNames, [
+    ["getLockStatus", "locked_user"],
+    ["createPasswordSession", "locked_user"],
+    ["recordFailedAttempt", "locked_user"]
+  ]);
+  assert.deepEqual(audits.map((entry) => entry.targetValue), ["locked_user"]);
 });
