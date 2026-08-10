@@ -215,10 +215,10 @@ test("auth-http builds a stable public HTTPS mail descriptor from deployment con
     TICKET_SECRET: "prod-ticket-secret-with-enough-entropy",
     GAME_ADMIN_TOKEN: "prod-game-admin-token-with-enough-entropy",
     INTERNAL_API_TOKEN: "prod-internal-api-token-with-enough-entropy",
-    AUTH_PUBLIC_MAIL_HOST: "api.game.zergzerg.cn"
+    AUTH_PUBLIC_MAIL_HOST: "api.bevy.zergzerg.cn"
   }, (config) => {
     assert.deepEqual(config.publicMailDescriptor, {
-      host: "api.game.zergzerg.cn",
+      host: "api.bevy.zergzerg.cn",
       port: 443,
       protocol: "https"
     });

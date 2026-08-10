@@ -1,0 +1,283 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Rust 编程语言简要介绍">
+  <meta name="theme-color" content="#f4f6f2">
+  <title>Rust 编程语言</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --paper: #f4f6f2;
+      --ink: #151816;
+      --muted: #58605a;
+      --line: #c9d0ca;
+      --accent: #c63f2f;
+      --accent-dark: #8f271d;
+      --code: #202521;
+      --code-ink: #f4f6f2;
+      --green: #26734d;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html {
+      background: var(--paper);
+      color: var(--ink);
+      font-family: "Segoe UI", "Microsoft YaHei", Arial, sans-serif;
+      line-height: 1.6;
+    }
+
+    body {
+      margin: 0;
+    }
+
+    a {
+      color: var(--accent-dark);
+      text-decoration-thickness: 1px;
+      text-underline-offset: 4px;
+    }
+
+    .shell {
+      width: min(1120px, calc(100% - 40px));
+      margin: 0 auto;
+    }
+
+    .masthead {
+      display: flex;
+      min-height: 72px;
+      align-items: center;
+      justify-content: space-between;
+      border-bottom: 1px solid var(--line);
+      font-size: 14px;
+    }
+
+    .brand {
+      font-weight: 700;
+    }
+
+    .status {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      color: var(--muted);
+    }
+
+    .status::before {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--green);
+      content: "";
+    }
+
+    .hero {
+      display: grid;
+      min-height: min(680px, calc(100svh - 128px));
+      grid-template-columns: minmax(0, 1.1fr) minmax(340px, 0.9fr);
+      align-items: center;
+      gap: 72px;
+      padding: 72px 0;
+    }
+
+    .eyebrow {
+      margin: 0 0 14px;
+      color: var(--accent-dark);
+      font-size: 14px;
+      font-weight: 700;
+      text-transform: uppercase;
+    }
+
+    h1 {
+      max-width: 780px;
+      margin: 0;
+      font-family: Georgia, "Times New Roman", serif;
+      font-size: 72px;
+      line-height: 1;
+      letter-spacing: 0;
+    }
+
+    .lead {
+      max-width: 700px;
+      margin: 28px 0 0;
+      color: var(--muted);
+      font-size: 20px;
+    }
+
+    .code-visual {
+      overflow: hidden;
+      border: 1px solid #343a35;
+      border-radius: 6px;
+      background: var(--code);
+      color: var(--code-ink);
+      box-shadow: 16px 16px 0 #d9ded8;
+    }
+
+    .code-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      min-height: 42px;
+      padding: 0 16px;
+      border-bottom: 1px solid #3d443e;
+      color: #b9c2bb;
+      font: 13px Consolas, "Courier New", monospace;
+    }
+
+    pre {
+      min-height: 240px;
+      margin: 0;
+      padding: 32px 24px;
+      overflow: auto;
+      font: 15px/1.75 Consolas, "Courier New", monospace;
+    }
+
+    .keyword {
+      color: #ff8b7c;
+    }
+
+    .macro {
+      color: #8ed0a8;
+    }
+
+    .string {
+      color: #f0d68a;
+    }
+
+    .features {
+      border-top: 1px solid var(--line);
+      padding: 72px 0 80px;
+    }
+
+    .features h2 {
+      margin: 0 0 36px;
+      font-size: 30px;
+      letter-spacing: 0;
+    }
+
+    .feature-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 36px;
+    }
+
+    .feature {
+      border-top: 3px solid var(--accent);
+      padding-top: 20px;
+    }
+
+    .feature h3 {
+      margin: 0 0 10px;
+      font-size: 18px;
+      letter-spacing: 0;
+    }
+
+    .feature p {
+      margin: 0;
+      color: var(--muted);
+    }
+
+    footer {
+      border-top: 1px solid var(--line);
+      padding: 28px 0 40px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    @media (max-width: 780px) {
+      .shell {
+        width: min(100% - 28px, 640px);
+      }
+
+      .masthead {
+        min-height: 64px;
+      }
+
+      .hero {
+        min-height: auto;
+        grid-template-columns: 1fr;
+        gap: 44px;
+        padding: 56px 0 64px;
+      }
+
+      h1 {
+        font-size: 48px;
+      }
+
+      .lead {
+        font-size: 18px;
+      }
+
+      .code-visual {
+        box-shadow: 8px 8px 0 #d9ded8;
+      }
+
+      .feature-grid {
+        grid-template-columns: 1fr;
+        gap: 28px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <header class="shell masthead">
+    <span class="brand">bevy.zergzerg.cn</span>
+    <span class="status">服务运行中</span>
+  </header>
+
+  <main>
+    <section class="shell hero" aria-labelledby="page-title">
+      <div>
+        <p class="eyebrow">Systems programming language</p>
+        <h1 id="page-title">Rust</h1>
+        <p class="lead">
+          Rust 是一门专注于性能、可靠性和生产力的系统编程语言。它在不依赖垃圾回收器的前提下提供内存安全保证，适合构建高性能服务、工具、嵌入式程序与游戏。
+        </p>
+      </div>
+
+      <div class="code-visual" aria-label="Rust 代码示例">
+        <div class="code-bar">
+          <span>main.rs</span>
+          <span>UTF-8</span>
+        </div>
+        <pre><code><span class="keyword">fn</span> main() {
+    <span class="keyword">let</span> language = <span class="string">"Rust"</span>;
+
+    <span class="macro">println!</span>(
+        <span class="string">"Hello from {language}!"</span>
+    );
+}</code></pre>
+      </div>
+    </section>
+
+    <section class="features" aria-labelledby="features-title">
+      <div class="shell">
+        <h2 id="features-title">为什么选择 Rust</h2>
+        <div class="feature-grid">
+          <article class="feature">
+            <h3>内存安全</h3>
+            <p>所有权与借用检查在编译阶段发现大量内存和并发问题，减少运行时故障。</p>
+          </article>
+          <article class="feature">
+            <h3>可预测的性能</h3>
+            <p>零成本抽象与精细的资源控制，让高级表达能力不必以额外运行时开销为代价。</p>
+          </article>
+          <article class="feature">
+            <h3>现代工具链</h3>
+            <p>Cargo、rustfmt 与 Clippy 提供一致的构建、依赖管理、格式化和静态检查体验。</p>
+          </article>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <div class="shell">
+      Rust 技术介绍页面 · <a href="https://www.rust-lang.org/zh-CN/" rel="noreferrer">访问 Rust 官方网站</a>
+    </div>
+  </footer>
+</body>
+</html>

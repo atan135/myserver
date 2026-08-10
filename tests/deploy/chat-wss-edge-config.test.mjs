@@ -76,7 +76,7 @@ test("production operations contract keeps chat ports private and reconnect isol
   const topology = await read("docs/后台与运维/生产拓扑与Room迁移设计.md");
   const operations = await read("docs/后台与运维/Docker部署/服务器Docker初始化与更新.md");
 
-  assert.match(topology, /`A` 记录必须指向现有 Caddy 入口服务器的公网 IPv4/);
+  assert.match(topology, /`A` 记录必须指向现有入口服务器的公网 IPv4/);
   assert.match(topology, /只有该服务器已配置可达的公网 IPv6[\s\S]*才发布 `AAAA`/);
   assert.match(topology, /带随机抖动的指数退避重连/);
   assert.match(topology, /不改动或重启 `game-proxy` 的 `4000\/UDP` KCP 链路/);

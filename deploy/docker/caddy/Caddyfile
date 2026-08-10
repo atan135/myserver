@@ -9,6 +9,29 @@
     }
 }
 
+{$CADDY_LANDING_HOST} {
+    encode zstd gzip
+    header {
+        -Server
+        Cache-Control "public, max-age=300"
+        Content-Security-Policy "default-src 'none'; style-src 'unsafe-inline'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+        Permissions-Policy "camera=(), geolocation=(), microphone=()"
+        Referrer-Policy no-referrer
+        X-Content-Type-Options nosniff
+        X-Frame-Options DENY
+    }
+
+    handle / {
+        root * /srv/landing
+        rewrite * /index.html
+        file_server
+    }
+
+    handle {
+        respond 404
+    }
+}
+
 {$CADDY_AUTH_HOST} {
     header {
         -Server

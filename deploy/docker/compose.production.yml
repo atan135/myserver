@@ -406,6 +406,7 @@ services:
     image: ${IMAGE_CADDY:?set IMAGE_CADDY from images.lock.json}
     restart: unless-stopped
     environment:
+      CADDY_LANDING_HOST: ${CADDY_LANDING_HOST:?set CADDY_LANDING_HOST}
       CADDY_AUTH_HOST: ${CADDY_AUTH_HOST:?set CADDY_AUTH_HOST}
       CADDY_ADMIN_HOST: ${CADDY_ADMIN_HOST:?set CADDY_ADMIN_HOST}
       CADDY_CHAT_HOST: ${CADDY_CHAT_HOST:?set CADDY_CHAT_HOST}

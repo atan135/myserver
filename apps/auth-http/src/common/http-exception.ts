@@ -26,6 +26,6 @@ export function serviceUnavailable(error = "SERVICE_UNAVAILABLE", message?: stri
   return new ApiHttpException(503, { ok: false, error, message, ...extra });
 }
 
-export function notFound(path: string): ApiHttpException {
-  return new ApiHttpException(404, { ok: false, error: "NOT_FOUND", path });
+export function notFound(): ApiHttpException {
+  return new ApiHttpException(404, { ok: false, error: "NOT_FOUND" });
 }

@@ -24,9 +24,11 @@
 
 | 入口 | 协议 | 生产职责 |
 |------|------|----------|
-| `auth-http` | HTTP/HTTPS | 登录、session、access token、game ticket、入口服务地址下发 |
-| `game-proxy` | KCP/TCP fallback 或后续网关协议 | 客户端游戏长连接入口、ticket 接入鉴权、路由到内部 `game-server` |
-| `chat.game.zergzerg.cn` | WSS over `443/TCP` | Caddy 终止 TLS 并把 WebSocket 转发到 internal `chat-server:9011`；不解析聊天包或 Protobuf |
+| `bevy.zergzerg.cn` | HTTPS over `443/TCP` | Caddy 直接提供 Rust 技术介绍静态页，不反代业务服务 |
+| `bevy.zergzerg.cn` | KCP over `4000/UDP` | `game-proxy` 客户端游戏长连接入口、ticket 接入鉴权、路由到内部 `game-server` |
+| `api.bevy.zergzerg.cn` | HTTPS over `443/TCP` | Caddy 转发登录、session、access token、game ticket，并对白名单玩家邮件路径转发 `mail-service` |
+| `admin.bevy.zergzerg.cn` | HTTPS over `443/TCP` | Caddy 提供管理后台静态文件并转发 `admin-api`；继续受后台鉴权和 IP allowlist 约束 |
+| `chat.bevy.zergzerg.cn` | WSS over `443/TCP` | Caddy 终止 TLS 并把 WebSocket 转发到 internal `chat-server:9011`；不解析聊天包或 Protobuf |
 
 其它服务默认内网化：
 
@@ -44,9 +46,11 @@
 
 仅本地开发或手工调试可以临时直连 `game-server:7000`、`chat-server:9001`、`match-service:9002`、`announce-service:9004`、`mail-service:9003` 来定位协议或服务问题。测试、预发和线上的正式客户端必须使用部署提供的公网入口；内部消费者才通过 registry endpoint 或 instance id 解析目标。固定内部 host/port 不进入正式客户端依赖，公网聊天也不得绕过 Caddy 直连 `9001/9011`。
 
-### 2.1 公网聊天 DNS、边缘和连接生命周期
+### 2.1 公网域名迁移与聊天连接生命周期
 
-- `chat.game.zergzerg.cn` 的 `A` 记录必须指向现有 Caddy 入口服务器的公网 IPv4。只有该服务器已配置可达的公网 IPv6、云安全组和主机防火墙同时允许 `80/443 TCP`、并确认 Caddy 监听 IPv6 时才发布 `AAAA`；不得发布不可达或仅内网可达的 IPv6。初次切换可使用 `300` 秒 TTL，稳定后按运维策略提高。解析目标、IPv4/IPv6 可达性和证书签发必须在实际环境查询确认，仓库静态配置不能替代该验证。
+- `bevy.zergzerg.cn`、`api.bevy.zergzerg.cn`、`admin.bevy.zergzerg.cn` 和 `chat.bevy.zergzerg.cn` 的 `A` 记录必须指向现有入口服务器的公网 IPv4。只有该服务器已配置可达的公网 IPv6、云安全组和主机防火墙同时允许相应协议、并确认 Caddy 和 game-proxy 的 IPv6 链路可达时才发布 `AAAA`；不得发布不可达或仅内网可达的 IPv6。初次切换可使用 `300` 秒 TTL，稳定后按运维策略提高。解析目标、IPv4/IPv6 可达性和证书签发必须在实际环境查询确认，仓库静态配置不能替代该验证。
+- `CADDY_LANDING_HOST`、`CADDY_AUTH_HOST`、`CADDY_ADMIN_HOST`、`CADDY_CHAT_HOST` 与 `GAME_PROXY_ADVERTISED_HOST` 只配置规范新域名；本次切换不保留旧域名 Caddy 兼容入口，也不继续向客户端下发旧地址。
+- `mail.bevy.zergzerg.cn` 当前仅保留 DNS，不加入 Caddy 站点，也不进入客户端 descriptor。玩家邮件继续使用 `https://api.bevy.zergzerg.cn/api/v1/mails`，后续如需拆域名必须独立评审 Caddy 白名单、客户端严格校验、CORS/TLS 和旧版本兼容。
 - `CADDY_CHAT_HOST` 独立站点只接受 `GET /` 的合法 WebSocket Upgrade。其它 HTTP 方法、普通 HTTP、错误路径或缺少 Upgrade 的请求固定返回 `426`，不得进入 `chat-server:9011`。
 - Caddy 直接从公网接入时使用直连 peer 生成 `X-Forwarded-For`，并覆盖 `X-Request-ID`、设置 `X-Real-IP` 后才转发。`chat-server` 只在 TCP peer 属于生产 internal 子网 `172.30.0.0/24` 时解析代理头，不信任公网客户端自报地址。
 - Caddy 握手入口使用 `5s` header 读取超时、`16KB` header 上限和 `2m` HTTP keep-alive 空闲超时；到上游使用 `3s` 建连、`5s` 响应头超时。升级后的聊天连接仍由 `chat-server` 的 `HEARTBEAT_TIMEOUT_SECS=30` 限制应用层空闲时间。

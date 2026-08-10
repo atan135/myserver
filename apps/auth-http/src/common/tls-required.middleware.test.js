@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { HttpException } from "@nestjs/common";
+import { HttpException, NotFoundException } from "@nestjs/common";
 
 import { HttpExceptionFilter } from "./http-exception.filter.js";
 import { TlsRequiredMiddleware } from "./tls-required.middleware.js";
@@ -97,4 +97,27 @@ test("auth HTTP exception filter writes JSON through a Fastify raw response", ()
   assert.equal(response.statusCode, 426);
   assert.equal(response.headers["content-type"], "application/json");
   assert.deepEqual(JSON.parse(response.payload), { ok: false, error: "AUTH_TLS_REQUIRED" });
+});
+
+test("auth HTTP exception filter does not echo an unknown request URL", () => {
+  const response = {
+    status(statusCode) {
+      this.statusCode = statusCode;
+      return this;
+    },
+    send(payload) {
+      this.payload = payload;
+    }
+  };
+  const host = {
+    switchToHttp: () => ({
+      getRequest: () => ({ url: "/login?redirect=/" }),
+      getResponse: () => response
+    })
+  };
+
+  new HttpExceptionFilter().catch(new NotFoundException(), host);
+
+  assert.equal(response.statusCode, 404);
+  assert.deepEqual(response.payload, { ok: false, error: "NOT_FOUND" });
 });

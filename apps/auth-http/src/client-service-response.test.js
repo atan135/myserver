@@ -19,7 +19,7 @@ const CLIENT_SERVICES = {
     protocol: "wss"
   },
   mail: {
-    host: "api.game.zergzerg.cn",
+    host: "api.bevy.zergzerg.cn",
     port: 443,
     protocol: "https"
   },

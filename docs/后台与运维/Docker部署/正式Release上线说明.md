@@ -10,7 +10,7 @@
 
 - `/data` 为至少 `50 GB` 的 SSD 专用数据盘；Docker data-root、独立 containerd root、数据库、镜像缓存和日志不得落入系统根分区，备份应使用异机或对象存储并持续监控剩余空间。
 - ACR 只读拉取登录可用；Docker daemon 数据根为 `/data/myserver/docker`，独立 `containerd.service` 的 root 为 `/data/myserver/containerd`。
-- DNS 已将 API、后台和游戏公网地址指向该服务器；Caddy 所需 `80/TCP`、`443/TCP` 已在云安全组和主机防火墙受控放行。游戏入口 `4000/UDP` 的放行只在 postflight 通过后执行。
+- DNS 已将 `bevy.zergzerg.cn`、API、后台和聊天公网地址指向该服务器。Caddy 所需 `80/TCP`、`443/TCP` 已在云安全组和主机防火墙受控放行。游戏入口 `4000/UDP` 的放行只在 postflight 通过后执行。
 - 已审阅本次 migration；不可逆 migration 已具备数据库文档要求的备份 artifact ID 与 checksum。
 
 ## 2. 正式 release 的组成
@@ -165,6 +165,6 @@ dependency-aware Rust 服务的 production 窗口固定为：启动收敛 `120s`
 - postflight 的五库 history、drift、关键表均成功，统一 readiness probe 覆盖全部 required 服务并连续通过 TTL 加稳定窗口。
 - Redis registry heartbeat 已跨过一个完整 TTL 观察窗口，且没有 legacy direct fallback。
 - 实际运行镜像 digest 与 `images.lock.json` 完全一致。
-- 域名证书已由 Caddy 成功获取，且 API、后台和游戏入口的端到端检查通过。
+- 新域名证书已由 Caddy 成功获取，且 Rust 静态页、API、后台、聊天 WSS 和游戏 KCP 入口的端到端检查通过。
 
 发布记录至少保存 release ID、Git revision、`images.lock.json`、bundle `SHA256SUMS`、迁移 JSON 输出、备份证据标识、实际开放端口和发布操作者。数据库 migration 的回滚边界以[数据库部署准入说明](../../数据库/数据库部署准入说明.md)为准；不可逆或 contract migration 不允许自动回滚 schema。

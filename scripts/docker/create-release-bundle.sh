@@ -5,6 +5,7 @@ usage() {
   cat <<'EOF'
 Usage:
   scripts/docker/create-release-bundle.sh --output <directory> \
+    --caddy-landing-host <domain> \
     --caddy-auth-host <domain> --caddy-admin-host <domain> --caddy-chat-host <domain> --caddy-email <email> \
     --game-proxy-advertised-host <host> [--release-root <server-release-directory>]
 
@@ -21,6 +22,7 @@ release_root=""
 caddy_auth_host=""
 caddy_admin_host=""
 caddy_chat_host=""
+caddy_landing_host=""
 caddy_email=""
 game_proxy_advertised_host=""
 
@@ -32,6 +34,10 @@ while [ "$#" -gt 0 ]; do
       ;;
     --release-root)
       release_root="${2:?--release-root requires a value}"
+      shift 2
+      ;;
+    --caddy-landing-host)
+      caddy_landing_host="${2:?--caddy-landing-host requires a value}"
       shift 2
       ;;
     --caddy-auth-host)
@@ -66,9 +72,9 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
-for value in "$output" "$caddy_auth_host" "$caddy_admin_host" "$caddy_chat_host" "$caddy_email" "$game_proxy_advertised_host"; do
+for value in "$output" "$caddy_landing_host" "$caddy_auth_host" "$caddy_admin_host" "$caddy_chat_host" "$caddy_email" "$game_proxy_advertised_host"; do
   if [ -z "$value" ]; then
-    echo "--output, all Caddy domains, Caddy email and game-proxy advertised host are required." >&2
+    echo "--output, landing/auth/admin/chat Caddy domains, Caddy email and game-proxy advertised host are required." >&2
     exit 64
   fi
 done
@@ -130,6 +136,7 @@ node scripts/docker/render-release-env.mjs \
   --template deploy/docker/compose.production.env.example \
   --output "$output/compose.production.env" \
   --release-root "$release_root" \
+  --caddy-landing-host "$caddy_landing_host" \
   --caddy-auth-host "$caddy_auth_host" \
   --caddy-admin-host "$caddy_admin_host" \
   --caddy-chat-host "$caddy_chat_host" \

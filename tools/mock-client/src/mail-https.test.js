@@ -85,27 +85,27 @@ function assertPlayerHeaders(call) {
 }
 
 test("services.mail creates the public HTTPS mail base URL and takes precedence", () => {
-  const service = { host: "api.game.zergzerg.cn", port: 443, protocol: "https" };
-  assert.equal(httpBaseUrlFromDescriptor(service), "https://api.game.zergzerg.cn");
+  const service = { host: "api.bevy.zergzerg.cn", port: 443, protocol: "https" };
+  assert.equal(httpBaseUrlFromDescriptor(service), "https://api.bevy.zergzerg.cn");
   assert.equal(
     resolvePlayerMailBaseUrl(
       { mailBaseUrl: "http://127.0.0.1:9003", discoveredMailBaseUrl: "" },
       { services: { mail: service } }
     ),
-    "https://api.game.zergzerg.cn"
+    "https://api.bevy.zergzerg.cn"
   );
 
   const options = parseArgs(["--mail-base-url", "http://127.0.0.1:9003"]);
   applyDiscoveredServices(options, { services: { mail: service } });
   assert.equal(options.mailBaseUrl, "http://127.0.0.1:9003");
   assert.equal(options.mailBaseUrlOverride, "http://127.0.0.1:9003");
-  assert.equal(options.discoveredMailBaseUrl, "https://api.game.zergzerg.cn");
+  assert.equal(options.discoveredMailBaseUrl, "https://api.bevy.zergzerg.cn");
   assert.equal(options.serviceToken, "", "player mail scenarios do not read MAIL_SERVICE_TOKEN from the environment");
 
   const defaultOptions = parseArgs([]);
   applyDiscoveredServices(defaultOptions, { services: { mail: service } });
-  assert.equal(defaultOptions.mailBaseUrl, "https://api.game.zergzerg.cn");
-  assert.equal(defaultOptions.discoveredMailBaseUrl, "https://api.game.zergzerg.cn");
+  assert.equal(defaultOptions.mailBaseUrl, "https://api.bevy.zergzerg.cn");
+  assert.equal(defaultOptions.discoveredMailBaseUrl, "https://api.bevy.zergzerg.cn");
 });
 
 test("mail list uses only X-Game-Ticket and allowed list query fields", async () => {
@@ -199,7 +199,7 @@ test("system mail send requires explicit internal URL and service token", async 
       /explicit --service-token/
     );
     await assert.rejects(
-      runMailSend(playerOptions({ mailBaseUrlOverride: "https://api.game.zergzerg.cn", serviceToken: "internal-service-token" })),
+      runMailSend(playerOptions({ mailBaseUrlOverride: "https://api.bevy.zergzerg.cn", serviceToken: "internal-service-token" })),
       /only allow an HTTP internal --mail-base-url/
     );
   });

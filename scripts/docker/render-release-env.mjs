@@ -9,7 +9,18 @@ for (let index = 2; index < process.argv.length; index += 2) {
   options.set(key.slice(2), value);
 }
 
-for (const key of ["lock", "template", "output", "release-root", "caddy-auth-host", "caddy-admin-host", "caddy-chat-host", "caddy-email", "game-proxy-advertised-host"]) {
+for (const key of [
+  "lock",
+  "template",
+  "output",
+  "release-root",
+  "caddy-landing-host",
+  "caddy-auth-host",
+  "caddy-admin-host",
+  "caddy-chat-host",
+  "caddy-email",
+  "game-proxy-advertised-host"
+]) {
   if (!options.has(key)) throw new Error(`missing --${key}`);
 }
 
@@ -47,6 +58,7 @@ const values = new Map([
   ["NATS_IMAGE", lock.infrastructure.nats?.reference],
   ["GAME_CSV_DIR", `${envValue("release-root")}/apps/game-server/csv`],
   ["GAME_SCENE_DIR", `${envValue("release-root")}/apps/game-server/scene`],
+  ["CADDY_LANDING_HOST", envValue("caddy-landing-host")],
   ["CADDY_AUTH_HOST", envValue("caddy-auth-host")],
   ["CADDY_ADMIN_HOST", envValue("caddy-admin-host")],
   ["CADDY_CHAT_HOST", envValue("caddy-chat-host")],

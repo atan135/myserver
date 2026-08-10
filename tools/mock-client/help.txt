@@ -306,7 +306,7 @@ node tools/mock-client/src/index.js --scenario create-matched-room-and-join --ht
 # 传输说明：
 # - tcp（默认）：本地 9001/TCP，保持现有聊天场景行为。
 # - ws：本地可选 WebSocket listener，例如 ws://127.0.0.1:9011/；需显式开启 CHAT_WS_ENABLED。
-# - wss：正式入口 wss://chat.game.zergzerg.cn/，优先从登录响应 services.chat 读取。
+# - wss：正式入口 wss://chat.bevy.zergzerg.cn/，优先从登录响应 services.chat 读取。
 # 每个 WebSocket binary message 必须是一个完整的 14 字节聊天协议包；不支持文本帧或包拼接。
 
 # 13. 私聊消息 (CHAT_PRIVATE)
@@ -315,8 +315,8 @@ node tools/mock-client/src/index.js --scenario chat-private --http-base-url http
 # 本地 WebSocket 私聊（9011 是可选 listener，不是公网端口）
 node tools/mock-client/src/index.js --scenario chat-private --http-base-url http://127.0.0.1:3000 --chat-transport ws --chat-ws-url ws://127.0.0.1:9011/ --login-name test001 --password Passw0rd! --target-id <plr_...> --content "Hello over WS!"
 
-# 正式 WSS 私聊（services.chat 自动提供 wss://chat.game.zergzerg.cn/）
-node tools/mock-client/src/index.js --scenario chat-private --http-base-url https://api.game.zergzerg.cn --chat-transport wss --login-name test001 --password Passw0rd! --target-id <plr_...> --content "Hello over WSS!"
+# 正式 WSS 私聊（services.chat 自动提供 wss://chat.bevy.zergzerg.cn/）
+node tools/mock-client/src/index.js --scenario chat-private --http-base-url https://api.bevy.zergzerg.cn --chat-transport wss --login-name test001 --password Passw0rd! --target-id <plr_...> --content "Hello over WSS!"
 
 # 14. 群聊消息 (CHAT_GROUP)
 node tools/mock-client/src/index.js --scenario chat-group --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --chat-port 9001 --login-name test001 --password Passw0rd! --group-id <grp_...> --content "Hello group!"

@@ -12,6 +12,7 @@ Required options (or matching environment variables):
   --release-id <id>                 MYSERVER_RELEASE_ID
   --host <host>                     MYSERVER_SSH_HOST
   --identity <native-linux-key>     MYSERVER_SSH_IDENTITY
+  --caddy-landing-host <domain>     MYSERVER_CADDY_LANDING_HOST
   --caddy-auth-host <domain>        MYSERVER_CADDY_AUTH_HOST
   --caddy-admin-host <domain>       MYSERVER_CADDY_ADMIN_HOST
   --caddy-chat-host <domain>        MYSERVER_CADDY_CHAT_HOST
@@ -30,6 +31,7 @@ ssh_host="${MYSERVER_SSH_HOST:-}"
 ssh_user="${MYSERVER_SSH_USER:-gameops}"
 ssh_port="${MYSERVER_SSH_PORT:-22}"
 ssh_identity="${MYSERVER_SSH_IDENTITY:-}"
+caddy_landing_host="${MYSERVER_CADDY_LANDING_HOST:-}"
 caddy_auth_host="${MYSERVER_CADDY_AUTH_HOST:-}"
 caddy_admin_host="${MYSERVER_CADDY_ADMIN_HOST:-}"
 caddy_chat_host="${MYSERVER_CADDY_CHAT_HOST:-}"
@@ -43,6 +45,7 @@ while [[ $# -gt 0 ]]; do
     --user) ssh_user="${2:?--user requires a value}"; shift 2 ;;
     --port) ssh_port="${2:?--port requires a value}"; shift 2 ;;
     --identity) ssh_identity="${2:?--identity requires a value}"; shift 2 ;;
+    --caddy-landing-host) caddy_landing_host="${2:?--caddy-landing-host requires a value}"; shift 2 ;;
     --caddy-auth-host) caddy_auth_host="${2:?--caddy-auth-host requires a value}"; shift 2 ;;
     --caddy-admin-host) caddy_admin_host="${2:?--caddy-admin-host requires a value}"; shift 2 ;;
     --caddy-chat-host) caddy_chat_host="${2:?--caddy-chat-host requires a value}"; shift 2 ;;
@@ -53,7 +56,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-for value in "$release_id" "$ssh_host" "$ssh_identity" "$caddy_auth_host" "$caddy_admin_host" "$caddy_chat_host" "$caddy_email" "$game_proxy_host"; do
+for value in "$release_id" "$ssh_host" "$ssh_identity" "$caddy_landing_host" "$caddy_auth_host" "$caddy_admin_host" "$caddy_chat_host" "$caddy_email" "$game_proxy_host"; do
   [[ -n "$value" ]] || { usage >&2; exit 64; }
 done
 case "$root" in /mnt/*) echo "Run from a WSL-native checkout: $root" >&2; exit 65 ;; esac
@@ -110,6 +113,7 @@ git worktree add --detach "$worktree" "$lock_commit" >/dev/null
 "$worktree/scripts/docker/create-release-bundle.sh" \
   --output "$bundle" \
   --release-root "/data/myserver/release/$release_id" \
+  --caddy-landing-host "$caddy_landing_host" \
   --caddy-auth-host "$caddy_auth_host" \
   --caddy-admin-host "$caddy_admin_host" \
   --caddy-chat-host "$caddy_chat_host" \

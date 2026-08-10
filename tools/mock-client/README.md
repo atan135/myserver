@@ -2,7 +2,7 @@
 
 ## 概述
 
-Mock Client 是一个用于测试 MyServer 游戏后端框架的联调工具。默认模拟玩家客户端只接触 `auth-http` 和 `game-proxy` 玩家入口；聊天场景默认保持本地 `9001/TCP` 内部联调方式，也可显式使用本地 `ws://127.0.0.1:9011/` 或从登录响应 `services.chat` 读取正式 `wss://chat.game.zergzerg.cn/`。玩家邮件场景从登录、选角或补签票响应的 `services.mail` 读取正式 HTTPS 地址；`mail-send` 和 `mail-send-and-notify` 是 service-token-only 的内部发信场景，必须显式传入本地内部地址。公告场景仍是内部联调路径。
+Mock Client 是一个用于测试 MyServer 游戏后端框架的联调工具。默认模拟玩家客户端只接触 `auth-http` 和 `game-proxy` 玩家入口；聊天场景默认保持本地 `9001/TCP` 内部联调方式，也可显式使用本地 `ws://127.0.0.1:9011/` 或从登录响应 `services.chat` 读取正式 `wss://chat.bevy.zergzerg.cn/`。玩家邮件场景从登录、选角或补签票响应的 `services.mail` 读取正式 HTTPS 地址；`mail-send` 和 `mail-send-and-notify` 是 service-token-only 的内部发信场景，必须显式传入本地内部地址。公告场景仍是内部联调路径。
 
 ## 项目结构
 
@@ -89,7 +89,7 @@ Protobuf 风格的编解码工具：
 ### scenarios/mail.js
 邮件辅助场景：
 - 玩家列表、详情、已读和领取使用当前 character-bound game ticket 的 `X-Game-Ticket` header，身份不从 query 或 body 传入
-- 优先从 `services.mail` 读取 `https://api.game.zergzerg.cn/api/v1/mails`；只有 descriptor 缺失或 `--no-service-discovery` 时，玩家场景才使用显式 `--mail-base-url` 本地调试地址
+- 优先从 `services.mail` 读取 `https://api.bevy.zergzerg.cn/api/v1/mails`；只有 descriptor 缺失或 `--no-service-discovery` 时，玩家场景才使用显式 `--mail-base-url` 本地调试地址
 - 系统发信仅允许 `mail-send` / `mail-send-and-notify` 携带显式 `--service-token` 直连内部地址，不能经 Caddy 玩家入口
 - 领取收到 `202` 结果未知时只查询同一邮件状态，不重发 claim
 - 支持联调 `chat-server` 的 `MAIL_NOTIFY_PUSH`
@@ -494,12 +494,12 @@ node tools/mock-client/src/index.js --scenario chat-private \
   --chat-transport ws --chat-ws-url ws://127.0.0.1:9011/ \
   --target-id <plr_...> --content "Hello over WS!"
 
-# 聊天正式 WSS 测试（auth 的 services.chat 下发 wss://chat.game.zergzerg.cn/）
+# 聊天正式 WSS 测试（auth 的 services.chat 下发 wss://chat.bevy.zergzerg.cn/）
 node tools/mock-client/src/index.js --scenario chat-private \
-  --http-base-url https://api.game.zergzerg.cn \
+  --http-base-url https://api.bevy.zergzerg.cn \
   --chat-transport wss --target-id <plr_...> --content "Hello over WSS!"
 
-# 系统发信（9003 仅为本地内部联调地址，不能使用 api.game.zergzerg.cn）
+# 系统发信（9003 仅为本地内部联调地址，不能使用 api.bevy.zergzerg.cn）
 node tools/mock-client/src/index.js --scenario mail-send \
   --http-base-url http://127.0.0.1:3000 \
   --mail-base-url http://127.0.0.1:9003 \
@@ -507,9 +507,9 @@ node tools/mock-client/src/index.js --scenario mail-send \
   --login-name test001 --password Passw0rd! \
   --mail-title "系统奖励" --mail-content "请查收附件"
 
-# 正式玩家读取（services.mail 自动提供 https://api.game.zergzerg.cn）
+# 正式玩家读取（services.mail 自动提供 https://api.bevy.zergzerg.cn）
 node tools/mock-client/src/index.js --scenario mail-list \
-  --http-base-url https://api.game.zergzerg.cn \
+  --http-base-url https://api.bevy.zergzerg.cn \
   --login-name test001 --password Passw0rd! --mail-status unread --limit 10
 
 # 邮件通知联调（9003/9001 是本地内部联调地址，系统发信需要独立 service token）
@@ -664,7 +664,7 @@ node tools/mock-client/src/index.js --scenario mail-send \
 
 # 正式玩家读取：从 auth 响应 services.mail 取得 Caddy HTTPS 地址，自动附加当前 game ticket
 node tools/mock-client/src/index.js --scenario mail-list \
-  --http-base-url https://api.game.zergzerg.cn \
+  --http-base-url https://api.bevy.zergzerg.cn \
   --login-name test001 --password Passw0rd! \
   --mail-status unread --limit 10
 

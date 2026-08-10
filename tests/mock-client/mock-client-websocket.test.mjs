@@ -91,13 +91,13 @@ test("mock-client keeps TCP chat as the default transport", () => {
 });
 
 test("WSS prefers auth services.chat and explicit WebSocket URL wins", () => {
-  const descriptor = { host: "chat.game.zergzerg.cn", port: 443, protocol: "wss" };
+  const descriptor = { host: "chat.bevy.zergzerg.cn", port: 443, protocol: "wss" };
   const options = parseArgs(["--chat-transport", "wss"]);
   const login = { services: { chat: descriptor } };
 
   applyDiscoveredServices(options, login);
-  assert.equal(options.discoveredChatWsUrl, "wss://chat.game.zergzerg.cn/");
-  assert.equal(resolveChatWebSocketUrl(options, login), "wss://chat.game.zergzerg.cn/");
+  assert.equal(options.discoveredChatWsUrl, "wss://chat.bevy.zergzerg.cn/");
+  assert.equal(resolveChatWebSocketUrl(options, login), "wss://chat.bevy.zergzerg.cn/");
 
   options.chatWsUrl = "wss://fixture.example.test/";
   assert.equal(resolveChatWebSocketUrl(options, login), "wss://fixture.example.test/");

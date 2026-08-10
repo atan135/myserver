@@ -408,7 +408,7 @@ test("ServiceDiscovery keeps explicit public chat and mail descriptors over inte
         protocol: "wss"
       },
       publicMailDescriptor: {
-        host: "api.game.zergzerg.cn",
+        host: "api.bevy.zergzerg.cn",
         port: 443,
         protocol: "https"
       }
@@ -423,7 +423,7 @@ test("ServiceDiscovery keeps explicit public chat and mail descriptors over inte
     protocol: "wss"
   });
   assert.deepEqual(services.mail, {
-    host: "api.game.zergzerg.cn",
+    host: "api.bevy.zergzerg.cn",
     port: 443,
     protocol: "https"
   });
@@ -436,7 +436,7 @@ test("ServiceDiscovery returns a configured public mail descriptor without regis
     createConfig({
       registryDiscoveryEnabled: false,
       publicMailDescriptor: {
-        host: "api.game.zergzerg.cn",
+        host: "api.bevy.zergzerg.cn",
         port: 443,
         protocol: "https"
       }
@@ -446,7 +446,7 @@ test("ServiceDiscovery returns a configured public mail descriptor without regis
   const services = await discovery.discoverClientServices();
 
   assert.deepEqual(services.mail, {
-    host: "api.game.zergzerg.cn",
+    host: "api.bevy.zergzerg.cn",
     port: 443,
     protocol: "https"
   });
