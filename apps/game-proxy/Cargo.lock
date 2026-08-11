@@ -485,6 +485,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "game-protocol"
+version = "0.1.0"
+dependencies = [
+ "prost",
+ "tokio",
+ "tokio_kcp",
+]
+
+[[package]]
 name = "game-proxy"
 version = "0.1.0"
 dependencies = [
@@ -495,6 +504,7 @@ dependencies = [
  "dotenvy",
  "ed25519-dalek",
  "futures-util",
+ "game-protocol",
  "hmac",
  "interprocess",
  "nats-client",

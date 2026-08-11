@@ -1,7 +1,11 @@
 use std::io;
 use std::net::SocketAddr;
 
-use tokio_kcp::{KcpConfig, KcpListener, KcpNoDelayConfig, KcpStream};
+use game_protocol::player_kcp_config;
+use tokio_kcp::{KcpListener, KcpStream};
+
+#[cfg(all(test, windows))]
+use tokio_kcp::KcpConfig;
 
 #[cfg(windows)]
 use std::os::windows::io::AsRawSocket;
@@ -14,10 +18,7 @@ pub struct KcpFrontend {
 
 impl KcpFrontend {
     pub async fn bind(addr: &str) -> io::Result<Self> {
-        let mut config = KcpConfig::default();
-        config.nodelay = KcpNoDelayConfig::fastest();
-        config.stream = true;
-        let listener = KcpListener::bind(config, addr)
+        let listener = KcpListener::bind(player_kcp_config(), addr)
             .await
             .map_err(|error| io::Error::other(error.to_string()))?;
         disable_windows_udp_connreset(&listener)?;

@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "packetRoutes": {
-    "canonical": "apps/game-server/src/protocol/message_type.rs",
+    "canonical": "packages/game-protocol/src/lib.rs",
     "dispatches": [
       {
         "name": "player",
@@ -101,6 +101,7 @@
       "AUTHORITY_SUPERSEDED",
       "AUTH_CONTEXT_INCOMPLETE",
       "BODY_TOO_LARGE",
+      "BUSINESS_REJECTED",
       "CAPACITY_BLOCKED",
       "CHARACTER_ID_REQUIRED",
       "COMBAT_CHARACTER_ALREADY_SPAWNED",
@@ -200,6 +201,7 @@
       "ROOM_ROUTE_CHECKSUM_MISMATCH",
       "ROOM_ROUTE_VERSION_MISMATCH",
       "ROOM_SCENE_UNAVAILABLE",
+      "ROOM_REJECTED",
       "ROOM_TRANSFER_CHECKSUM_MISMATCH",
       "ROOM_TRANSFER_EPOCH_MISMATCH",
       "ROOM_TRANSFER_FROZEN",

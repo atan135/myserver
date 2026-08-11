@@ -120,9 +120,21 @@ function toSnakeCase(name) {
 }
 
 function parseRustMessageTypeEnum(source) {
+  const macroMatch = /message_types!\s*\{/.exec(source);
+  if (macroMatch) {
+    const openingIndex = macroMatch.index + macroMatch[0].lastIndexOf("{");
+    const body = findBalancedBlock(source, openingIndex);
+    const entries = [];
+    const pattern = /\b([A-Za-z][A-Za-z0-9_]*)\s*=\s*(\d+)\s*,/g;
+    for (const match of body.matchAll(pattern)) {
+      entries.push({ id: Number(match[2]), name: match[1] });
+    }
+    return entries;
+  }
+
   const enumMatch = /pub\s+enum\s+MessageType\s*\{/.exec(source);
   if (!enumMatch) {
-    throw new Error("canonical MessageType enum not found");
+    throw new Error("canonical MessageType enum or message_types! mapping not found");
   }
   const openingIndex = enumMatch.index + enumMatch[0].lastIndexOf("{");
   const body = findBalancedBlock(source, openingIndex);
@@ -135,6 +147,9 @@ function parseRustMessageTypeEnum(source) {
 }
 
 function parseRustFromU16(source) {
+  if (/\$\(\$value\s*=>\s*Some\(Self::\$name\),\)\+/.test(source)) {
+    return parseRustMessageTypeEnum(source);
+  }
   const methodMatch = /pub\s+fn\s+from_u16\s*\([^)]*\)\s*->\s*Option<Self>\s*\{/.exec(source);
   if (!methodMatch) {
     throw new Error("MessageType::from_u16 not found");
@@ -787,7 +802,6 @@ export function analyzeErrorCodes({ protoSources, implementationSources, config 
 
 function collectProducerSources(root = rootDir) {
   return listFiles("apps/game-server/src", ".rs", root)
-    .filter((file) => file !== "apps/game-server/src/protocol/message_type.rs")
     .map((file) => readRepoFile(file, root));
 }
 
@@ -795,7 +809,8 @@ function collectImplementationSources(root = rootDir) {
   const files = [
     ...listFiles("apps/game-server/src", ".rs", root),
     ...listFiles("apps/game-proxy/src", ".rs", root),
-    ...listFiles("apps/match-service/src", ".rs", root)
+    ...listFiles("apps/match-service/src", ".rs", root),
+    ...listFiles("packages/game-protocol/src", ".rs", root)
   ];
   return Object.fromEntries(files.map((file) => [file, readRepoFile(file, root)]));
 }

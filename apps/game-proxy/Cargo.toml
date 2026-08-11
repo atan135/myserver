@@ -29,6 +29,7 @@ tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 async-nats = { version = "0.48.0", default-features = false }
 nats-client = { path = "../../packages/nats-client" }
+game-protocol = { path = "../../packages/game-protocol" }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Networking_WinSock", "Win32_System_IO"] }

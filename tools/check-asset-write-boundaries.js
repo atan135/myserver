@@ -23,7 +23,7 @@ function rejectMatch(source, pattern, description) {
 }
 
 const playerDispatch = read("apps/game-server/src/server.rs");
-const messageTypes = read("apps/game-server/src/protocol/message_type.rs");
+const messageTypes = read("packages/game-protocol/src/lib.rs");
 const gameProto = read("packages/proto/game.proto");
 const inventoryService = read("apps/game-server/src/core/service/inventory_service.rs");
 const playerManager = read("apps/game-server/src/core/player/player_manager.rs");

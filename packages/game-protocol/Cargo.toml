@@ -1,0 +1,9 @@
+[package]
+name = "game-protocol"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+prost = "0.13"
+tokio = { version = "=1.50.0", features = ["io-util"] }
+tokio_kcp = "0.9.8"

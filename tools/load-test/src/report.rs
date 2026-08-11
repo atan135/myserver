@@ -1,0 +1,382 @@
+use std::collections::BTreeMap;
+use std::fs::{self, File};
+use std::io::Write;
+use std::path::{Path, PathBuf};
+
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
+use sha2::{Digest, Sha256};
+
+use crate::config::{HardBudget, LoadTestConfig};
+use crate::metrics::MetricsSnapshot;
+use crate::preflight::STAGE_ONE_ACCOUNT_BATCH;
+use crate::resource::GeneratorResources;
+
+pub const MAX_ERROR_SAMPLES: usize = 100;
+pub const MAX_ERROR_SAMPLE_BYTES: usize = 2 * 1024;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ErrorSample {
+    pub category: String,
+    pub message: String,
+    pub context: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ErrorBuffer {
+    samples: Vec<ErrorSample>,
+}
+impl ErrorBuffer {
+    pub fn push(
+        &mut self,
+        category: impl Into<String>,
+        message: impl AsRef<str>,
+        context: BTreeMap<String, String>,
+    ) {
+        if self.samples.len() >= MAX_ERROR_SAMPLES {
+            return;
+        }
+        let mut sample = ErrorSample {
+            category: redact_text(&category.into()),
+            message: truncate(redact_text(message.as_ref()), MAX_ERROR_SAMPLE_BYTES),
+            context: BTreeMap::new(),
+        };
+        for (key, value) in context {
+            let redacted_key = redact_text(&key);
+            let redacted_value = if is_sensitive_key(&key) {
+                "[REDACTED]".to_string()
+            } else {
+                redact_text(&value)
+            };
+            sample.context.insert(
+                redacted_key,
+                truncate(redacted_value, MAX_ERROR_SAMPLE_BYTES),
+            );
+        }
+        self.samples.push(sample);
+    }
+    pub fn samples(&self) -> &[ErrorSample] {
+        &self.samples
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ReportInput<'a> {
+    pub run_id: &'a str,
+    pub config: &'a LoadTestConfig,
+    pub effective_budget: &'a HardBudget,
+    pub status: &'a str,
+    pub abort_reason: Option<&'a str>,
+    pub shutdown_phase: Option<&'a str>,
+    pub deadline_unix_ms: u64,
+    pub graceful_shutdown_ms: u64,
+    pub started_unix_ms: u64,
+    pub ended_unix_ms: u64,
+    pub metrics: MetricsSnapshot,
+    pub resources: GeneratorResources,
+    pub errors: &'a ErrorBuffer,
+}
+
+#[derive(Debug, Serialize)]
+struct RunJson<'a> {
+    schema_version: u32,
+    run_id: &'a str,
+    status: &'a str,
+    abort_reason: Option<&'a str>,
+    shutdown_phase: Option<&'a str>,
+    environment: &'a str,
+    targets: Vec<String>,
+    scenario_hash: String,
+    tool_git_commit: &'static str,
+    account_batch: &'static str,
+    started_unix_ms: u64,
+    ended_unix_ms: u64,
+    deadline_unix_ms: u64,
+    graceful_shutdown_ms: u64,
+    budget: &'a HardBudget,
+    generator_resources: GeneratorResources,
+}
+
+pub fn write_report(root: &Path, input: ReportInput<'_>) -> std::io::Result<PathBuf> {
+    let report_dir = root.join(input.run_id);
+    fs::create_dir_all(&report_dir)?;
+    let targets = input
+        .config
+        .parsed_targets()
+        .map_err(std::io::Error::other)?
+        .iter()
+        .map(|target| target.safe_summary())
+        .collect();
+    let scenario_json = serde_json::to_vec(&input.config.scenario).expect("scenario serializes");
+    let run = RunJson {
+        schema_version: crate::SCHEMA_VERSION,
+        run_id: input.run_id,
+        status: input.status,
+        abort_reason: input.abort_reason,
+        shutdown_phase: input.shutdown_phase,
+        environment: &input.config.environment.name,
+        targets,
+        scenario_hash: format!("{:x}", Sha256::digest(scenario_json)),
+        tool_git_commit: tool_git_commit(),
+        account_batch: STAGE_ONE_ACCOUNT_BATCH,
+        started_unix_ms: input.started_unix_ms,
+        ended_unix_ms: input.ended_unix_ms,
+        deadline_unix_ms: input.deadline_unix_ms,
+        graceful_shutdown_ms: input.graceful_shutdown_ms,
+        budget: input.effective_budget,
+        generator_resources: input.resources,
+    };
+    write_json(report_dir.join("run.json"), &run)?;
+    write_json(report_dir.join("metrics.json"), &input.metrics)?;
+    write_timeseries(report_dir.join("timeseries.csv"), &input.metrics)?;
+    write_error_samples(report_dir.join("errors.jsonl"), input.errors.samples())?;
+    write_summary(report_dir.join("summary.md"), &run, &input.metrics)?;
+    Ok(report_dir)
+}
+
+pub fn tool_git_commit() -> &'static str {
+    option_env!("MYSERVER_GIT_COMMIT").unwrap_or("build_metadata_missing:compile_env_not_set")
+}
+
+pub fn redact_json(value: Value) -> Value {
+    match value {
+        Value::Object(object) => Value::Object(
+            object
+                .into_iter()
+                .map(|(key, value)| {
+                    let sensitive = is_sensitive_key(&key);
+                    (
+                        key,
+                        if sensitive {
+                            Value::String("[REDACTED]".into())
+                        } else {
+                            redact_json(value)
+                        },
+                    )
+                })
+                .collect::<Map<_, _>>(),
+        ),
+        Value::Array(values) => Value::Array(values.into_iter().map(redact_json).collect()),
+        Value::String(value) => Value::String(redact_text(&value)),
+        value => value,
+    }
+}
+
+pub fn redact_text(input: &str) -> String {
+    let mut output = input.to_string();
+    for key in [
+        "password",
+        "access_token",
+        "token",
+        "ticket",
+        "authorization",
+        "admin_token",
+        "secret",
+        "account",
+        "email",
+        "player_id",
+        "character_id",
+    ] {
+        output = redact_assignment(&output, key);
+    }
+    redact_email_tokens(&output)
+}
+
+fn redact_email_tokens(input: &str) -> String {
+    input
+        .split_inclusive(|character: char| {
+            character.is_whitespace() || character == ',' || character == '&'
+        })
+        .map(|token| {
+            let trimmed = token.trim_end_matches(|character: char| {
+                character.is_whitespace() || character == ',' || character == '&'
+            });
+            if trimmed.contains('@') {
+                token.replacen(trimmed, "[REDACTED]", 1)
+            } else {
+                token.to_string()
+            }
+        })
+        .collect()
+}
+
+fn redact_assignment(input: &str, key: &str) -> String {
+    let lower = input.to_ascii_lowercase();
+    let mut cursor = 0;
+    let mut output = String::new();
+    while let Some(relative) = lower[cursor..].find(key) {
+        let start = cursor + relative;
+        output.push_str(&input[cursor..start]);
+        let after_key = start + key.len();
+        output.push_str(&input[start..after_key]);
+        let rest = &input[after_key..];
+        if let Some(delimiter) = rest
+            .chars()
+            .next()
+            .filter(|delimiter| matches!(delimiter, '=' | ':' | ' '))
+        {
+            output.push(delimiter);
+            output.push_str("[REDACTED]");
+            let consumed = delimiter.len_utf8();
+            let tail = &rest[consumed..];
+            let end = tail
+                .find(|character: char| {
+                    character.is_whitespace() || character == ',' || character == '&'
+                })
+                .unwrap_or(tail.len());
+            cursor = after_key + consumed + end;
+        } else {
+            cursor = after_key;
+        }
+    }
+    output.push_str(&input[cursor..]);
+    output
+}
+
+fn is_sensitive_key(key: &str) -> bool {
+    let key = key.to_ascii_lowercase();
+    [
+        "password",
+        "token",
+        "ticket",
+        "authorization",
+        "secret",
+        "email",
+        "identity",
+    ]
+    .iter()
+    .any(|fragment| key.contains(fragment))
+        || matches!(key.as_str(), "account" | "player" | "character")
+        || matches!(key.as_str(), "account_id" | "player_id" | "character_id")
+}
+
+fn truncate(mut value: String, max_bytes: usize) -> String {
+    if value.len() > max_bytes {
+        value.truncate(max_bytes);
+        value.push_str("...[TRUNCATED]");
+    }
+    value
+}
+
+fn write_json(path: PathBuf, value: &impl Serialize) -> std::io::Result<()> {
+    fs::write(
+        path,
+        serde_json::to_vec_pretty(&redact_json(
+            serde_json::to_value(value).expect("report serializes"),
+        ))
+        .expect("redacted report serializes"),
+    )
+}
+
+fn write_timeseries(path: PathBuf, metrics: &MetricsSnapshot) -> std::io::Result<()> {
+    let mut file = File::create(path)?;
+    writeln!(
+        file,
+        "monotonic_ms,virtual_players,scheduler_lag_ms,queue_depth,metrics_dropped"
+    )?;
+    writeln!(
+        file,
+        "0,{},{},{},{}",
+        metrics.counters.get("virtual_players").unwrap_or(&0),
+        metrics.counters.get("scheduler_lag_ms").unwrap_or(&0),
+        metrics.counters.get("scheduler_queue_depth").unwrap_or(&0),
+        metrics.counters.get("metrics_dropped").unwrap_or(&0)
+    )
+}
+
+fn write_error_samples(path: PathBuf, samples: &[ErrorSample]) -> std::io::Result<()> {
+    let mut file = File::create(path)?;
+    for sample in samples {
+        writeln!(
+            file,
+            "{}",
+            serde_json::to_string(&redact_json(
+                serde_json::to_value(sample).expect("error sample serializes")
+            ))
+            .expect("redacted error sample serializes")
+        )?;
+    }
+    Ok(())
+}
+
+fn write_summary(
+    path: PathBuf,
+    run: &RunJson<'_>,
+    metrics: &MetricsSnapshot,
+) -> std::io::Result<()> {
+    let operation = metrics.histograms.get("operation_ms");
+    fs::write(
+        path,
+        format!(
+            "# Load Test Summary\n\nStatus: {}\n\nEnvironment: {}\n\nP50/P90/P95/P99/max operation latency (ms): {}/{}/{}/{}/{}\n\nAbort reason: {}\n",
+            run.status,
+            run.environment,
+            operation.map_or(0, |histogram| histogram.percentile(0.50)),
+            operation.map_or(0, |histogram| histogram.percentile(0.90)),
+            operation.map_or(0, |histogram| histogram.percentile(0.95)),
+            operation.map_or(0, |histogram| histogram.percentile(0.99)),
+            operation.map_or(0, |histogram| histogram.max()),
+            run.abort_reason.unwrap_or("none")
+        ),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::*;
+    use crate::resource::ResourceSampler;
+
+    fn config() -> LoadTestConfig {
+        serde_json::from_value(serde_json::json!({"schema_version":1,"environment":{"name":"local","kind":"local"},"targets":{"auth_http":"http://127.0.0.1:3000","game_proxy":"kcp://127.0.0.1:4000"},"budget":{"max_virtual_players":1,"max_login_qps":1.0,"max_new_connections_per_second":1.0,"max_business_messages_per_second":1.0,"max_messages_per_connection_per_second":1.0,"max_duration_secs":1,"max_total_operations":1,"max_error_rate":0.1,"max_connection_failure_rate":0.1,"max_p99_ms":100,"max_data_writes":0},"scenario":{"name":"safe","load":{"type":"fixed_concurrency","virtual_players":1,"duration_secs":1}},"reports_root":"reports","prepare_reports_root":"prepare"})).unwrap()
+    }
+    #[test]
+    fn report_redacts_secrets_and_bounds_errors() {
+        let mut errors = ErrorBuffer::default();
+        for _ in 0..(MAX_ERROR_SAMPLES + 2) {
+            errors.push(
+                "request",
+                "ticket=super-secret-token password:abc",
+                BTreeMap::from([("email".into(), "me@example.com".into())]),
+            );
+        }
+        assert_eq!(errors.samples().len(), MAX_ERROR_SAMPLES);
+        let text = serde_json::to_string(errors.samples()).unwrap();
+        assert!(!text.contains("super-secret-token"));
+        assert!(!text.contains("me@example.com"));
+        let root = std::env::temp_dir().join(format!("loadtest-report-{}", std::process::id()));
+        let value = config();
+        let report = write_report(
+            &root,
+            ReportInput {
+                run_id: "safe-run",
+                config: &value,
+                effective_budget: &value.budget,
+                status: "completed",
+                abort_reason: None,
+                shutdown_phase: None,
+                deadline_unix_ms: 3,
+                graceful_shutdown_ms: 1,
+                started_unix_ms: 1,
+                ended_unix_ms: 2,
+                metrics: MetricsSnapshot::default(),
+                resources: ResourceSampler.sample(0, 0, 0),
+                errors: &errors,
+            },
+        )
+        .unwrap();
+        assert!(report.join("run.json").is_file());
+        assert!(report.join("summary.md").is_file());
+        let run = fs::read_to_string(report.join("run.json")).unwrap();
+        assert!(!run.contains("127.0.0.1"));
+        assert!(run.contains(STAGE_ONE_ACCOUNT_BATCH));
+        assert!(run.contains("\"max_virtual_players\": 1"));
+        let commit = tool_git_commit();
+        assert!(
+            (commit.len() == 40 && commit.bytes().all(|byte| byte.is_ascii_hexdigit()))
+                || commit.starts_with("build_metadata_missing:")
+        );
+        assert!(run.contains(commit));
+        fs::remove_dir_all(root).unwrap();
+    }
+}

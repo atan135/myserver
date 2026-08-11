@@ -165,6 +165,21 @@ function parseRustMessageTypes(source) {
   return values;
 }
 
+function parseSharedRustMessageTypes(source) {
+  const cleanSource = stripComments(source);
+  const macroMatch = cleanSource.match(/message_types!\s*\{([\s\S]*?)\n\}/m);
+  if (!macroMatch) {
+    throw new Error("message_types! invocation not found in packages/game-protocol/src/lib.rs");
+  }
+
+  const values = {};
+  const valuePattern = /([A-Za-z][A-Za-z0-9_]*)\s*=\s*(\d+)\s*,/g;
+  for (const valueMatch of macroMatch[1].matchAll(valuePattern)) {
+    values[rustVariantToConstantName(valueMatch[1])] = Number(valueMatch[2]);
+  }
+  return values;
+}
+
 function parseRustMessageTypeFromU16(source) {
   const cleanSource = stripComments(source);
   const values = {};
@@ -454,25 +469,6 @@ function checkMockClientMessageFields(protoMessages, enumNames) {
   return errors;
 }
 
-function readLocalHelpClientRoot() {
-  const localHelpPath = path.join(rootDir, "local_help.txt");
-  if (!existsSync(localHelpPath)) {
-    return null;
-  }
-
-  const lines = readFile(localHelpPath)
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter((line) => line && !line.startsWith("#"));
-  for (const line of lines) {
-    const match = line.match(/^MYSERVER_CLIENT_ROOT\s*=\s*(.+)$/);
-    if (match) {
-      return match[1].trim();
-    }
-  }
-  return lines[0] ?? null;
-}
-
 function validateMybevyBuildScript(buildSource, buildPath) {
   const errors = [];
   if (!/compile_protos\s*\(/.test(buildSource)) {
@@ -488,12 +484,12 @@ function validateMybevyBuildScript(buildSource, buildPath) {
 }
 
 function checkMybevyClientProtocol(expectedMessageTypes) {
-  const rawClientRoot = process.env.MYSERVER_CLIENT_ROOT?.trim() || readLocalHelpClientRoot();
+  const rawClientRoot = process.env.MYSERVER_CLIENT_ROOT?.trim();
   if (!rawClientRoot) {
     return {
       checkedFiles: [],
       errors: [],
-      skipped: "MYSERVER_CLIENT_ROOT is not set and local_help.txt has no client root"
+      skipped: "MYSERVER_CLIENT_ROOT is not set"
     };
   }
 
@@ -599,29 +595,17 @@ function main({ serverOnly = false } = {}) {
   const protoSource = readRepoFile("packages/proto/game.proto");
   const chatProtoSource = readRepoFile("packages/proto/chat.proto");
   const adminProtoSource = readRepoFile("packages/proto/admin.proto");
-  const gameServerRustSource = readRepoFile("apps/game-server/src/protocol/message_type.rs");
+  const gameProtocolRustSource = readRepoFile("packages/game-protocol/src/lib.rs");
   const gameProxyRustSource = readRepoFile("apps/game-proxy/src/protocol.rs");
 
-  const expectedMessageTypes = parseRustMessageTypes(gameServerRustSource);
+  const expectedMessageTypes = parseSharedRustMessageTypes(gameProtocolRustSource);
   errors.push(...compareObject("MESSAGE_TYPE", expectedMessageTypes, MESSAGE_TYPE));
-  errors.push(
-    ...compareObject(
-      "game-server MessageType::from_u16",
-      expectedMessageTypes,
-      parseRustMessageTypeFromU16(gameServerRustSource)
-    )
-  );
-
-  const gameProxyMessageTypes = parseRustMessageTypes(gameProxyRustSource);
-  errors.push(...compareSubset("game-proxy MessageType", expectedMessageTypes, gameProxyMessageTypes));
-  errors.push(...compareSubset("game-proxy MessageType", MESSAGE_TYPE, gameProxyMessageTypes));
-  errors.push(
-    ...compareObject(
-      "game-proxy MessageType::from_u16",
-      gameProxyMessageTypes,
-      parseRustMessageTypeFromU16(gameProxyRustSource)
-    )
-  );
+  if (!/\$\(\$value\s*=>\s*Some\(Self::\$name\),\)\+/.test(gameProtocolRustSource)) {
+    errors.push("game-protocol MessageType::from_u16 is not generated from the shared message_types! mapping");
+  }
+  if (!/pub\s+use\s+game_protocol::\*\s*;/.test(gameProxyRustSource)) {
+    errors.push("game-proxy does not re-export the shared game-protocol framing and message types");
+  }
 
   for (const enumSpec of PROTO_ENUMS) {
     const expectedEnum = parseProtoEnum(protoSource, enumSpec.enumName, enumSpec.prefix);

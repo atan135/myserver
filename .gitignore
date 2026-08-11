@@ -12,7 +12,7 @@ local_postgres_password.txt
 logs/
 coverage/
 .tmp/
-bin/
+/bin/
 .vscode/
 .DS_Store
 Thumbs.db
