@@ -26,6 +26,7 @@ ctrlc = "3.4"
 game-protocol = { path = "../../packages/game-protocol" }
 hdrhistogram = { version = "7.5.4", features = ["serialization"] }
 prost = "0.13"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 serde = { version = "=1.0.217", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"

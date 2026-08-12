@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::fs;
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
@@ -36,6 +37,8 @@ pub struct LoadTestConfig {
     pub deadline_unix_ms: Option<u64>,
     #[serde(default = "default_graceful_shutdown_ms")]
     pub graceful_shutdown_ms: u64,
+    #[serde(default)]
+    pub account_prepare: AccountPrepareConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -125,6 +128,68 @@ pub struct Scenario {
     pub steps: Vec<ScenarioStep>,
     #[serde(default)]
     pub writes_data: bool,
+    #[serde(default)]
+    pub auth: Option<AuthScenario>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct AccountPrepareConfig {
+    #[serde(default = "default_account_batch")]
+    pub batch: String,
+    #[serde(default)]
+    pub account_count: Option<u32>,
+    #[serde(default = "default_character_name_prefix")]
+    pub character_name_prefix: String,
+}
+
+impl Default for AccountPrepareConfig {
+    fn default() -> Self {
+        Self {
+            batch: default_account_batch(),
+            account_count: None,
+            character_name_prefix: default_character_name_prefix(),
+        }
+    }
+}
+
+fn default_account_batch() -> String {
+    "default".into()
+}
+
+fn default_character_name_prefix() -> String {
+    "loadtest".into()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct AuthScenario {
+    pub operations: Vec<AuthOperation>,
+    #[serde(default)]
+    pub allow_same_account_concurrency: bool,
+    #[serde(default)]
+    pub same_account_session_effect: Option<SessionEffect>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthOperation {
+    Login,
+    Me,
+    ListCharacters,
+    CreateCharacter,
+    SelectCharacter,
+    IssueTicket,
+    Logout,
+    DuplicateLogin,
+    FailedLogin,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionEffect {
+    SessionKick,
+    SessionOverwrite,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -259,6 +324,7 @@ impl LoadTestConfig {
         self.validate_targets()?;
         self.validate_budget()?;
         self.validate_scenario()?;
+        self.validate_account_prepare()?;
         if self.graceful_shutdown_ms == 0 || self.graceful_shutdown_ms > MAX_GRACEFUL_SHUTDOWN_MS {
             return Err(ConfigError::Rejected(format!(
                 "graceful_shutdown_ms must be within 1..={MAX_GRACEFUL_SHUTDOWN_MS}"
@@ -469,6 +535,68 @@ impl LoadTestConfig {
             }
             step.validate()?;
         }
+        if let Some(auth) = &self.scenario.auth {
+            if auth.operations.is_empty() {
+                return Err(ConfigError::Rejected(
+                    "auth scenario requires at least one operation".into(),
+                ));
+            }
+            if auth.allow_same_account_concurrency && auth.same_account_session_effect.is_none() {
+                return Err(ConfigError::Rejected(
+                    "same-account auth scenario requires an explicit session effect".into(),
+                ));
+            }
+            if !auth.allow_same_account_concurrency && auth.same_account_session_effect.is_some() {
+                return Err(ConfigError::Rejected(
+                    "session effect is only valid for an explicit same-account scenario".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_account_prepare(&self) -> Result<(), ConfigError> {
+        let batch = self.account_prepare.batch.trim();
+        if batch.is_empty()
+            || batch.len() > 32
+            || !batch
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        {
+            return Err(ConfigError::Rejected(
+                "account_prepare.batch must be 1..=32 lowercase letters, digits, or hyphens".into(),
+            ));
+        }
+        if let Some(count) = self.account_prepare.account_count {
+            require_positive(count as u64, "account_prepare.account_count")?;
+            if count > self.budget.max_virtual_players {
+                return Err(ConfigError::Rejected(
+                    "account_prepare.account_count may not exceed max_virtual_players".into(),
+                ));
+            }
+        }
+        let prefix = self.account_prepare.character_name_prefix.trim();
+        if prefix.is_empty()
+            || prefix.len() > 32
+            || !prefix.bytes().all(|byte| {
+                byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'-')
+            })
+        {
+            return Err(ConfigError::Rejected(
+                "account_prepare.character_name_prefix must be 1..=32 lowercase letters, digits, underscores, or hyphens".into(),
+            ));
+        }
+        let auth_login_name =
+            format!("loadtest_{}_{}_000001", self.environment.name, batch).replace('-', "_");
+        if !(3..=32).contains(&auth_login_name.len())
+            || !auth_login_name
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+        {
+            return Err(ConfigError::Rejected(
+                "environment and account_prepare.batch must produce a supported auth-http loadtest login name".into(),
+            ));
+        }
         Ok(())
     }
 }
@@ -528,11 +656,13 @@ fn require_positive_float(value: f64, name: &str) -> Result<(), ConfigError> {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct PrivateConfig {
-    secret_references: BTreeSet<String>,
+pub struct PrivateConfig {
+    pub secret_references: BTreeSet<String>,
+    #[serde(default)]
+    pub account_credentials: BTreeMap<String, String>,
 }
 
-fn validate_private_config(path: &Path) -> Result<(), ConfigError> {
+pub fn load_private_config(path: &Path) -> Result<PrivateConfig, ConfigError> {
     let private: PrivateConfig = serde_json::from_slice(&fs::read(path)?)?;
     if private
         .secret_references
@@ -543,7 +673,24 @@ fn validate_private_config(path: &Path) -> Result<(), ConfigError> {
             "private secret references must not be empty".into(),
         ));
     }
-    Ok(())
+    if private
+        .account_credentials
+        .iter()
+        .any(|(logical_id, reference)| {
+            logical_id.trim().is_empty()
+                || reference.trim().is_empty()
+                || !private.secret_references.contains(reference)
+        })
+    {
+        return Err(ConfigError::Rejected(
+            "account credential references must use a declared non-empty secret reference".into(),
+        ));
+    }
+    Ok(private)
+}
+
+fn validate_private_config(path: &Path) -> Result<(), ConfigError> {
+    load_private_config(path).map(|_| ())
 }
 
 #[cfg(test)]
@@ -593,12 +740,14 @@ mod tests {
                     retry: RetryPolicy::Never,
                 }],
                 writes_data: false,
+                auth: None,
             },
             reports_root: "reports".into(),
             prepare_reports_root: "prepare-reports".into(),
             stop_file: None,
             deadline_unix_ms: None,
             graceful_shutdown_ms: default_graceful_shutdown_ms(),
+            account_prepare: AccountPrepareConfig::default(),
         }
     }
 

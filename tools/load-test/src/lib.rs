@@ -6,6 +6,9 @@
 //! stages behind the same safety gate and controller contracts.
 
 pub mod abort;
+pub mod accounts;
+pub mod auth_budget;
+pub mod auth_http;
 pub mod config;
 pub mod contracts;
 pub mod fake;

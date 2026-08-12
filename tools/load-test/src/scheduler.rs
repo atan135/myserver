@@ -5,6 +5,10 @@ pub struct ScheduledAction {
     pub planned_at_ms: u64,
     pub actual_at_ms: u64,
     pub scheduler_lag_ms: u64,
+    /// `staged` actions belong to a bounded wave and must be admitted and
+    /// completed before this monotonic offset. Other load models have no
+    /// per-action window beyond the run deadline.
+    pub window_end_ms: Option<u64>,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -98,9 +102,20 @@ impl MonotonicScheduler {
             if planned_at_ms > now_ms {
                 break;
             }
-            if now_ms.saturating_sub(planned_at_ms) > self.max_lag_ms
-                || tick.actions.len() >= self.max_dispatch_per_tick
-            {
+            let window_end_ms = self.current_window_end_ms();
+            if tick.actions.len() >= self.max_dispatch_per_tick {
+                // Staged waves must reach the live controller so its stage
+                // deadline can fail closed; silently dropping them would make
+                // a partial stage look complete.
+                if window_end_ms.is_some() {
+                    break;
+                }
+                self.consume();
+                self.dropped += 1;
+                tick.dropped += 1;
+                continue;
+            }
+            if now_ms.saturating_sub(planned_at_ms) > self.max_lag_ms && window_end_ms.is_none() {
                 self.consume();
                 self.dropped += 1;
                 tick.dropped += 1;
@@ -111,6 +126,7 @@ impl MonotonicScheduler {
                 planned_at_ms,
                 actual_at_ms: now_ms,
                 scheduler_lag_ms: now_ms.saturating_sub(planned_at_ms),
+                window_end_ms,
             });
         }
         tick.queue_depth = self.queue_depth(now_ms);
@@ -119,6 +135,10 @@ impl MonotonicScheduler {
 
     pub fn dropped(&self) -> u64 {
         self.dropped
+    }
+
+    pub fn exhausted(&mut self) -> bool {
+        self.next_planned().is_none()
     }
 
     fn next_planned(&mut self) -> Option<u64> {
@@ -173,6 +193,20 @@ impl MonotonicScheduler {
         }
     }
 
+    fn current_window_end_ms(&self) -> Option<u64> {
+        match &self.source {
+            Source::Staged {
+                stages,
+                stage_index,
+                stage_start_ms,
+                ..
+            } => stages.get(*stage_index).map(|stage| {
+                stage_start_ms.saturating_add(stage.duration_secs.saturating_mul(1_000))
+            }),
+            _ => None,
+        }
+    }
+
     fn queue_depth(&mut self, now_ms: u64) -> u64 {
         let Some(next) = self.next_planned() else {
             return 0;
@@ -222,5 +256,53 @@ mod tests {
                 2
             );
         }
+    }
+
+    #[test]
+    fn staged_waves_launch_at_ordered_boundaries_with_explicit_windows() {
+        let model = LoadModel::Staged {
+            stages: vec![
+                LoadStage {
+                    name: "warm".into(),
+                    virtual_players: 2,
+                    duration_secs: 1,
+                },
+                LoadStage {
+                    name: "step".into(),
+                    virtual_players: 1,
+                    duration_secs: 2,
+                },
+            ],
+        };
+        let mut scheduler = MonotonicScheduler::new(&model, 10, 2);
+        let warm = scheduler.due(0);
+        assert_eq!(warm.actions.len(), 2);
+        assert!(
+            warm.actions
+                .iter()
+                .all(|action| action.planned_at_ms == 0 && action.window_end_ms == Some(1_000))
+        );
+        assert!(scheduler.due(999).actions.is_empty());
+
+        let step = scheduler.due(1_000);
+        assert_eq!(step.actions.len(), 1);
+        assert_eq!(step.actions[0].planned_at_ms, 1_000);
+        assert_eq!(step.actions[0].window_end_ms, Some(3_000));
+    }
+
+    #[test]
+    fn overdue_staged_actions_are_preserved_for_fail_closed_window_handling() {
+        let model = LoadModel::Staged {
+            stages: vec![LoadStage {
+                name: "warm".into(),
+                virtual_players: 1,
+                duration_secs: 1,
+            }],
+        };
+        let mut scheduler = MonotonicScheduler::new(&model, 10, 1);
+        let tick = scheduler.due(1_001);
+        assert_eq!(tick.dropped, 0);
+        assert_eq!(tick.actions.len(), 1);
+        assert_eq!(tick.actions[0].window_end_ms, Some(1_000));
     }
 }

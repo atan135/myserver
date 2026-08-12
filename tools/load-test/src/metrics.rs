@@ -207,6 +207,14 @@ pub fn is_low_cardinality_key(key: &str) -> bool {
             | "http_5xx"
             | "socket_errors"
             | "push_out_of_order"
+            | "auth_requests"
+            | "auth_login_requests"
+            | "auth_login_successes"
+            | "auth_connection_failures"
+            | "auth_ticket_attempts"
+            | "auth_ticket_successes"
+            | "auth_rate_limited"
+            | "auth_potential_data_writes"
     )
 }
 
@@ -219,6 +227,7 @@ fn is_latency_key(key: &str) -> bool {
             | "auth_ms"
             | "first_frame_ms"
             | "scheduler_lag_ms"
+            | "auth_operation_ms"
     )
 }
 

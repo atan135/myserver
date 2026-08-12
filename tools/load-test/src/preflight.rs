@@ -1,8 +1,8 @@
 use serde::Serialize;
 
+use crate::auth_budget::{AuthRunBudgetEstimate, estimate_auth_run};
 use crate::config::{EnvironmentKind, HardBudget, LoadModel, LoadTestConfig, RunAccess};
 
-pub const STAGE_ONE_ACCOUNT_BATCH: &str = "not-used-stage-one";
 const SUPPORTED_LOAD_MODELS: [&str; 4] = ["fixed_concurrency", "arrival_rate", "staged", "burst"];
 const PROTECTION_CONTRACT: &str = "fail_closed: revalidate DNS, certificate, descriptor, and environment identity before ramp and every controller tick";
 
@@ -15,7 +15,11 @@ pub struct PreflightSummary<'a> {
     pub environment: &'a str,
     pub environment_kind: EnvironmentKind,
     pub targets: Vec<String>,
-    pub account_batch: &'static str,
+    pub account_batch: &'a str,
+    pub planned_account_count: u32,
+    pub account_manifest_supplied: bool,
+    pub auth_budget_estimate: Option<AuthRunBudgetEstimate>,
+    pub auth_http_admission_mapping: Option<&'static str>,
     pub selected_load_model: &'a LoadModel,
     pub supported_load_models: [&'static str; 4],
     pub effective_budget: &'a HardBudget,
@@ -35,6 +39,7 @@ pub fn summarize_run<'a>(
     access: RunAccess<'_>,
     deadline_unix_ms: u64,
     dry_run: bool,
+    account_manifest_supplied: bool,
 ) -> Result<PreflightSummary<'a>, String> {
     let targets = config
         .parsed_targets()
@@ -66,7 +71,21 @@ pub fn summarize_run<'a>(
         environment: &config.environment.name,
         environment_kind: config.environment.kind,
         targets,
-        account_batch: STAGE_ONE_ACCOUNT_BATCH,
+        account_batch: &config.account_prepare.batch,
+        planned_account_count: config
+            .account_prepare
+            .account_count
+            .unwrap_or(budget.max_virtual_players),
+        account_manifest_supplied,
+        auth_budget_estimate: config
+            .scenario
+            .auth
+            .as_ref()
+            .map(|_| estimate_auth_run(&config.scenario, budget))
+            .transpose()?,
+        auth_http_admission_mapping: config.scenario.auth.as_ref().map(|_| {
+            "each outbound attempt is admitted as one HTTP operation, one new HTTP/1.1 connection, one business message, and one message on a worst-case connection; Connection: close disables reuse"
+        }),
         selected_load_model: &config.scenario.load,
         supported_load_models: SUPPORTED_LOAD_MODELS,
         effective_budget: budget,
@@ -125,13 +144,21 @@ mod tests {
     fn preflight_is_structured_and_does_not_expose_raw_targets_or_credentials() {
         let config = config();
         let budget = config.effective_budget(&BudgetOverride::default()).unwrap();
-        let summary =
-            summarize_run("run", &config, &budget, RunAccess::default(), 100, true).unwrap();
+        let summary = summarize_run(
+            "run",
+            &config,
+            &budget,
+            RunAccess::default(),
+            100,
+            true,
+            false,
+        )
+        .unwrap();
         let output = serde_json::to_string(&summary).unwrap();
         assert!(output.contains("local_loopback_only"));
         assert!(output.contains("fixed_concurrency"));
         assert!(output.contains("arrival_rate"));
-        assert!(output.contains(STAGE_ONE_ACCOUNT_BATCH));
+        assert!(output.contains("default"));
         assert!(output.contains("fail_closed"));
         assert!(!output.contains("127.0.0.1"));
         assert!(!output.contains("password"));

@@ -1,11 +1,23 @@
 use std::env;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use loadtest_core::SCHEMA_VERSION;
 use loadtest_core::abort::{AbortController, GracefulShutdown, ShutdownPhase, install_ctrl_c_flag};
-use loadtest_core::config::{BudgetOverride, LoadTestConfig, RunAccess, load_config};
+use loadtest_core::accounts::{
+    AccountLeasePool, EnvironmentSecretProvider, SecretProvider, read_manifest,
+};
+use loadtest_core::auth_budget::{
+    estimate_auth_run, validate_auth_run_budget, validate_staged_auth_windows,
+};
+use loadtest_core::auth_http::{
+    AuthAdmissionError, AuthDispatchAdmission, AuthRunMetrics, FakeAuthHttpService,
+    FakeAuthOutcome, ReqwestAuthHttpTransport, execute_auth_operations,
+};
+use loadtest_core::config::{
+    BudgetOverride, LoadModel, LoadTestConfig, RunAccess, load_config, load_private_config,
+};
 use loadtest_core::contracts::{RunPlan, single_process_assignment};
 use loadtest_core::lifecycle::{Lifecycle, RunState};
 use loadtest_core::metrics::Metrics;
@@ -33,7 +45,8 @@ fn execute(arguments: Vec<String>) -> Result<(), String> {
             validate(&config, &parsed)?;
             println!("configuration is valid for {}", config.environment.name);
         }
-        "run" | "calibrate" => run_dry(&parsed)?,
+        "run" => run(&parsed)?,
+        "calibrate" => run_dry(&parsed)?,
         "report" => show_report(
             parsed
                 .report_dir
@@ -43,6 +56,14 @@ fn execute(arguments: Vec<String>) -> Result<(), String> {
         _ => return Err(usage()),
     }
     Ok(())
+}
+
+fn run(cli: &Cli) -> Result<(), String> {
+    if cli.dry_run {
+        run_dry(cli)
+    } else {
+        run_auth_live(cli)
+    }
 }
 
 fn validate(config: &LoadTestConfig, cli: &Cli) -> Result<(), String> {
@@ -57,7 +78,8 @@ fn validate(config: &LoadTestConfig, cli: &Cli) -> Result<(), String> {
 fn run_dry(cli: &Cli) -> Result<(), String> {
     if !cli.dry_run {
         return Err(
-            "stage one has no real service client; run and calibrate require --dry-run".into(),
+            "calibrate requires --dry-run; auth run requires --dry-run or the explicit --execute-auth gate"
+                .into(),
         );
     }
     let config = cli.load()?;
@@ -77,6 +99,7 @@ fn run_dry(cli: &Cli) -> Result<(), String> {
         },
         deadline_unix_ms,
         cli.dry_run,
+        false,
     )?;
     println!(
         "preflight={}",
@@ -142,6 +165,14 @@ fn run_dry(cli: &Cli) -> Result<(), String> {
             protection_error = Some(error);
         }
     }
+    let auth_metrics = if !abort.should_stop_new_sessions() {
+        dry_run_auth_metrics(&config, &protection, &mut abort)?
+    } else {
+        None
+    };
+    if let Some(auth) = &auth_metrics {
+        record_auth_metrics(&mut metrics, auth);
+    }
 
     let (status, shutdown_phase) = if abort.should_stop_new_sessions() {
         lifecycle.transition(RunState::Aborting).unwrap();
@@ -195,6 +226,7 @@ fn run_dry(cli: &Cli) -> Result<(), String> {
             metrics: metrics.snapshot(),
             resources,
             errors: &errors,
+            auth_metrics: auth_metrics.as_ref(),
         },
     )
     .map_err(|error| error.to_string())?;
@@ -204,6 +236,355 @@ fn run_dry(cli: &Cli) -> Result<(), String> {
         report.display()
     );
     Ok(())
+}
+
+fn dry_run_auth_metrics(
+    config: &LoadTestConfig,
+    protection: &DryRunProtection<'_>,
+    abort: &mut AbortController,
+) -> Result<Option<AuthRunMetrics>, String> {
+    let Some(auth) = &config.scenario.auth else {
+        return Ok(None);
+    };
+    if revalidate_or_abort(protection, abort).is_some() || abort.should_stop_new_sessions() {
+        return Ok(None);
+    }
+    let outcomes = auth.operations.iter().map(|operation| {
+        if matches!(operation, loadtest_core::config::AuthOperation::FailedLogin) {
+            FakeAuthOutcome::BusinessError
+        } else {
+            FakeAuthOutcome::Success
+        }
+    });
+    let mut transport = FakeAuthHttpService::scripted(outcomes);
+    let started = Instant::now();
+    let mut execution = execute_auth_operations(
+        &mut transport,
+        &auth.operations,
+        &format!("{}_dry", config.account_prepare.character_name_prefix),
+        "loadtest_dry_run",
+        "offline-only-password",
+        |_, _| Ok(Duration::MAX),
+    );
+    execution
+        .metrics
+        .set_wall_clock_window_ms(started.elapsed().as_millis() as u64);
+    if let Some(error) = execution.error {
+        return Err(error);
+    }
+    if revalidate_or_abort(protection, abort).is_some() {
+        return Ok(None);
+    }
+    Ok(Some(execution.metrics))
+}
+
+fn record_auth_metrics(metrics: &mut Metrics, auth: &AuthRunMetrics) {
+    metrics.increment("auth_requests", auth.requests);
+    metrics.increment("auth_login_requests", auth.login_requests);
+    metrics.increment("auth_login_successes", auth.login_successes);
+    metrics.increment("auth_connection_failures", auth.connection_failures);
+    metrics.increment("auth_ticket_attempts", auth.ticket_attempts);
+    metrics.increment("auth_ticket_successes", auth.ticket_successes);
+    metrics.increment("auth_rate_limited", auth.rate_limited);
+    metrics.observe_latency("auth_operation_ms", auth.p50_ms());
+}
+
+fn run_auth_live(cli: &Cli) -> Result<(), String> {
+    if !cli.execute_auth {
+        return Err(
+            "real auth-http execution requires --execute-auth; use --dry-run for the offline fake"
+                .into(),
+        );
+    }
+    let config = cli.load()?;
+    validate(&config, cli)?;
+    if cli.confirm_auth.as_deref() != Some(config.environment.name.as_str()) {
+        return Err("real auth-http execution requires --confirm-auth <environment>".into());
+    }
+    let auth = config
+        .scenario
+        .auth
+        .as_ref()
+        .ok_or("--execute-auth requires scenario.auth operations")?;
+    validate_live_auth_load_model(&config.scenario.load)?;
+    let budget = config
+        .effective_budget(&cli.budget_override)
+        .map_err(|error| error.to_string())?;
+    let auth_budget_estimate = estimate_auth_run(&config.scenario, &budget)?;
+    validate_staged_auth_windows(&config.scenario, &budget)?;
+    validate_auth_run_budget(&auth_budget_estimate, &budget)?;
+    let manifest_path = cli
+        .account_manifest
+        .as_deref()
+        .ok_or("--execute-auth requires --account-manifest <credential-free manifest>")?;
+    let private_path = cli
+        .private_config
+        .as_deref()
+        .ok_or("--execute-auth requires --private-config with secret references")?;
+    let private = load_private_config(private_path).map_err(|error| error.to_string())?;
+    let manifest = read_manifest(manifest_path)?;
+    if manifest.environment != config.environment.name
+        || manifest.batch != config.account_prepare.batch
+    {
+        return Err(
+            "account manifest environment or batch does not match the selected config".into(),
+        );
+    }
+
+    let started = unix_ms();
+    let profile_deadline_unix_ms =
+        effective_deadline(&config, &budget, cli.deadline_unix_ms, started)?;
+    let deadline_unix_ms = profile_deadline_unix_ms.min(
+        started.saturating_add(
+            auth_budget_estimate
+                .scenario_duration_secs
+                .saturating_mul(1_000),
+        ),
+    );
+    let preflight = summarize_run(
+        "run",
+        &config,
+        &budget,
+        RunAccess {
+            allow_remote: cli.allow_remote,
+            confirmation: cli.confirmation.as_deref(),
+        },
+        deadline_unix_ms,
+        false,
+        true,
+    )?;
+    println!(
+        "preflight={}",
+        serde_json::to_string(&preflight).expect("preflight summary serializes")
+    );
+
+    let account_ids = manifest
+        .ready_accounts()
+        .map(|entry| entry.logical_account_id.clone())
+        .collect::<Vec<_>>();
+    let requested_players = auth_budget_estimate.virtual_player_slots;
+    let mut account_pool = AccountLeasePool::default();
+    let leases = account_pool.assign_players(
+        &account_ids,
+        requested_players,
+        "auth-run",
+        0,
+        budget
+            .max_duration_secs
+            .saturating_mul(1_000)
+            .saturating_add(60_000),
+        auth.allow_same_account_concurrency,
+        auth.same_account_session_effect,
+    )?;
+
+    // This constructor makes no request. It is deliberately below every CLI,
+    // profile, manifest, and secret-reference gate above.
+    let monotonic_deadline =
+        Instant::now() + Duration::from_millis(deadline_unix_ms.saturating_sub(unix_ms()));
+    let mut transport =
+        ReqwestAuthHttpTransport::new(&config.targets.auth_http, Duration::from_millis(1))?;
+    let secret_provider = EnvironmentSecretProvider::new(&private);
+    let protection = DryRunProtection::new(&config);
+    let ctrl_c = install_ctrl_c_flag()
+        .map_err(|error| format!("failed to install Ctrl+C handler: {error}"))?;
+    let mut lifecycle = Lifecycle::default();
+    lifecycle.transition(RunState::Validated).unwrap();
+    lifecycle.transition(RunState::WarmingUp).unwrap();
+    lifecycle.transition(RunState::Ramping).unwrap();
+    lifecycle.transition(RunState::Steady).unwrap();
+    let monotonic_started = Instant::now();
+    let mut scheduler = MonotonicScheduler::new(
+        &config.scenario.load,
+        100,
+        budget.max_virtual_players as usize,
+    );
+    let mut core_metrics = Metrics::default();
+    core_metrics.increment("virtual_players", requested_players as u64);
+    let mut auth_metrics = AuthRunMetrics::default();
+    let mut dispatch_admission = AuthDispatchAdmission::new(&budget)?;
+    let mut errors = ErrorBuffer::default();
+    let mut abort = AbortController::default();
+    let mut failed = false;
+
+    while !scheduler.exhausted() && !abort.should_stop_new_sessions() {
+        abort.check_ctrl_c(&ctrl_c);
+        abort.check_stop_file(config.stop_file.as_deref().map(Path::new));
+        abort.check_deadline(unix_ms(), deadline_unix_ms);
+        if abort.should_stop_new_sessions() {
+            break;
+        }
+        if let Some(_) = revalidate_or_abort(&protection, &mut abort) {
+            break;
+        }
+        let elapsed_ms = monotonic_started.elapsed().as_millis() as u64;
+        let tick = scheduler.due(elapsed_ms);
+        core_metrics.increment(
+            "scheduler_lag_ms",
+            tick.actions
+                .iter()
+                .map(|action| action.scheduler_lag_ms)
+                .sum(),
+        );
+        core_metrics.increment("scheduler_queue_depth", tick.queue_depth);
+        core_metrics.increment("metrics_dropped", tick.dropped);
+
+        for (index, action) in tick.actions.iter().enumerate() {
+            if abort.should_stop_new_sessions() {
+                break;
+            }
+            if revalidate_or_abort(&protection, &mut abort).is_some() {
+                break;
+            }
+            let lease = &leases[index % leases.len()];
+            let action_deadline = action
+                .window_end_ms
+                .map(|window_end_ms| monotonic_started + Duration::from_millis(window_end_ms))
+                .map_or(monotonic_deadline, |stage_deadline| {
+                    stage_deadline.min(monotonic_deadline)
+                });
+            let password = match secret_provider.password_for(&lease.logical_account_id) {
+                Ok(password) => password,
+                Err(_) => {
+                    errors.push(
+                        "auth_secret_unavailable",
+                        "secret provider could not resolve a required credential",
+                        Default::default(),
+                    );
+                    failed = true;
+                    break;
+                }
+            };
+            let execution = execute_auth_operations(
+                &mut transport,
+                &auth.operations,
+                &format!("{}_auth", config.account_prepare.character_name_prefix),
+                &lease.logical_account_id,
+                &password,
+                |_, request| {
+                    dispatch_admission
+                        .admit(request, action_deadline, || {
+                            abort.check_ctrl_c(&ctrl_c);
+                            abort.check_stop_file(config.stop_file.as_deref().map(Path::new));
+                            abort.check_deadline(unix_ms(), deadline_unix_ms);
+                            if abort.should_stop_new_sessions()
+                                || revalidate_or_abort(&protection, &mut abort).is_some()
+                            {
+                                return Err("auth admission stopped before request dispatch".into());
+                            }
+                            Ok(())
+                        })
+                        .map_err(|error| match error {
+                            AuthAdmissionError::BudgetExceeded(error) => {
+                                abort.request(loadtest_core::abort::AbortReason::BudgetExceeded);
+                                error
+                            }
+                            AuthAdmissionError::DeadlineExceeded => {
+                                abort.request(loadtest_core::abort::AbortReason::Deadline);
+                                "auth admission deadline elapsed before request dispatch".into()
+                            }
+                            AuthAdmissionError::Stopped(error) => error,
+                        })
+                },
+            );
+            auth_metrics.merge(&execution.metrics);
+            let execution_failed = execution.error.is_some();
+            if execution_failed {
+                errors.push(
+                    "auth_operation_failed",
+                    "an auth operation failed; report categories contain no identity or secret",
+                    Default::default(),
+                );
+                failed = true;
+            }
+            let successes = auth_metrics
+                .outcomes
+                .get(&loadtest_core::auth_http::AuthOutcomeCategory::Success)
+                .copied()
+                .unwrap_or(0);
+            let error_rate = if auth_metrics.requests == 0 {
+                0.0
+            } else {
+                1.0 - successes as f64 / auth_metrics.requests as f64
+            };
+            abort.check_thresholds(
+                error_rate,
+                auth_metrics.connection_failure_rate(),
+                auth_metrics.p99_ms(),
+                budget.max_error_rate,
+                budget.max_connection_failure_rate,
+                budget.max_p99_ms,
+                true,
+            );
+            if execution_failed {
+                break;
+            }
+        }
+        if tick.actions.is_empty() && !scheduler.exhausted() {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+    for lease in &leases {
+        let _ = account_pool.release(lease);
+    }
+    auth_metrics.set_wall_clock_window_ms(monotonic_started.elapsed().as_millis() as u64);
+    record_auth_metrics(&mut core_metrics, &auth_metrics);
+    core_metrics.increment(
+        "auth_potential_data_writes",
+        dispatch_admission.used_data_writes(),
+    );
+    let status = if abort.should_stop_new_sessions() {
+        lifecycle.transition(RunState::Aborting).unwrap();
+        lifecycle.transition(RunState::Aborted).unwrap();
+        "aborted"
+    } else if failed {
+        lifecycle.transition(RunState::Failed).unwrap();
+        "failed"
+    } else {
+        lifecycle.transition(RunState::CoolingDown).unwrap();
+        lifecycle.transition(RunState::Completed).unwrap();
+        "completed"
+    };
+    let abort_reason = abort.reason().map(|reason| format!("{reason:?}"));
+    let report = write_report(
+        Path::new(&config.reports_root),
+        ReportInput {
+            run_id: &format!("auth-{}-{}", std::process::id(), started),
+            config: &config,
+            effective_budget: &budget,
+            status,
+            abort_reason: abort_reason.as_deref(),
+            shutdown_phase: None,
+            deadline_unix_ms,
+            graceful_shutdown_ms: config.graceful_shutdown_ms,
+            started_unix_ms: started,
+            ended_unix_ms: unix_ms(),
+            metrics: core_metrics.snapshot(),
+            resources: ResourceSampler.sample(0, 0, 0),
+            errors: &errors,
+            auth_metrics: Some(&auth_metrics),
+        },
+    )
+    .map_err(|error| error.to_string())?;
+    if status != "completed" {
+        return Err(format!(
+            "auth run ended with status={status}; report={}",
+            report.display()
+        ));
+    }
+    println!("auth run completed. report={}", report.display());
+    Ok(())
+}
+
+fn validate_live_auth_load_model(model: &LoadModel) -> Result<(), String> {
+    match model {
+        LoadModel::ArrivalRate { .. } | LoadModel::Staged { .. } | LoadModel::Burst { .. } => {
+            Ok(())
+        }
+        LoadModel::FixedConcurrency { .. } => Err(
+            "live auth does not support fixed_concurrency: the synchronous executor cannot maintain declared concurrent flows; use arrival_rate, staged, or burst"
+                .into(),
+        ),
+    }
 }
 
 fn effective_deadline(
@@ -257,9 +638,12 @@ struct Cli {
     config: Option<PathBuf>,
     private_config: Option<PathBuf>,
     report_dir: Option<PathBuf>,
+    account_manifest: Option<PathBuf>,
     allow_remote: bool,
     confirmation: Option<String>,
     dry_run: bool,
+    execute_auth: bool,
+    confirm_auth: Option<String>,
     deadline_unix_ms: Option<u64>,
     budget_override: BudgetOverride,
 }
@@ -273,9 +657,12 @@ impl Cli {
             config: None,
             private_config: None,
             report_dir: None,
+            account_manifest: None,
             allow_remote: false,
             confirmation: None,
             dry_run: false,
+            execute_auth: false,
+            confirm_auth: None,
             deadline_unix_ms: None,
             budget_override: BudgetOverride::default(),
         };
@@ -296,6 +683,11 @@ impl Cli {
                         values.next().ok_or("--report-dir requires a path")?,
                     ))
                 }
+                "--account-manifest" => {
+                    cli.account_manifest = Some(PathBuf::from(
+                        values.next().ok_or("--account-manifest requires a path")?,
+                    ))
+                }
                 "--allow-remote" => cli.allow_remote = true,
                 "--confirm" => {
                     cli.confirmation = Some(
@@ -305,6 +697,14 @@ impl Cli {
                     )
                 }
                 "--dry-run" => cli.dry_run = true,
+                "--execute-auth" => cli.execute_auth = true,
+                "--confirm-auth" => {
+                    cli.confirm_auth = Some(
+                        values
+                            .next()
+                            .ok_or("--confirm-auth requires the environment name")?,
+                    )
+                }
                 "--deadline-unix-ms" => {
                     cli.deadline_unix_ms = Some(parse_value(values.next(), "--deadline-unix-ms")?)
                 }
@@ -344,5 +744,114 @@ fn parse_value<T: std::str::FromStr>(value: Option<String>, flag: &str) -> Resul
         .map_err(|_| format!("{flag} has an invalid value"))
 }
 fn usage() -> String {
-    "usage: loadtest <validate|calibrate|run> --config <file> [--private-config <file>] [--allow-remote --confirm <environment>] [--dry-run] [--deadline-unix-ms N] [--max-virtual-players N --max-login-qps N --max-duration-secs N]\n       loadtest report --report-dir <reports/run-id>".into()
+    "usage: loadtest validate|calibrate --config <file> [--private-config <file>] [--allow-remote --confirm <environment>] [--dry-run]\n       loadtest run --config <file> --dry-run\n       loadtest run --config <file> --execute-auth --confirm-auth <environment> --account-manifest <file> --private-config <file> [--allow-remote --confirm <environment>]\n       loadtest report --report-dir <reports/run-id>".into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn real_auth_run_requires_execute_and_exact_environment_confirmation_before_transport_setup() {
+        let missing_execute = execute(vec![
+            "run".into(),
+            "--config".into(),
+            "not-read-without-execute.json".into(),
+        ])
+        .unwrap_err();
+        assert!(missing_execute.contains("--execute-auth"));
+
+        let config_path = std::env::temp_dir().join(format!(
+            "loadtest-auth-gate-{}-{}.json",
+            std::process::id(),
+            unix_ms()
+        ));
+        std::fs::write(
+            &config_path,
+            serde_json::to_vec(&serde_json::json!({
+                "schema_version": 1,
+                "environment": {"name": "local", "kind": "local"},
+                "targets": {"auth_http": "http://127.0.0.1:3000", "game_proxy": "kcp://127.0.0.1:4000"},
+                "budget": {"max_virtual_players": 1, "max_login_qps": 1.0, "max_new_connections_per_second": 1.0, "max_business_messages_per_second": 1.0, "max_messages_per_connection_per_second": 1.0, "max_duration_secs": 1, "max_total_operations": 1, "max_error_rate": 0.1, "max_connection_failure_rate": 0.1, "max_p99_ms": 100, "max_data_writes": 0},
+                "scenario": {"name": "auth", "load": {"type": "fixed_concurrency", "virtual_players": 1, "duration_secs": 1}, "auth": {"operations": ["login"]}},
+                "reports_root": "reports",
+                "prepare_reports_root": "prepare"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let confirmation_missing = execute(vec![
+            "run".into(),
+            "--config".into(),
+            config_path.display().to_string(),
+            "--execute-auth".into(),
+        ])
+        .unwrap_err();
+        assert!(confirmation_missing.contains("--confirm-auth"));
+
+        let unsupported_model = execute(vec![
+            "run".into(),
+            "--config".into(),
+            config_path.display().to_string(),
+            "--execute-auth".into(),
+            "--confirm-auth".into(),
+            "local".into(),
+        ])
+        .unwrap_err();
+        assert!(unsupported_model.contains("does not support fixed_concurrency"));
+        assert!(!unsupported_model.contains("--account-manifest"));
+
+        std::fs::write(
+            &config_path,
+            serde_json::to_vec(&serde_json::json!({
+                "schema_version": 1,
+                "environment": {"name": "local", "kind": "local"},
+                "targets": {"auth_http": "http://127.0.0.1:3000", "game_proxy": "kcp://127.0.0.1:4000"},
+                "budget": {"max_virtual_players": 1, "max_login_qps": 1.0, "max_new_connections_per_second": 1.0, "max_business_messages_per_second": 1.0, "max_messages_per_connection_per_second": 1.0, "max_duration_secs": 2, "max_total_operations": 1, "max_error_rate": 0.1, "max_connection_failure_rate": 0.1, "max_p99_ms": 100, "max_data_writes": 3},
+                "scenario": {"name": "auth", "load": {"type": "staged", "stages": [{"name": "wave", "virtual_players": 1, "duration_secs": 1}]}, "auth": {"operations": ["login"]}},
+                "reports_root": "reports",
+                "prepare_reports_root": "prepare"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let staged_model = execute(vec![
+            "run".into(),
+            "--config".into(),
+            config_path.display().to_string(),
+            "--execute-auth".into(),
+            "--confirm-auth".into(),
+            "local".into(),
+        ])
+        .unwrap_err();
+        assert!(staged_model.contains("--account-manifest"));
+        assert!(!staged_model.contains("does not support staged"));
+
+        std::fs::write(
+            &config_path,
+            serde_json::to_vec(&serde_json::json!({
+                "schema_version": 1,
+                "environment": {"name": "local", "kind": "local"},
+                "targets": {"auth_http": "http://127.0.0.1:3000", "game_proxy": "kcp://127.0.0.1:4000"},
+                "budget": {"max_virtual_players": 3, "max_login_qps": 2.0, "max_new_connections_per_second": 2.0, "max_business_messages_per_second": 2.0, "max_messages_per_connection_per_second": 2.0, "max_duration_secs": 1, "max_total_operations": 3, "max_error_rate": 0.1, "max_connection_failure_rate": 0.1, "max_p99_ms": 100, "max_data_writes": 9},
+                "scenario": {"name": "auth", "load": {"type": "staged", "stages": [{"name": "too-fast", "virtual_players": 3, "duration_secs": 1}]}, "auth": {"operations": ["login"]}},
+                "reports_root": "reports",
+                "prepare_reports_root": "prepare"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let stage_window = execute(vec![
+            "run".into(),
+            "--config".into(),
+            config_path.display().to_string(),
+            "--execute-auth".into(),
+            "--confirm-auth".into(),
+            "local".into(),
+        ])
+        .unwrap_err();
+        assert!(stage_window.contains("stage 'too-fast'"));
+        assert!(!stage_window.contains("--account-manifest"));
+        std::fs::remove_file(config_path).unwrap();
+    }
 }

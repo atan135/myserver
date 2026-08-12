@@ -14,6 +14,7 @@ pub enum AbortReason {
     ConnectionFailureRate,
     P99Latency,
     GeneratorResource,
+    BudgetExceeded,
     ProtectionUnknown,
     ControllerAbort,
 }

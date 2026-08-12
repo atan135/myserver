@@ -94,7 +94,10 @@ impl RuntimeProtection for DryRunProtection<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{EnvironmentKind, EnvironmentProfile, HardBudget, PlayerTargets, Scenario};
+    use crate::config::{
+        AccountPrepareConfig, EnvironmentKind, EnvironmentProfile, HardBudget, PlayerTargets,
+        Scenario,
+    };
     use crate::{LoadTestConfig, SCHEMA_VERSION};
     use std::cell::Cell;
     use std::collections::BTreeSet;
@@ -134,12 +137,14 @@ mod tests {
                 },
                 steps: Vec::new(),
                 writes_data: false,
+                auth: None,
             },
             reports_root: "reports".into(),
             prepare_reports_root: "prepare".into(),
             stop_file: None,
             deadline_unix_ms: None,
             graceful_shutdown_ms: 1,
+            account_prepare: AccountPrepareConfig::default(),
         }
     }
 

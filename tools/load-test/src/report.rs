@@ -7,9 +7,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
+use crate::auth_http::AuthRunMetrics;
 use crate::config::{HardBudget, LoadTestConfig};
 use crate::metrics::MetricsSnapshot;
-use crate::preflight::STAGE_ONE_ACCOUNT_BATCH;
 use crate::resource::GeneratorResources;
 
 pub const MAX_ERROR_SAMPLES: usize = 100;
@@ -75,6 +75,7 @@ pub struct ReportInput<'a> {
     pub metrics: MetricsSnapshot,
     pub resources: GeneratorResources,
     pub errors: &'a ErrorBuffer,
+    pub auth_metrics: Option<&'a AuthRunMetrics>,
 }
 
 #[derive(Debug, Serialize)]
@@ -88,7 +89,8 @@ struct RunJson<'a> {
     targets: Vec<String>,
     scenario_hash: String,
     tool_git_commit: &'static str,
-    account_batch: &'static str,
+    account_batch: &'a str,
+    auth_metrics_available: bool,
     started_unix_ms: u64,
     ended_unix_ms: u64,
     deadline_unix_ms: u64,
@@ -118,7 +120,8 @@ pub fn write_report(root: &Path, input: ReportInput<'_>) -> std::io::Result<Path
         targets,
         scenario_hash: format!("{:x}", Sha256::digest(scenario_json)),
         tool_git_commit: tool_git_commit(),
-        account_batch: STAGE_ONE_ACCOUNT_BATCH,
+        account_batch: &input.config.account_prepare.batch,
+        auth_metrics_available: input.auth_metrics.is_some(),
         started_unix_ms: input.started_unix_ms,
         ended_unix_ms: input.ended_unix_ms,
         deadline_unix_ms: input.deadline_unix_ms,
@@ -128,9 +131,17 @@ pub fn write_report(root: &Path, input: ReportInput<'_>) -> std::io::Result<Path
     };
     write_json(report_dir.join("run.json"), &run)?;
     write_json(report_dir.join("metrics.json"), &input.metrics)?;
+    if let Some(auth_metrics) = input.auth_metrics {
+        write_json(report_dir.join("auth-metrics.json"), auth_metrics)?;
+    }
     write_timeseries(report_dir.join("timeseries.csv"), &input.metrics)?;
     write_error_samples(report_dir.join("errors.jsonl"), input.errors.samples())?;
-    write_summary(report_dir.join("summary.md"), &run, &input.metrics)?;
+    write_summary(
+        report_dir.join("summary.md"),
+        &run,
+        &input.metrics,
+        input.auth_metrics,
+    )?;
     Ok(report_dir)
 }
 
@@ -235,6 +246,12 @@ fn redact_assignment(input: &str, key: &str) -> String {
 
 fn is_sensitive_key(key: &str) -> bool {
     let key = key.to_ascii_lowercase();
+    if matches!(
+        key.as_str(),
+        "ticket_attempts" | "ticket_successes" | "ticket_success_rate" | "ticket_issued"
+    ) {
+        return false;
+    }
     [
         "password",
         "token",
@@ -303,12 +320,29 @@ fn write_summary(
     path: PathBuf,
     run: &RunJson<'_>,
     metrics: &MetricsSnapshot,
+    auth_metrics: Option<&AuthRunMetrics>,
 ) -> std::io::Result<()> {
     let operation = metrics.histograms.get("operation_ms");
+    let auth = auth_metrics.map_or_else(String::new, |auth| {
+        format!(
+            "\nAuth login attempt QPS: {:.3}\n\nAuth login success rate: {:.3}\n\nAuth P50/P95/P99 latency (ms): {}/{}/{}\n\nAuth ticket success rate: {:.3}\n\nAuth rate-limit rate: {:.3}\n\nAuth connection-failure rate: {:.3}\n\nAuth HTTP status categories: {}\n\nAuth business code categories: {}\n\nAuth virtual player states: {}\n",
+            auth.login_qps(),
+            auth.login_success_rate(),
+            auth.p50_ms(),
+            auth.p95_ms(),
+            auth.p99_ms(),
+            auth.ticket_success_rate(),
+            auth.rate_limit_rate(),
+            auth.connection_failure_rate(),
+            serde_json::to_string(&auth.http_statuses).expect("auth status metrics serialize"),
+            serde_json::to_string(&auth.business_codes).expect("auth business metrics serialize"),
+            serde_json::to_string(&auth.virtual_player_states).expect("auth state metrics serialize"),
+        )
+    });
     fs::write(
         path,
         format!(
-            "# Load Test Summary\n\nStatus: {}\n\nEnvironment: {}\n\nP50/P90/P95/P99/max operation latency (ms): {}/{}/{}/{}/{}\n\nAbort reason: {}\n",
+            "# Load Test Summary\n\nStatus: {}\n\nEnvironment: {}\n\nP50/P90/P95/P99/max operation latency (ms): {}/{}/{}/{}/{}\n\nAbort reason: {}\n{}",
             run.status,
             run.environment,
             operation.map_or(0, |histogram| histogram.percentile(0.50)),
@@ -316,7 +350,8 @@ fn write_summary(
             operation.map_or(0, |histogram| histogram.percentile(0.95)),
             operation.map_or(0, |histogram| histogram.percentile(0.99)),
             operation.map_or(0, |histogram| histogram.max()),
-            run.abort_reason.unwrap_or("none")
+            run.abort_reason.unwrap_or("none"),
+            auth,
         ),
     )
 }
@@ -324,6 +359,7 @@ fn write_summary(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::auth_http::{FakeAuthHttpService, FakeAuthOutcome, execute_auth_operations};
     use crate::config::*;
     use crate::resource::ResourceSampler;
 
@@ -362,6 +398,7 @@ mod tests {
                 metrics: MetricsSnapshot::default(),
                 resources: ResourceSampler.sample(0, 0, 0),
                 errors: &errors,
+                auth_metrics: None,
             },
         )
         .unwrap();
@@ -369,7 +406,7 @@ mod tests {
         assert!(report.join("summary.md").is_file());
         let run = fs::read_to_string(report.join("run.json")).unwrap();
         assert!(!run.contains("127.0.0.1"));
-        assert!(run.contains(STAGE_ONE_ACCOUNT_BATCH));
+        assert!(run.contains("\"account_batch\": \"default\""));
         assert!(run.contains("\"max_virtual_players\": 1"));
         let commit = tool_git_commit();
         assert!(
@@ -377,6 +414,104 @@ mod tests {
                 || commit.starts_with("build_metadata_missing:")
         );
         assert!(run.contains(commit));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn ticket_metric_names_remain_visible_while_ticket_values_are_redacted() {
+        let rendered = serde_json::to_string(&redact_json(serde_json::json!({
+            "ticket_attempts": 3,
+            "ticket_successes": 2,
+            "ticket": "opaque-secret-value"
+        })))
+        .unwrap();
+        assert!(rendered.contains("ticket_attempts"));
+        assert!(rendered.contains("ticket_successes"));
+        assert!(!rendered.contains("opaque-secret-value"));
+    }
+
+    #[test]
+    fn merged_staged_flow_metrics_keep_http_business_timeout_and_ticket_categories() {
+        let mut auth_metrics = AuthRunMetrics::default();
+        let mut success = FakeAuthHttpService::scripted([FakeAuthOutcome::Success; 4]);
+        let success = execute_auth_operations(
+            &mut success,
+            &[
+                AuthOperation::Login,
+                AuthOperation::ListCharacters,
+                AuthOperation::SelectCharacter,
+                AuthOperation::IssueTicket,
+            ],
+            "loadtest_000001",
+            "loadtest_local_default_000001",
+            "in-memory-only",
+            |_, _| Ok(std::time::Duration::MAX),
+        );
+        assert!(success.error.is_none());
+        auth_metrics.merge(&success.metrics);
+
+        let mut rejected = FakeAuthHttpService::scripted([FakeAuthOutcome::BusinessError]);
+        let rejected = execute_auth_operations(
+            &mut rejected,
+            &[AuthOperation::FailedLogin],
+            "loadtest_000002",
+            "loadtest_local_default_000002",
+            "in-memory-only",
+            |_, _| Ok(std::time::Duration::MAX),
+        );
+        assert!(rejected.error.is_none());
+        auth_metrics.merge(&rejected.metrics);
+
+        let mut timed_out = FakeAuthHttpService::scripted([FakeAuthOutcome::Timeout]);
+        let timed_out = execute_auth_operations(
+            &mut timed_out,
+            &[AuthOperation::Login],
+            "loadtest_000003",
+            "loadtest_local_default_000003",
+            "in-memory-only",
+            |_, _| Ok(std::time::Duration::MAX),
+        );
+        assert!(timed_out.error.is_some());
+        auth_metrics.merge(&timed_out.metrics);
+        auth_metrics.set_wall_clock_window_ms(1_000);
+
+        let root = std::env::temp_dir().join(format!(
+            "loadtest-staged-auth-report-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis()
+        ));
+        let value = config();
+        let report = write_report(
+            &root,
+            ReportInput {
+                run_id: "staged-fake-run",
+                config: &value,
+                effective_budget: &value.budget,
+                status: "completed",
+                abort_reason: None,
+                shutdown_phase: None,
+                deadline_unix_ms: 3,
+                graceful_shutdown_ms: 1,
+                started_unix_ms: 1,
+                ended_unix_ms: 2,
+                metrics: MetricsSnapshot::default(),
+                resources: ResourceSampler.sample(0, 0, 0),
+                errors: &ErrorBuffer::default(),
+                auth_metrics: Some(&auth_metrics),
+            },
+        )
+        .unwrap();
+        let serialized = fs::read_to_string(report.join("auth-metrics.json")).unwrap();
+        assert!(serialized.contains("http401"));
+        assert!(serialized.contains("invalid_login_credentials"));
+        assert!(serialized.contains("no_response"));
+        assert!(serialized.contains("timeout"));
+        assert!(serialized.contains("\"ticket_successes\": 1"));
+        let summary = fs::read_to_string(report.join("summary.md")).unwrap();
+        assert!(summary.contains("Auth connection-failure rate: 0.167"));
         fs::remove_dir_all(root).unwrap();
     }
 }

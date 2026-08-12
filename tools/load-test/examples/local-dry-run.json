@@ -38,7 +38,15 @@
         "retry": { "kind": "never" }
       }
     ],
-    "writes_data": false
+    "writes_data": false,
+    "auth": {
+      "operations": ["login", "me", "list_characters", "select_character", "issue_ticket", "logout"]
+    }
+  },
+  "account_prepare": {
+    "batch": "default",
+    "account_count": 2,
+    "character_name_prefix": "loadtest"
   },
   "reports_root": "tools/load-test/reports",
   "prepare_reports_root": "tools/load-test/prepare-reports"
