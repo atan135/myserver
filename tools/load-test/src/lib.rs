@@ -21,6 +21,7 @@ pub mod report;
 pub mod resource;
 pub mod scheduler;
 pub mod step;
+pub mod virtual_player;
 
 pub mod protocol_version_policy {
     include!(concat!(

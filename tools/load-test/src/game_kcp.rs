@@ -319,6 +319,7 @@ pub enum GameLifecycleEvent {
     HeartbeatAcknowledged,
     Push { message_type: MessageType, seq: u32 },
     ReconnectScheduled { attempt: u32, delay_ms: u64 },
+    LateResponseDropped { message_type: MessageType, seq: u32 },
     Closed,
     Failed,
 }
@@ -428,27 +429,36 @@ impl GameConnectionLifecycle {
         outbound: &OutboundPacket,
         jitter_sample: u64,
     ) -> Result<GameLifecycleEvent, GameKcpError> {
-        let expected_response = match outbound.message_type {
-            MessageType::AuthReq => MessageType::AuthRes,
-            MessageType::PingReq => MessageType::PingRes,
-            message_type => {
-                return Err(GameKcpError::UnsupportedOutboundRequest(
-                    message_type as u16,
-                ));
-            }
-        };
-        if !self.session.cancel_request(expected_response, outbound.seq) {
-            return Err(GameKcpError::OutboundRequestNotPending {
-                message_type: expected_response as u16,
-                seq: outbound.seq,
-            });
-        }
+        self.cancel_outbound_request(outbound)?;
+        self.handle_disconnected(jitter_sample)
+    }
+
+    /// Handles a deadline expiry after a request was successfully written but
+    /// before its exact response arrived. The old expectation is removed so a
+    /// delayed response cannot be correlated with a subsequent reconnect.
+    pub fn handle_request_timeout(
+        &mut self,
+        outbound: &OutboundPacket,
+        jitter_sample: u64,
+    ) -> Result<GameLifecycleEvent, GameKcpError> {
+        self.cancel_outbound_request(outbound)?;
         self.handle_disconnected(jitter_sample)
     }
 
     pub fn handle_packet(&mut self, packet: Packet) -> Result<GameLifecycleEvent, GameKcpError> {
         let message_type = validate_packet(&packet, self.session.max_body_len)?;
         match message_type {
+            MessageType::AuthRes | MessageType::PingRes
+                if matches!(
+                    self.state,
+                    GameConnectionState::Connecting | GameConnectionState::Reconnecting
+                ) =>
+            {
+                Ok(GameLifecycleEvent::LateResponseDropped {
+                    message_type,
+                    seq: packet.header.seq,
+                })
+            }
             MessageType::AuthRes => self.handle_auth_response(packet),
             MessageType::PingRes => self.handle_ping_response(packet),
             _ if is_push(message_type) => match self.session.ingest(packet)? {
@@ -551,6 +561,26 @@ impl GameConnectionLifecycle {
             .checked_add(1)
             .ok_or(GameKcpError::SequenceExhausted)?;
         Ok(seq)
+    }
+
+    fn cancel_outbound_request(&mut self, outbound: &OutboundPacket) -> Result<(), GameKcpError> {
+        let expected_response = match outbound.message_type {
+            MessageType::AuthReq => MessageType::AuthRes,
+            MessageType::PingReq => MessageType::PingRes,
+            message_type => {
+                return Err(GameKcpError::UnsupportedOutboundRequest(
+                    message_type as u16,
+                ));
+            }
+        };
+        if self.session.cancel_request(expected_response, outbound.seq) {
+            Ok(())
+        } else {
+            Err(GameKcpError::OutboundRequestNotPending {
+                message_type: expected_response as u16,
+                seq: outbound.seq,
+            })
+        }
     }
 
     fn record_auth_rejection(&mut self, reason: AuthRejectReason) {
@@ -1055,5 +1085,28 @@ mod tests {
                 seq: 1,
             })
         ));
+    }
+
+    #[test]
+    fn lifecycle_timeout_clears_the_old_sequence_before_reconnect() {
+        let mut lifecycle = GameConnectionLifecycle::new(1024, policy(1)).unwrap();
+        lifecycle.begin_connect().unwrap();
+        let auth = lifecycle.begin_auth("private-ticket").unwrap();
+
+        assert_eq!(
+            lifecycle.handle_request_timeout(&auth, 0).unwrap(),
+            GameLifecycleEvent::ReconnectScheduled {
+                attempt: 1,
+                delay_ms: 90,
+            }
+        );
+        assert_eq!(lifecycle.pending_requests(), 0);
+        assert_eq!(
+            lifecycle.handle_packet(auth_response(1, true, "")).unwrap(),
+            GameLifecycleEvent::LateResponseDropped {
+                message_type: game_protocol::MessageType::AuthRes,
+                seq: 1,
+            }
+        );
     }
 }
