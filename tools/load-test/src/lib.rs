@@ -12,6 +12,7 @@ pub mod auth_http;
 pub mod config;
 pub mod contracts;
 pub mod fake;
+pub mod game_kcp;
 pub mod lifecycle;
 pub mod metrics;
 pub mod preflight;
@@ -20,6 +21,13 @@ pub mod report;
 pub mod resource;
 pub mod scheduler;
 pub mod step;
+
+pub mod protocol_version_policy {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../packages/proto/compatibility/version-policy.rs"
+    ));
+}
 
 pub mod pb {
     include!(concat!(env!("OUT_DIR"), "/myserver.game.rs"));
