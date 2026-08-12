@@ -483,6 +483,7 @@ mod tests {
                 allow_same_account_concurrency: false,
                 same_account_session_effect: None,
             }),
+            reconnect_burst: None,
         }
     }
 

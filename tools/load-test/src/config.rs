@@ -10,6 +10,7 @@ use thiserror::Error;
 
 use crate::SCHEMA_VERSION;
 use crate::calibration::CalibrationThresholds;
+use crate::game_kcp::ReconnectPolicy;
 use crate::step::ScenarioStep;
 
 #[derive(Debug, Error)]
@@ -133,6 +134,37 @@ pub struct Scenario {
     pub writes_data: bool,
     #[serde(default)]
     pub auth: Option<AuthScenario>,
+    #[serde(default)]
+    pub reconnect_burst: Option<ReconnectBurstScenario>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ReconnectBurstScenario {
+    pub virtual_players: u32,
+    pub reconnect_attempts_per_player: u32,
+    pub reconnect_policy: ReconnectPolicyConfig,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ReconnectPolicyConfig {
+    pub max_attempts: u32,
+    pub base_delay_ms: u64,
+    pub max_delay_ms: u64,
+    #[serde(default)]
+    pub max_jitter_ms: u64,
+}
+
+impl From<ReconnectPolicyConfig> for ReconnectPolicy {
+    fn from(value: ReconnectPolicyConfig) -> Self {
+        Self {
+            max_attempts: value.max_attempts,
+            base_delay_ms: value.base_delay_ms,
+            max_delay_ms: value.max_delay_ms,
+            max_jitter_ms: value.max_jitter_ms,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -556,6 +588,23 @@ impl LoadTestConfig {
                 ));
             }
         }
+        if let Some(reconnect) = &self.scenario.reconnect_burst {
+            if reconnect.virtual_players == 0
+                || reconnect.virtual_players > self.budget.max_virtual_players
+            {
+                return Err(ConfigError::Rejected(
+                    "reconnect burst virtual_players must be within the hard budget".into(),
+                ));
+            }
+            if reconnect.reconnect_attempts_per_player == 0 {
+                return Err(ConfigError::Rejected(
+                    "reconnect burst requires at least one attempt per player".into(),
+                ));
+            }
+            ReconnectPolicy::from(reconnect.reconnect_policy)
+                .validate()
+                .map_err(|error| ConfigError::Rejected(error.to_string()))?;
+        }
         Ok(())
     }
 
@@ -745,6 +794,7 @@ mod tests {
                 }],
                 writes_data: false,
                 auth: None,
+                reconnect_burst: None,
             },
             reports_root: "reports".into(),
             prepare_reports_root: "prepare-reports".into(),

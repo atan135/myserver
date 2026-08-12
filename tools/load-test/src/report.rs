@@ -16,6 +16,33 @@ use crate::resource::GeneratorResources;
 pub const MAX_ERROR_SAMPLES: usize = 100;
 pub const MAX_ERROR_SAMPLE_BYTES: usize = 2 * 1024;
 
+const PHASE_LATENCY_KEYS: [(&str, &str); 8] = [
+    ("login_ms", "Login"),
+    ("ticket_ms", "Ticket"),
+    ("connect_ms", "Connect"),
+    ("auth_ms", "Proxy auth"),
+    ("room_join_ms", "Room join"),
+    ("room_first_frame_ms", "First frame"),
+    ("room_recovery_ms", "Reconnect"),
+    ("gameplay_step_ms", "Gameplay operation"),
+];
+
+const FLOW_COUNTER_KEYS: [(&str, &str); 13] = [
+    ("connections_opened", "Connections opened"),
+    ("connections_active", "Connections active"),
+    ("frame_inputs_sent", "Frame inputs sent"),
+    ("frame_inputs_received", "Frame inputs received"),
+    ("frame_bundles_received", "Frame bundles received"),
+    ("gameplay_bytes_sent", "Gameplay bytes sent"),
+    ("gameplay_bytes_received", "Gameplay bytes received"),
+    ("gameplay_messages_sent", "Gameplay messages sent"),
+    ("frame_timeouts", "Frame timeouts"),
+    ("frame_late_response", "Frame late responses"),
+    ("frame_out_of_order", "Frame out of order"),
+    ("gameplay_business_errors", "Gameplay business errors"),
+    ("metrics_dropped", "Metrics dropped"),
+];
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ErrorSample {
     pub category: String,
@@ -353,10 +380,12 @@ fn write_summary(
             capacity_summary(&calibration.system_burst_capacity),
         )
     });
+    let phases = phase_latency_summary(metrics);
+    let flow = flow_counter_summary(metrics);
     fs::write(
         path,
         format!(
-            "# Load Test Summary\n\nStatus: {}\n\nEnvironment: {}\n\nP50/P90/P95/P99/max operation latency (ms): {}/{}/{}/{}/{}\n\nAbort reason: {}\n{}{}",
+            "# Load Test Summary\n\nStatus: {}\n\nEnvironment: {}\n\nP50/P90/P95/P99/max operation latency (ms): {}/{}/{}/{}/{}\n\nLatency by phase:\n{}\n\nConnections, frames, throughput, and errors:\n{}\n\nAbort reason: {}\n{}{}",
             run.status,
             run.environment,
             operation.map_or(0, |histogram| histogram.percentile(0.50)),
@@ -364,11 +393,37 @@ fn write_summary(
             operation.map_or(0, |histogram| histogram.percentile(0.95)),
             operation.map_or(0, |histogram| histogram.percentile(0.99)),
             operation.map_or(0, |histogram| histogram.max()),
+            phases,
+            flow,
             run.abort_reason.unwrap_or("none"),
             auth,
             calibration,
         ),
     )
+}
+
+fn phase_latency_summary(metrics: &MetricsSnapshot) -> String {
+    PHASE_LATENCY_KEYS
+        .iter()
+        .map(|(key, label)| {
+            let histogram = metrics.histograms.get(*key);
+            format!(
+                "- {label}: P50/P95/P99={}/{}/{} ms",
+                histogram.map_or(0, |value| value.percentile(0.50)),
+                histogram.map_or(0, |value| value.percentile(0.95)),
+                histogram.map_or(0, |value| value.percentile(0.99)),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn flow_counter_summary(metrics: &MetricsSnapshot) -> String {
+    FLOW_COUNTER_KEYS
+        .iter()
+        .map(|(key, label)| format!("- {label}: {}", metrics.counters.get(*key).unwrap_or(&0)))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn capacity_summary(capacity: &crate::calibration::CapacityConclusion) -> String {
@@ -455,6 +510,50 @@ mod tests {
         assert!(rendered.contains("ticket_attempts"));
         assert!(rendered.contains("ticket_successes"));
         assert!(!rendered.contains("opaque-secret-value"));
+    }
+
+    #[test]
+    fn summary_separates_fixed_latency_phases_and_flow_counters() {
+        let mut metrics = MetricsSnapshot::default();
+        for key in [
+            "login_ms",
+            "ticket_ms",
+            "connect_ms",
+            "auth_ms",
+            "room_join_ms",
+            "room_first_frame_ms",
+            "room_recovery_ms",
+            "gameplay_step_ms",
+        ] {
+            metrics.histograms.entry(key.into()).or_default().record(10);
+        }
+        metrics.counters.insert("connections_opened".into(), 2);
+        metrics.counters.insert("frame_bundles_received".into(), 3);
+        metrics.counters.insert("gameplay_bytes_received".into(), 4);
+        metrics
+            .counters
+            .insert("gameplay_business_errors".into(), 5);
+        let summary = format!(
+            "{}\n{}",
+            phase_latency_summary(&metrics),
+            flow_counter_summary(&metrics)
+        );
+        for expected in [
+            "Login: P50/P95/P99=10/10/10 ms",
+            "Ticket: P50/P95/P99=10/10/10 ms",
+            "Connect: P50/P95/P99=10/10/10 ms",
+            "Proxy auth: P50/P95/P99=10/10/10 ms",
+            "Room join: P50/P95/P99=10/10/10 ms",
+            "First frame: P50/P95/P99=10/10/10 ms",
+            "Reconnect: P50/P95/P99=10/10/10 ms",
+            "Gameplay operation: P50/P95/P99=10/10/10 ms",
+            "Connections opened: 2",
+            "Frame bundles received: 3",
+            "Gameplay bytes received: 4",
+            "Gameplay business errors: 5",
+        ] {
+            assert!(summary.contains(expected), "missing {expected}");
+        }
     }
 
     #[test]

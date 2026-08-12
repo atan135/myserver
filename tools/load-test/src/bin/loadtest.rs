@@ -27,6 +27,9 @@ use loadtest_core::lifecycle::{Lifecycle, RunState};
 use loadtest_core::metrics::Metrics;
 use loadtest_core::preflight::summarize_run;
 use loadtest_core::protection::{DryRunProtection, revalidate_or_abort};
+use loadtest_core::reconnect_burst::{
+    ReconnectBurstSpec, ReconnectBurstStep, plan_reconnect_burst,
+};
 use loadtest_core::report::{ErrorBuffer, ReportInput, write_report};
 use loadtest_core::resource::ResourceSampler;
 use loadtest_core::scheduler::MonotonicScheduler;
@@ -176,6 +179,38 @@ fn run_dry(cli: &Cli) -> Result<(), String> {
     };
     if let Some(auth) = &auth_metrics {
         record_auth_metrics(&mut metrics, auth);
+    }
+    if !abort.should_stop_new_sessions() {
+        if let Some(reconnect) = &config.scenario.reconnect_burst {
+            let plan = plan_reconnect_burst(
+                ReconnectBurstSpec {
+                    virtual_players: reconnect.virtual_players,
+                    reconnect_attempts_per_player: reconnect.reconnect_attempts_per_player,
+                    start_ms: 0,
+                },
+                &budget,
+                reconnect.reconnect_policy.into(),
+            )
+            .map_err(|error| error.to_string())?;
+            metrics.increment("reconnect_burst_login_actions", plan.login_actions);
+            metrics.increment("reconnect_burst_new_connections", plan.new_connections);
+            metrics.increment(
+                "reconnect_burst_room_recoveries",
+                plan.actions
+                    .iter()
+                    .filter(|action| action.step == ReconnectBurstStep::RecoverRoom)
+                    .count() as u64,
+            );
+            metrics.increment("reconnect_burst_backoff_ms", plan.total_backoff_ms);
+            metrics.increment(
+                "reconnect_burst_potential_data_writes",
+                plan.potential_data_writes,
+            );
+            println!(
+                "reconnect_burst_plan={} ",
+                serde_json::to_string(&plan).expect("reconnect burst plan serializes")
+            );
+        }
     }
 
     let (status, shutdown_phase) = if abort.should_stop_new_sessions() {
@@ -409,7 +444,15 @@ fn record_auth_metrics(metrics: &mut Metrics, auth: &AuthRunMetrics) {
     metrics.increment("auth_ticket_attempts", auth.ticket_attempts);
     metrics.increment("auth_ticket_successes", auth.ticket_successes);
     metrics.increment("auth_rate_limited", auth.rate_limited);
-    metrics.observe_latency("auth_operation_ms", auth.p50_ms());
+    if auth.login_latency_ms.count() > 0 {
+        metrics.merge_latency("login_ms", &auth.login_latency_ms);
+    }
+    if auth.ticket_latency_ms.count() > 0 {
+        metrics.merge_latency("ticket_ms", &auth.ticket_latency_ms);
+    }
+    if auth.latency_ms.count() > 0 {
+        metrics.merge_latency("auth_operation_ms", &auth.latency_ms);
+    }
 }
 
 fn run_auth_live(cli: &Cli) -> Result<(), String> {
@@ -874,6 +917,78 @@ fn usage() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dry_run_reconnect_burst_writes_offline_plan_metrics_without_transport() {
+        let temp_root = std::env::temp_dir().join(format!(
+            "loadtest-reconnect-dry-{}-{}",
+            std::process::id(),
+            unix_ms()
+        ));
+        let reports_root = temp_root.join("reports");
+        let config_path = temp_root.join("reconnect.json");
+        std::fs::create_dir_all(&temp_root).unwrap();
+        std::fs::write(
+            &config_path,
+            serde_json::to_vec(&serde_json::json!({
+                "schema_version": 1,
+                "environment": {"name": "local", "kind": "local"},
+                "targets": {"auth_http": "http://127.0.0.1:3000", "game_proxy": "kcp://127.0.0.1:4000"},
+                "budget": {
+                    "max_virtual_players": 1,
+                    "max_login_qps": 10.0,
+                    "max_new_connections_per_second": 10.0,
+                    "max_business_messages_per_second": 10.0,
+                    "max_messages_per_connection_per_second": 10.0,
+                    "max_duration_secs": 10,
+                    "max_total_operations": 8,
+                    "max_error_rate": 0.1,
+                    "max_connection_failure_rate": 0.1,
+                    "max_p99_ms": 100,
+                    "max_data_writes": 4
+                },
+                "scenario": {
+                    "name": "offline-reconnect",
+                    "load": {"type": "fixed_concurrency", "virtual_players": 1, "duration_secs": 1},
+                    "reconnect_burst": {
+                        "virtual_players": 1,
+                        "reconnect_attempts_per_player": 2,
+                        "reconnect_policy": {
+                            "max_attempts": 2,
+                            "base_delay_ms": 100,
+                            "max_delay_ms": 500
+                        }
+                    }
+                },
+                "reports_root": reports_root,
+                "prepare_reports_root": temp_root.join("prepare")
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        execute(vec![
+            "run".into(),
+            "--config".into(),
+            config_path.display().to_string(),
+            "--dry-run".into(),
+        ])
+        .unwrap();
+        let report_dir = std::fs::read_dir(&reports_root)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let metrics: loadtest_core::metrics::MetricsSnapshot =
+            serde_json::from_slice(&std::fs::read(report_dir.join("metrics.json")).unwrap())
+                .unwrap();
+        assert_eq!(metrics.counters["reconnect_burst_login_actions"], 1);
+        assert_eq!(metrics.counters["reconnect_burst_new_connections"], 4);
+        assert_eq!(metrics.counters["reconnect_burst_room_recoveries"], 2);
+        assert_eq!(metrics.counters["reconnect_burst_backoff_ms"], 100);
+        assert_eq!(metrics.counters["reconnect_burst_potential_data_writes"], 4);
+        std::fs::remove_dir_all(temp_root).unwrap();
+    }
 
     #[test]
     fn real_auth_run_requires_execute_and_exact_environment_confirmation_before_transport_setup() {

@@ -74,6 +74,30 @@ unavailable if service telemetry is incomplete or the generator saturated
 first. This prevents a generator bottleneck from being reported as server
 capacity.
 
+The offline reconnect-burst planner produces a bounded trace of
+`login -> issue-ticket -> KCP proxy connect -> proxy auth -> room reconnect`
+steps. It applies the configured login-QPS and new-connection-per-second hard
+limits before creating the trace, enforces `max_virtual_players`,
+`max_total_operations`, `max_data_writes`, global business-message and
+per-connection message rates, and `max_duration_secs`, and uses the shared KCP
+reconnect policy's exponential backoff. Login and ticket issuance reserve the
+same conservative potential-write upper bounds as the auth admission layer. It intentionally carries player slots
+only, never account IDs, character IDs, or ticket values. The deterministic
+fake exercises lifecycle transitions and backoff; it does not validate a real
+session, Redis ticket owner, proxy routing, or game-server room recovery.
+Because auth dispatch uses `Connection: close`, the planner also includes its
+login and ticket HTTP attempts in the new-connection budget, in addition to
+KCP proxy connects.
+
+Compatibility tests consume `packages/game-protocol`, generated
+`packages/proto/game.proto` messages, and the shared protocol-version policy.
+They assert the 14-byte header, message numbers, stream/no-delay KCP profile,
+exact response sequence matching, independent push handling, and that
+`RoomReconnectReq` carries only the current ticket-bound character's push
+cursor. Current production code must additionally verify signed ticket owner
+against Redis and resolve the reconnect subject server-side; an explicitly
+approved end-to-end smoke remains required to verify those service behaviors.
+
 `account-prepare plan` writes a manifest and a write estimate under
 `prepare_reports_root/account-manifests/<environment>/<batch>/`. It does not
 read a secret or make a network request. `plan` estimates registration and

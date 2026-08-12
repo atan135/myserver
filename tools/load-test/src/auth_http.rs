@@ -634,6 +634,8 @@ pub struct AuthRunMetrics {
     pub outcomes: BTreeMap<AuthOutcomeCategory, u64>,
     pub virtual_player_states: BTreeMap<VirtualPlayerState, u64>,
     pub latency_ms: HistogramSnapshot,
+    pub login_latency_ms: HistogramSnapshot,
+    pub ticket_latency_ms: HistogramSnapshot,
     /// Monotonic wall-clock duration supplied by the controller. It includes
     /// admission waits and excludes summed request latency.
     pub wall_clock_window_ms: u64,
@@ -654,6 +656,8 @@ impl Default for AuthRunMetrics {
             outcomes: BTreeMap::new(),
             virtual_player_states: BTreeMap::new(),
             latency_ms: HistogramSnapshot::default(),
+            login_latency_ms: HistogramSnapshot::default(),
+            ticket_latency_ms: HistogramSnapshot::default(),
             wall_clock_window_ms: 0,
         }
     }
@@ -672,6 +676,8 @@ impl AuthRunMetrics {
         self.rate_limited = self.rate_limited.saturating_add(other.rate_limited);
         self.wall_clock_window_ms = self.wall_clock_window_ms.max(other.wall_clock_window_ms);
         self.latency_ms.merge(&other.latency_ms);
+        self.login_latency_ms.merge(&other.login_latency_ms);
+        self.ticket_latency_ms.merge(&other.ticket_latency_ms);
         for (key, value) in &other.http_statuses {
             *self.http_statuses.entry(*key).or_default() += value;
         }
@@ -759,12 +765,14 @@ impl AuthRunMetrics {
             self.connection_failures += 1;
         }
         if matches!(request, AuthHttpRequest::Login { .. }) {
+            self.login_latency_ms.record(elapsed_ms);
             self.login_requests += 1;
             if outcome == AuthOutcomeCategory::Success {
                 self.login_successes += 1;
             }
         }
         if matches!(request, AuthHttpRequest::IssueTicket { .. }) {
+            self.ticket_latency_ms.record(elapsed_ms);
             self.ticket_attempts += 1;
             if outcome == AuthOutcomeCategory::Success {
                 self.ticket_successes += 1;
@@ -1519,6 +1527,8 @@ mod tests {
         assert_eq!(metrics.login_requests, 1);
         assert_eq!(metrics.ticket_attempts, 1);
         assert_eq!(metrics.ticket_successes, 1);
+        assert_eq!(metrics.login_latency_ms.count(), 1);
+        assert_eq!(metrics.ticket_latency_ms.count(), 1);
         assert!(metrics.p99_ms() >= 1);
         assert!(
             metrics

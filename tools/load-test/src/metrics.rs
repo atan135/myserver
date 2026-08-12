@@ -176,6 +176,17 @@ impl Metrics {
             .or_default()
             .record(milliseconds);
     }
+    pub fn merge_latency(&mut self, key: &str, histogram: &HistogramSnapshot) {
+        assert!(
+            is_latency_key(key),
+            "latency dimensions must be fixed low-cardinality categories"
+        );
+        self.snapshot
+            .histograms
+            .entry(key.to_string())
+            .or_default()
+            .merge(histogram);
+    }
     pub fn snapshot(&self) -> MetricsSnapshot {
         self.snapshot.clone()
     }
@@ -229,6 +240,11 @@ pub fn is_low_cardinality_key(key: &str) -> bool {
             | "frame_late_response"
             | "frame_local_dropped"
             | "gameplay_business_errors"
+            | "reconnect_burst_login_actions"
+            | "reconnect_burst_new_connections"
+            | "reconnect_burst_room_recoveries"
+            | "reconnect_burst_backoff_ms"
+            | "reconnect_burst_potential_data_writes"
     )
 }
 
@@ -246,6 +262,7 @@ fn is_latency_key(key: &str) -> bool {
             | "room_exit_ms"
             | "gameplay_step_ms"
             | "scheduler_lag_ms"
+            | "ticket_ms"
             | "auth_operation_ms"
     )
 }

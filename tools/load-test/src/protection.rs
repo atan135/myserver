@@ -138,6 +138,7 @@ mod tests {
                 steps: Vec::new(),
                 writes_data: false,
                 auth: None,
+                reconnect_burst: None,
             },
             reports_root: "reports".into(),
             prepare_reports_root: "prepare".into(),
