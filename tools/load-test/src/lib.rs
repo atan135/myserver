@@ -13,6 +13,7 @@ pub mod config;
 pub mod contracts;
 pub mod fake;
 pub mod game_kcp;
+pub mod gameplay;
 pub mod lifecycle;
 pub mod metrics;
 pub mod preflight;

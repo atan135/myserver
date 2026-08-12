@@ -215,6 +215,20 @@ pub fn is_low_cardinality_key(key: &str) -> bool {
             | "auth_ticket_successes"
             | "auth_rate_limited"
             | "auth_potential_data_writes"
+            | "room_create_or_join"
+            | "room_leave"
+            | "room_reconnect"
+            | "gameplay_messages_sent"
+            | "gameplay_bytes_sent"
+            | "gameplay_bytes_received"
+            | "frame_inputs_sent"
+            | "frame_inputs_received"
+            | "frame_bundles_received"
+            | "frame_out_of_order"
+            | "frame_timeouts"
+            | "frame_late_response"
+            | "frame_local_dropped"
+            | "gameplay_business_errors"
     )
 }
 
@@ -226,6 +240,11 @@ fn is_latency_key(key: &str) -> bool {
             | "connect_ms"
             | "auth_ms"
             | "first_frame_ms"
+            | "room_join_ms"
+            | "room_first_frame_ms"
+            | "room_recovery_ms"
+            | "room_exit_ms"
+            | "gameplay_step_ms"
             | "scheduler_lag_ms"
             | "auth_operation_ms"
     )

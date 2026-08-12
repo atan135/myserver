@@ -692,6 +692,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "lockstep-client"
+version = "0.1.0"
+dependencies = [
+ "prost",
+ "serde",
+ "serde_json",
+ "sim-core",
+]
+
+[[package]]
 name = "log"
 version = "0.4.33"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -744,6 +754,7 @@ dependencies = [
  "ctrlc",
  "game-protocol",
  "hdrhistogram",
+ "lockstep-client",
  "prost",
  "prost-build",
  "protoc-bin-vendored",

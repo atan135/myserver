@@ -1,4 +1,5 @@
 use crate::offline::MismatchDiff;
+use crate::protocol_version_policy::CURRENT_CLIENT_PROTOCOL_VERSION;
 use crate::scenario::{Scenario, ScenarioError};
 use sim_core::{
     CastSkillCommand, CombatConfig, CombatEffect, EntityId, FaceCommand, Fp, FrameId, MoveCommand,
@@ -1848,6 +1849,7 @@ fn drive_online_session(
         MessageType::AuthReq,
         &pb::AuthReq {
             ticket: ticket.to_owned(),
+            client_protocol_version: CURRENT_CLIENT_PROTOCOL_VERSION,
         },
     )?;
     let auth_packet = transport.read_until(MessageType::AuthRes, Some(auth_seq), None)?;
@@ -1978,6 +1980,7 @@ fn run_observer_recovery_probe(
         MessageType::AuthReq,
         &pb::AuthReq {
             ticket: observer_ticket.to_owned(),
+            client_protocol_version: CURRENT_CLIENT_PROTOCOL_VERSION,
         },
     )?;
     let auth_packet = transport.read_until(MessageType::AuthRes, Some(auth_seq), None)?;

@@ -25,6 +25,7 @@ base64 = "0.22"
 ctrlc = "3.4"
 game-protocol = { path = "../../packages/game-protocol" }
 hdrhistogram = { version = "7.5.4", features = ["serialization"] }
+lockstep-client = { path = "../lockstep-client" }
 prost = "0.13"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 serde = { version = "=1.0.217", features = ["derive"] }
