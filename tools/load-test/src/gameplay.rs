@@ -89,6 +89,22 @@ impl PlannedPacket {
                     .map_err(GameplayError::Protocol)
             })
     }
+
+    pub fn body(&self) -> Result<&[u8], GameplayError> {
+        self.packet
+            .get(game_protocol::HEADER_LEN..)
+            .ok_or(GameplayError::TruncatedPacket)
+    }
+
+    /// A profile packet never owns a live KCP sequence. The lifecycle assigns
+    /// it, then this helper retains the shared framing and protobuf body.
+    pub fn with_sequence(&self, sequence: u32) -> Result<Self, GameplayError> {
+        Ok(Self {
+            step: self.step.clone(),
+            packet: game_protocol::encode_packet(self.step.request_type, sequence, self.body()?),
+            sequence,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -169,8 +185,20 @@ impl GameplayProfilePlan {
         room_id: &str,
         policy_id: &str,
     ) -> Result<Vec<PlannedPacket>, GameplayError> {
+        self.packet_plan_with_input_limit(room_id, policy_id, self.lockstep_inputs.len() as u32)
+    }
+
+    pub fn packet_plan_with_input_limit(
+        &self,
+        room_id: &str,
+        policy_id: &str,
+        max_frame_inputs: u32,
+    ) -> Result<Vec<PlannedPacket>, GameplayError> {
         if room_id.trim().is_empty() || policy_id.trim().is_empty() {
             return Err(GameplayError::InvalidRoomPlan);
+        }
+        if max_frame_inputs == 0 || self.lockstep_inputs.is_empty() {
+            return Err(GameplayError::MissingFrameInput);
         }
         let mut sequence = 1_u32;
         let mut packets = Vec::new();
@@ -183,7 +211,7 @@ impl GameplayProfilePlan {
             },
         ));
         sequence += 1;
-        for input in &self.lockstep_inputs {
+        for input in self.lockstep_inputs.iter().take(max_frame_inputs as usize) {
             packets.push(plan_packet(
                 player_input_step(self.max_messages_per_connection_per_second),
                 sequence,
@@ -578,6 +606,38 @@ impl RoomFlowTracker {
         Ok(())
     }
 
+    pub fn begin_planned_action(
+        &mut self,
+        packet: &PlannedPacket,
+        started_ms: u64,
+    ) -> Result<(), GameplayError> {
+        match packet.step.request_type {
+            MessageType::RoomJoinReq => {
+                self.begin_join(packet.sequence, started_ms, packet.packet.len());
+                Ok(())
+            }
+            MessageType::RoomLeaveReq => {
+                self.begin_leave(packet.sequence, started_ms, packet.packet.len());
+                Ok(())
+            }
+            MessageType::RoomReconnectReq => {
+                self.begin_reconnect(packet.sequence, started_ms, packet.packet.len());
+                Ok(())
+            }
+            MessageType::PlayerInputReq => {
+                let input = PlayerInputReq::decode(packet.body()?)
+                    .map_err(|_| GameplayError::InvalidBody)?;
+                self.begin_frame_input(
+                    packet.sequence,
+                    input.frame_id,
+                    started_ms,
+                    packet.packet.len(),
+                )
+            }
+            _ => self.begin_action(packet, started_ms),
+        }
+    }
+
     pub fn expire_at(&mut self, now_ms: u64) {
         let expired = self
             .pending_responses
@@ -829,6 +889,8 @@ pub enum GameplayError {
     },
     #[error("room id and policy id are required for a room packet plan")]
     InvalidRoomPlan,
+    #[error("live gameplay requires at least one lockstep frame input")]
+    MissingFrameInput,
     #[error("planned packet is shorter than the shared header")]
     TruncatedPacket,
     #[error("shared protocol header rejected: {0}")]
@@ -845,6 +907,8 @@ pub enum GameplayError {
     UnknownMessageType(u16),
     #[error("invalid gameplay protobuf body")]
     InvalidBody,
+    #[error("gameplay response room does not match the approved room")]
+    RoomMismatch,
     #[error("gameplay server rejected {0:?}")]
     BusinessRejected(MessageType),
     #[error("late response {message_type:?} sequence {sequence}")]
@@ -932,6 +996,32 @@ mod tests {
         let input = PlayerInputReq::decode(body).unwrap();
         assert_eq!(input.action, "sim_input");
         assert!(input.payload_json.contains("move"));
+    }
+
+    #[test]
+    fn bounded_live_packet_plan_reframes_only_the_shared_sequence() {
+        let profile =
+            GameplayProfilePlan::from_lockstep_scenario_json(PlayerProfile::Normal, MOVE_SCENARIO)
+                .unwrap();
+        let packets = profile
+            .packet_plan_with_input_limit("approved-room", "approved-policy", 1)
+            .unwrap();
+        assert_eq!(packets.len(), 3);
+        let reframed = packets[1].with_sequence(99).unwrap();
+        assert_eq!(reframed.sequence, 99);
+        assert_eq!(reframed.packet_header().unwrap().seq, 99);
+        assert_eq!(reframed.step.request_type, MessageType::PlayerInputReq);
+        assert_eq!(
+            PlayerInputReq::decode(reframed.body().unwrap())
+                .unwrap()
+                .action,
+            "sim_input"
+        );
+        assert!(
+            profile
+                .packet_plan_with_input_limit("approved-room", "approved-policy", 0)
+                .is_err()
+        );
     }
 
     #[test]

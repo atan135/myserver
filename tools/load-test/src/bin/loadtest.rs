@@ -11,8 +11,8 @@ use loadtest_core::accounts::{
     AccountLeasePool, EnvironmentSecretProvider, SecretProvider, read_manifest,
 };
 use loadtest_core::auth_budget::{
-    estimate_auth_run, validate_auth_run_budget, validate_game_run_budget,
-    validate_staged_auth_windows,
+    LIVE_GAMEPLAY_POTENTIAL_WRITES_PER_MESSAGE, estimate_auth_run, validate_auth_run_budget,
+    validate_game_run_budget_for_scenario, validate_staged_auth_windows,
 };
 use loadtest_core::auth_http::{
     AuthAdmissionError, AuthDispatchAdmission, AuthRunMetrics, FakeAuthHttpService,
@@ -578,7 +578,7 @@ fn run_live(cli: &Cli) -> Result<(), String> {
     validate_staged_auth_windows(&config.scenario, &budget)?;
     validate_auth_run_budget(&auth_budget_estimate, &budget)?;
     if game_mode {
-        validate_game_run_budget(&auth_budget_estimate, &budget)?;
+        validate_game_run_budget_for_scenario(&auth_budget_estimate, &config.scenario, &budget)?;
     }
     let manifest_path = cli
         .account_manifest
@@ -896,14 +896,39 @@ fn run_live(cli: &Cli) -> Result<(), String> {
                                                 "game execution checkpoint stopped",
                                             )
                                         })?;
-                                        if checkpoint == GameRunnerCheckpoint::OutboundMessage {
-                                            dispatch_admission
-                                                .admit_game_message(action_deadline, control)
-                                                .map_err(|error| {
-                                                    map_auth_admission_to_game_error(
-                                                        &mut abort, error,
+                                        match checkpoint {
+                                            GameRunnerCheckpoint::OutboundMessage => {
+                                                dispatch_admission
+                                                    .admit_game_message(action_deadline, control)
+                                                    .map_err(|error| {
+                                                        map_auth_admission_to_game_error(
+                                                            &mut abort, error,
+                                                        )
+                                                    })?;
+                                            }
+                                            GameRunnerCheckpoint::GameplayOutboundMessage => {
+                                                dispatch_admission
+                                                    .admit_gameplay_message(
+                                                        LIVE_GAMEPLAY_POTENTIAL_WRITES_PER_MESSAGE,
+                                                        action_deadline,
+                                                        control,
                                                     )
-                                                })?;
+                                                    .map_err(|error| {
+                                                        map_auth_admission_to_game_error(
+                                                            &mut abort, error,
+                                                        )
+                                                    })?;
+                                            }
+                                            GameRunnerCheckpoint::ReconnectConnection => {
+                                                dispatch_admission
+                                                    .admit_game_connection(action_deadline, control)
+                                                    .map_err(|error| {
+                                                        map_auth_admission_to_game_error(
+                                                            &mut abort, error,
+                                                        )
+                                                    })?;
+                                            }
+                                            GameRunnerCheckpoint::Control => {}
                                         }
                                         Ok(())
                                     },
@@ -917,9 +942,24 @@ fn run_live(cli: &Cli) -> Result<(), String> {
                                 if result.terminal_state
                                     == loadtest_core::virtual_player::VirtualPlayerSessionState::Closed =>
                             {
+                                if let Some(gameplay_metrics) = result.gameplay_metrics.as_ref() {
+                                    core_metrics.merge_snapshot(gameplay_metrics);
+                                }
                                 completed_game_session = true;
                             }
-                            Ok(_) | Err(_) => {
+                            Ok(_) => {
+                                errors.push(
+                                    "game_session_failed",
+                                    "KCP game session did not complete",
+                                    Default::default(),
+                                );
+                                failed = true;
+                                execution_failed = true;
+                            }
+                            Err(error) => {
+                                if let Some(gameplay_metrics) = error.gameplay_metrics() {
+                                    core_metrics.merge_snapshot(gameplay_metrics);
+                                }
                                 errors.push(
                                     "game_session_failed",
                                     "KCP game session did not complete",

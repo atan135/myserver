@@ -42,6 +42,7 @@ pub enum VirtualPlayerEvent {
     GameAuthenticated,
     Active,
     HeartbeatAcknowledged,
+    Response { message_type: MessageType, seq: u32 },
     Push { message_type: MessageType, seq: u32 },
     ReconnectScheduled { attempt: u32, delay_ms: u64 },
     LateResponseDropped { message_type: MessageType, seq: u32 },
@@ -226,6 +227,21 @@ impl VirtualPlayerSession {
             .map_err(|error| self.fail(pool, error))
     }
 
+    pub fn begin_gameplay_request(
+        &mut self,
+        pool: &mut AccountLeasePool,
+        request_type: MessageType,
+        expected_response: MessageType,
+        body: &[u8],
+    ) -> Result<OutboundPacket, VirtualPlayerError> {
+        if self.state != VirtualPlayerSessionState::Active {
+            return self.invalid_state(pool, "begin_gameplay_request");
+        }
+        self.game
+            .begin_gameplay_request(request_type, expected_response, body)
+            .map_err(|error| self.fail(pool, error))
+    }
+
     pub fn handle_request_timeout(
         &mut self,
         pool: &mut AccountLeasePool,
@@ -322,6 +338,9 @@ impl VirtualPlayerSession {
             }
             GameLifecycleEvent::HeartbeatAcknowledged => {
                 Ok(VirtualPlayerEvent::HeartbeatAcknowledged)
+            }
+            GameLifecycleEvent::Response { message_type, seq } => {
+                Ok(VirtualPlayerEvent::Response { message_type, seq })
             }
             GameLifecycleEvent::Push { message_type, seq } => {
                 Ok(VirtualPlayerEvent::Push { message_type, seq })

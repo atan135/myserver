@@ -85,6 +85,54 @@ same conservative potential-write upper bounds as the auth admission layer. It i
 only, never account IDs, character IDs, or ticket values. The deterministic
 fake exercises lifecycle transitions and backoff; it does not validate a real
 session, Redis ticket owner, proxy routing, or game-server room recovery.
+
+### Opt-in live room gameplay
+
+The normal scenario leaves `scenario.live_gameplay` absent, so a guarded live
+run remains `AuthReq -> AuthRes -> PingReq -> PingRes -> close`. Room, frame,
+and reconnect traffic is deliberately opt-in and requires all of the following:
+
+- an explicitly approved, pre-provisioned `room_id` and `policy_id`;
+- `writes_data: true` and a non-idle `profile`;
+- a bounded lockstep JSON payload (64 KiB maximum) and `max_frame_inputs` in
+  `1..=8`;
+- optional reconnect with exactly one reconnect attempt and an explicitly
+  supplied push cursor.
+
+The runner sends only the planned join, bounded frame inputs, optional
+ticket-bound room reconnect, and leave messages. Every mutable gameplay message
+reserves `4` potential data writes before dispatch. A no-reconnect flow with one
+frame input therefore reserves `12` gameplay writes; enabling the one reconnect
+reserves `20`, in addition to the auth/login/select/ticket/logout estimate.
+Responses are correlated by the shared `(message type, sequence)` contract and
+successful room responses must echo the approved room ID. Step reads enforce the
+declared 2-second deadline independently of the overall run deadline.
+
+Credential-free template (disabled by omission):
+
+```json
+{
+  "scenario": {
+    "name": "approved-room-smoke",
+    "load": { "type": "staged", "stages": [{ "name": "one-vp", "virtual_players": 1, "duration_secs": 31 }] },
+    "writes_data": true,
+    "live_gameplay": {
+      "room_id": "<approved-room-id>",
+      "policy_id": "<approved-policy-id>",
+      "profile": "normal",
+      "lockstep_scenario_json": "<bounded scenario JSON>",
+      "max_frame_inputs": 1
+    }
+  }
+}
+```
+
+This template contains no credentials and is not executable until the normal
+`--execute-game`, `--confirm-game`, manifest, private-config, target, and hard
+budget gates all pass. A real smoke requires a separately confirmed approved
+room/policy, one virtual player, a staged 31-second window, `max_frame_inputs: 1`,
+and the smallest possible auth/game rate and write budgets. Offline tests and
+dry-runs never create a KCP transport and never send these requests.
 Because auth dispatch uses `Connection: close`, the planner also includes its
 login and ticket HTTP attempts in the new-connection budget, in addition to
 KCP proxy connects.

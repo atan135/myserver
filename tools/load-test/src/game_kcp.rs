@@ -267,6 +267,7 @@ impl ReconnectPolicy {
 #[derive(Clone, PartialEq, Eq)]
 pub struct OutboundPacket {
     message_type: MessageType,
+    expected_response: MessageType,
     seq: u32,
     bytes: Vec<u8>,
 }
@@ -282,9 +283,15 @@ impl std::fmt::Debug for OutboundPacket {
 }
 
 impl OutboundPacket {
-    fn new(message_type: MessageType, seq: u32, body: Vec<u8>) -> Self {
+    fn new(
+        message_type: MessageType,
+        expected_response: MessageType,
+        seq: u32,
+        body: Vec<u8>,
+    ) -> Self {
         Self {
             message_type,
+            expected_response,
             seq,
             bytes: game_protocol::encode_packet(message_type, seq, &body),
         }
@@ -296,6 +303,10 @@ impl OutboundPacket {
 
     pub fn seq(&self) -> u32 {
         self.seq
+    }
+
+    pub fn body(&self) -> &[u8] {
+        &self.bytes[game_protocol::HEADER_LEN..]
     }
 
     pub fn into_bytes(self) -> Vec<u8> {
@@ -317,6 +328,7 @@ pub enum GameLifecycleEvent {
     Authenticated,
     AuthRejected { reason: AuthRejectReason },
     HeartbeatAcknowledged,
+    Response { message_type: MessageType, seq: u32 },
     Push { message_type: MessageType, seq: u32 },
     ReconnectScheduled { attempt: u32, delay_ms: u64 },
     LateResponseDropped { message_type: MessageType, seq: u32 },
@@ -403,6 +415,7 @@ impl GameConnectionLifecycle {
         self.state = GameConnectionState::AwaitingAuth;
         Ok(OutboundPacket::new(
             MessageType::AuthReq,
+            MessageType::AuthRes,
             seq,
             game_protocol::encode_body(&AuthReq {
                 ticket: ticket.to_owned(),
@@ -417,8 +430,29 @@ impl GameConnectionLifecycle {
         self.session.begin_request(MessageType::PingRes, seq)?;
         Ok(OutboundPacket::new(
             MessageType::PingReq,
+            MessageType::PingRes,
             seq,
             game_protocol::encode_body(&PingReq { client_time }),
+        ))
+    }
+
+    /// Registers an already-validated player request after KCP auth. Sequence
+    /// allocation and exact response correlation remain owned here rather
+    /// than by a gameplay profile or the live runner.
+    pub fn begin_gameplay_request(
+        &mut self,
+        request_type: MessageType,
+        expected_response: MessageType,
+        body: &[u8],
+    ) -> Result<OutboundPacket, GameKcpError> {
+        self.require_state("begin_gameplay_request", GameConnectionState::Authenticated)?;
+        let seq = self.allocate_seq()?;
+        self.session.begin_request(expected_response, seq)?;
+        Ok(OutboundPacket::new(
+            request_type,
+            expected_response,
+            seq,
+            body.to_vec(),
         ))
     }
 
@@ -467,12 +501,12 @@ impl GameConnectionLifecycle {
                 }
                 _ => unreachable!("known push must be counted as a push"),
             },
-            _ => {
-                self.session.ingest(packet)?;
-                Err(GameKcpError::UnsupportedLifecycleResponse(
-                    message_type as u16,
-                ))
-            }
+            _ => match self.session.ingest(packet)? {
+                KcpSessionEvent::Response { message_type, seq } => {
+                    Ok(GameLifecycleEvent::Response { message_type, seq })
+                }
+                _ => unreachable!("non-push packets must be exact responses"),
+            },
         }
     }
 
@@ -564,20 +598,14 @@ impl GameConnectionLifecycle {
     }
 
     fn cancel_outbound_request(&mut self, outbound: &OutboundPacket) -> Result<(), GameKcpError> {
-        let expected_response = match outbound.message_type {
-            MessageType::AuthReq => MessageType::AuthRes,
-            MessageType::PingReq => MessageType::PingRes,
-            message_type => {
-                return Err(GameKcpError::UnsupportedOutboundRequest(
-                    message_type as u16,
-                ));
-            }
-        };
-        if self.session.cancel_request(expected_response, outbound.seq) {
+        if self
+            .session
+            .cancel_request(outbound.expected_response, outbound.seq)
+        {
             Ok(())
         } else {
             Err(GameKcpError::OutboundRequestNotPending {
-                message_type: expected_response as u16,
+                message_type: outbound.expected_response as u16,
                 seq: outbound.seq,
             })
         }
@@ -990,6 +1018,45 @@ mod tests {
             GameLifecycleEvent::HeartbeatAcknowledged
         );
         assert_eq!(lifecycle.state(), GameConnectionState::Authenticated);
+    }
+
+    #[test]
+    fn authenticated_gameplay_request_uses_shared_sequence_and_exact_response_type() {
+        let mut lifecycle = GameConnectionLifecycle::new(1_024, policy(1)).unwrap();
+        lifecycle.begin_connect().unwrap();
+        lifecycle.begin_auth("private-ticket").unwrap();
+        lifecycle.handle_packet(auth_response(1, true, "")).unwrap();
+
+        let body = game_protocol::encode_body(&crate::pb::RoomJoinReq {
+            room_id: "approved-room".into(),
+            policy_id: "approved-policy".into(),
+        });
+        let join = lifecycle
+            .begin_gameplay_request(
+                game_protocol::MessageType::RoomJoinReq,
+                game_protocol::MessageType::RoomJoinRes,
+                &body,
+            )
+            .unwrap();
+        assert_eq!(join.seq(), 2);
+        assert_eq!(join.message_type(), game_protocol::MessageType::RoomJoinReq);
+        assert_eq!(
+            lifecycle
+                .handle_packet(game_protocol::Packet::new(
+                    game_protocol::PacketHeader {
+                        msg_type: game_protocol::MessageType::RoomJoinRes as u16,
+                        seq: join.seq(),
+                        body_len: 0,
+                    },
+                    Vec::new(),
+                ))
+                .unwrap(),
+            GameLifecycleEvent::Response {
+                message_type: game_protocol::MessageType::RoomJoinRes,
+                seq: 2,
+            }
+        );
+        assert_eq!(lifecycle.pending_requests(), 0);
     }
 
     #[test]

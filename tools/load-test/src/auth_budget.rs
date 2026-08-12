@@ -57,13 +57,81 @@ pub struct AuthRunBudgetEstimate {
 pub const MIN_GAME_CONNECTIONS_PER_FLOW: u64 = 1;
 pub const MIN_GAME_MESSAGES_PER_FLOW: u64 = 2;
 
+/// Room join, one or more PlayerInput messages, and leave can append game,
+/// room, audit, and Redis state. This is intentionally an operation-level
+/// upper bound, not a claim about a particular storage implementation.
+pub const LIVE_GAMEPLAY_POTENTIAL_WRITES_PER_MESSAGE: u64 = 4;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GameRunBudgetEstimate {
+    pub kcp_connections_per_flow: u64,
+    pub game_messages_per_flow: u64,
+    pub gameplay_potential_writes_per_flow: u64,
+}
+
+pub fn estimate_game_run(scenario: &Scenario) -> Result<GameRunBudgetEstimate, String> {
+    let Some(gameplay) = &scenario.live_gameplay else {
+        return Ok(GameRunBudgetEstimate {
+            kcp_connections_per_flow: MIN_GAME_CONNECTIONS_PER_FLOW,
+            game_messages_per_flow: MIN_GAME_MESSAGES_PER_FLOW,
+            gameplay_potential_writes_per_flow: 0,
+        });
+    };
+    let business_messages = u64::from(gameplay.max_frame_inputs)
+        .checked_add(2)
+        .ok_or("live gameplay message estimate overflowed")?;
+    let (extra_connections, extra_messages) = if gameplay.reconnect.is_some() {
+        // close/reconnect, AuthReq again, and RoomReconnectReq.
+        (1, 2)
+    } else {
+        (0, 0)
+    };
+    let game_messages_per_flow = MIN_GAME_MESSAGES_PER_FLOW
+        .checked_add(business_messages)
+        .and_then(|total| total.checked_add(extra_messages))
+        .ok_or("live gameplay message estimate overflowed")?;
+    let gameplay_potential_writes_per_flow = business_messages
+        .checked_add(u64::from(extra_messages))
+        .and_then(|count| count.checked_mul(LIVE_GAMEPLAY_POTENTIAL_WRITES_PER_MESSAGE))
+        .ok_or("live gameplay write estimate overflowed")?;
+    Ok(GameRunBudgetEstimate {
+        kcp_connections_per_flow: MIN_GAME_CONNECTIONS_PER_FLOW + extra_connections,
+        game_messages_per_flow,
+        gameplay_potential_writes_per_flow,
+    })
+}
+
 pub fn validate_game_run_budget(
     auth: &AuthRunBudgetEstimate,
     budget: &HardBudget,
 ) -> Result<(), String> {
+    validate_game_run_budget_with_estimate(
+        auth,
+        budget,
+        GameRunBudgetEstimate {
+            kcp_connections_per_flow: MIN_GAME_CONNECTIONS_PER_FLOW,
+            game_messages_per_flow: MIN_GAME_MESSAGES_PER_FLOW,
+            gameplay_potential_writes_per_flow: 0,
+        },
+    )
+}
+
+pub fn validate_game_run_budget_for_scenario(
+    auth: &AuthRunBudgetEstimate,
+    scenario: &Scenario,
+    budget: &HardBudget,
+) -> Result<(), String> {
+    validate_game_run_budget_with_estimate(auth, budget, estimate_game_run(scenario)?)
+}
+
+fn validate_game_run_budget_with_estimate(
+    auth: &AuthRunBudgetEstimate,
+    budget: &HardBudget,
+    game: GameRunBudgetEstimate,
+) -> Result<(), String> {
     let kcp_connections = auth
         .scheduled_flows
-        .checked_mul(MIN_GAME_CONNECTIONS_PER_FLOW)
+        .checked_mul(game.kcp_connections_per_flow)
         .ok_or("game connection budget estimate overflowed")?;
     let operations = auth
         .http_operations
@@ -71,7 +139,7 @@ pub fn validate_game_run_budget(
             kcp_connections
                 .checked_add(
                     auth.scheduled_flows
-                        .checked_mul(MIN_GAME_MESSAGES_PER_FLOW)
+                        .checked_mul(game.game_messages_per_flow)
                         .ok_or("game operation budget estimate overflowed")?,
                 )
                 .ok_or("game operation budget estimate overflowed")?,
@@ -83,13 +151,27 @@ pub fn validate_game_run_budget(
             budget.max_total_operations
         ));
     }
+    let potential_data_writes = auth
+        .potential_data_writes
+        .checked_add(
+            auth.scheduled_flows
+                .checked_mul(game.gameplay_potential_writes_per_flow)
+                .ok_or("game write budget estimate overflowed")?,
+        )
+        .ok_or("game write budget estimate overflowed")?;
+    if potential_data_writes > budget.max_data_writes {
+        return Err(format!(
+            "auth+game scenario estimates {potential_data_writes} potential data writes, exceeding max_data_writes {}",
+            budget.max_data_writes
+        ));
+    }
     let available_duration_ms = auth.scenario_duration_secs.saturating_mul(1_000);
     let connection_admission_ms =
         minimum_admission_ms(kcp_connections, budget.max_new_connections_per_second)?;
     let message_admission_ms = minimum_admission_ms(
         auth.http_operations.saturating_add(
             auth.scheduled_flows
-                .saturating_mul(MIN_GAME_MESSAGES_PER_FLOW),
+                .saturating_mul(game.game_messages_per_flow),
         ),
         budget
             .max_business_messages_per_second
@@ -507,7 +589,7 @@ fn ceil_div(numerator: u64, denominator: u64) -> u64 {
 mod tests {
     use super::*;
     use crate::auth_http::AuthDispatchAdmission;
-    use crate::config::{AuthScenario, LoadStage};
+    use crate::config::{AuthScenario, LiveGameplayReconnect, LiveGameplayScenario, LoadStage};
 
     fn budget() -> HardBudget {
         HardBudget {
@@ -537,6 +619,7 @@ mod tests {
                 same_account_session_effect: None,
             }),
             reconnect_burst: None,
+            live_gameplay: None,
         }
     }
 
@@ -666,6 +749,42 @@ mod tests {
         // The existing auth estimate accounts for its HTTP connection. The
         // game extension must reserve only the additional KCP connection.
         assert!(validate_game_run_budget(&estimate, &constrained).is_ok());
+    }
+
+    #[test]
+    fn live_gameplay_budget_reserves_messages_connections_and_mutable_effects() {
+        let mut scenario = auth_scenario(LoadModel::FixedConcurrency {
+            virtual_players: 1,
+            duration_secs: 30,
+        });
+        scenario.writes_data = true;
+        scenario.live_gameplay = Some(LiveGameplayScenario {
+            room_id: "approved-room".into(),
+            policy_id: "approved-policy".into(),
+            profile: crate::gameplay::PlayerProfile::Normal,
+            lockstep_scenario_json: include_str!("../../lockstep-client/scenarios/move_stop.json")
+                .into(),
+            max_frame_inputs: 1,
+            reconnect: Some(LiveGameplayReconnect {
+                last_character_push_sequence: 0,
+                reconnect_policy: crate::config::ReconnectPolicyConfig {
+                    max_attempts: 1,
+                    base_delay_ms: 100,
+                    max_delay_ms: 100,
+                    max_jitter_ms: 0,
+                },
+            }),
+        });
+        let estimate = estimate_auth_run(&scenario, &budget()).unwrap();
+        let game = estimate_game_run(&scenario).unwrap();
+        assert_eq!(game.kcp_connections_per_flow, 2);
+        assert_eq!(game.game_messages_per_flow, 7);
+        assert_eq!(game.gameplay_potential_writes_per_flow, 20);
+
+        let mut constrained = budget();
+        constrained.max_total_operations = estimate.http_operations + 8;
+        constrained.max_data_writes = estimate.potential_data_writes + 19;
+        assert!(validate_game_run_budget_for_scenario(&estimate, &scenario, &constrained).is_err());
     }
 
     #[test]

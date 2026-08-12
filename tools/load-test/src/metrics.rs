@@ -190,6 +190,10 @@ impl Metrics {
     pub fn snapshot(&self) -> MetricsSnapshot {
         self.snapshot.clone()
     }
+
+    pub fn merge_snapshot(&mut self, snapshot: &MetricsSnapshot) {
+        self.snapshot.merge(snapshot);
+    }
 }
 
 pub fn is_low_cardinality_key(key: &str) -> bool {

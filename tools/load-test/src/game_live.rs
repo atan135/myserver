@@ -5,17 +5,23 @@
 //! opens a socket, but exercises the same virtual-player lifecycle that a
 //! future KCP transport must drive.
 
+use std::fmt::Display;
 use std::time::{Duration, Instant};
 
 use game_protocol::{MessageType, Packet, read_packet};
+use prost::Message;
 use thiserror::Error;
-use tokio::time::timeout;
+use tokio::time::{sleep, timeout};
 use tokio_kcp::KcpStream;
 
 use crate::accounts::{AccountLease, AccountLeasePool};
-use crate::config::{LoadTestConfig, RunAccess};
+use crate::config::{LiveGameplayScenario, LoadTestConfig, RunAccess};
 use crate::fake::{FakeKcpEvent, FakeKcpService};
 use crate::game_kcp::{GameProxyEndpoint, KcpConnector, OutboundPacket, ReconnectPolicy};
+use crate::gameplay::{
+    GameplayError, GameplayProfilePlan, PlannedPacket, RoomFlowTracker, room_reconnect_step,
+};
+use crate::pb::{PlayerInputRes, RoomJoinRes, RoomLeaveRes, RoomReconnectReq, RoomReconnectRes};
 use crate::virtual_player::{
     PlayerConnection, VirtualPlayerError, VirtualPlayerEvent, VirtualPlayerSession,
     VirtualPlayerSessionState,
@@ -77,6 +83,13 @@ pub enum GameLiveError {
     Transport(&'static str),
     #[error("game session lifecycle failed")]
     Session(#[source] VirtualPlayerError),
+    #[error("gameplay flow failed: {0}")]
+    Gameplay(#[from] GameplayError),
+    #[error("live gameplay flow failed: {message}")]
+    GameplayFailed {
+        message: String,
+        metrics: crate::metrics::MetricsSnapshot,
+    },
     #[error("game transport returned an unexpected lifecycle event")]
     UnexpectedLifecycleEvent,
 }
@@ -84,6 +97,17 @@ pub enum GameLiveError {
 impl From<VirtualPlayerError> for GameLiveError {
     fn from(error: VirtualPlayerError) -> Self {
         Self::Session(error)
+    }
+}
+
+impl GameLiveError {
+    /// Partial gameplay telemetry stays low-cardinality and is retained for a
+    /// failed flow, while the caller still reports the session as failed.
+    pub fn gameplay_metrics(&self) -> Option<&crate::metrics::MetricsSnapshot> {
+        match self {
+            Self::GameplayFailed { metrics, .. } => Some(metrics),
+            _ => None,
+        }
     }
 }
 
@@ -100,6 +124,12 @@ pub enum GameRunnerStep {
     Active,
     HeartbeatSent,
     HeartbeatAcknowledged,
+    RoomJoined,
+    FrameInputAcknowledged,
+    FrameBundleReceived,
+    KcpReconnected,
+    RoomReconnected,
+    RoomLeft,
     Leaving,
     Closed,
     Failed,
@@ -112,6 +142,8 @@ pub enum GameRunnerStep {
 pub enum GameRunnerCheckpoint {
     Control,
     OutboundMessage,
+    GameplayOutboundMessage,
+    ReconnectConnection,
 }
 
 /// The guarded minimal KCP flow has three safety-only checkpoints and exactly
@@ -125,12 +157,21 @@ const MINIMAL_LIVE_KCP_CHECKPOINTS: [GameRunnerCheckpoint; 5] = [
     GameRunnerCheckpoint::Control,
 ];
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct GameRunResult {
     pub steps: Vec<GameRunnerStep>,
     pub terminal_state: VirtualPlayerSessionState,
     pub connection_released: bool,
     pub lease_released: bool,
+    pub gameplay_metrics: Option<crate::metrics::MetricsSnapshot>,
+}
+
+#[derive(Debug, Clone)]
+struct PreparedLiveGameplay {
+    approved_room_id: String,
+    before_reconnect: Vec<PlannedPacket>,
+    leave: PlannedPacket,
+    reconnect_cursor: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -182,7 +223,7 @@ impl GameSessionRunner {
             VirtualPlayerEvent::GameAuthenticated => steps.push(GameRunnerStep::GameAuthenticated),
             VirtualPlayerEvent::Failed => {
                 steps.push(GameRunnerStep::Failed);
-                return Ok(result(session, steps));
+                return Ok(result(session, steps, None));
             }
             _ => {
                 session.close(pool);
@@ -211,7 +252,7 @@ impl GameSessionRunner {
             }
             VirtualPlayerEvent::Failed => {
                 steps.push(GameRunnerStep::Failed);
-                return Ok(result(session, steps));
+                return Ok(result(session, steps, None));
             }
             _ => {
                 session.close(pool);
@@ -222,7 +263,7 @@ impl GameSessionRunner {
         steps.push(GameRunnerStep::Leaving);
         session.close(pool);
         steps.push(GameRunnerStep::Closed);
-        Ok(result(session, steps))
+        Ok(result(session, steps, None))
     }
 
     fn advance_authenticated_state(
@@ -275,9 +316,21 @@ impl GameSessionRunner {
         ticket: &str,
         mut checkpoint: impl FnMut(GameRunnerCheckpoint) -> Result<(), GameLiveError>,
     ) -> Result<GameRunResult, GameLiveError> {
+        let gameplay = config
+            .scenario
+            .live_gameplay
+            .as_ref()
+            .map(prepare_live_gameplay)
+            .transpose()?;
         let mut steps = vec![GameRunnerStep::AccountLeased];
-        let mut session =
-            VirtualPlayerSession::new(lease, self.max_body_len, self.reconnect_policy)?;
+        let reconnect_policy = config
+            .scenario
+            .live_gameplay
+            .as_ref()
+            .and_then(|gameplay| gameplay.reconnect)
+            .map(|reconnect| reconnect.reconnect_policy.into())
+            .unwrap_or(self.reconnect_policy);
+        let mut session = VirtualPlayerSession::new(lease, self.max_body_len, reconnect_policy)?;
         if let Err(error) = gate.validate() {
             session.close(pool);
             return Err(error);
@@ -337,7 +390,7 @@ impl GameSessionRunner {
             Ok(VirtualPlayerEvent::Failed) => {
                 steps.push(GameRunnerStep::Failed);
                 transport.close();
-                return Ok(result(session, steps));
+                return Ok(result(session, steps, None));
             }
             Ok(_) => {
                 transport.close();
@@ -396,7 +449,7 @@ impl GameSessionRunner {
             Ok(VirtualPlayerEvent::Failed) => {
                 steps.push(GameRunnerStep::Failed);
                 transport.close();
-                return Ok(result(session, steps));
+                return Ok(result(session, steps, None));
             }
             Ok(_) => {
                 transport.close();
@@ -409,6 +462,320 @@ impl GameSessionRunner {
                 return Err(error.into());
             }
         }
+        let gameplay_metrics = if let Some(gameplay) = gameplay.as_ref() {
+            let mut tracker = RoomFlowTracker::default();
+            for packet in &gameplay.before_reconnect {
+                let step = packet.step.clone();
+                let step_timeout_ms = step.timeout_ms;
+                let frame_bundles_before = tracker.metrics().frame_bundles_received;
+                let packet = match prepare_outbound_gameplay_packet(&mut session, pool, packet) {
+                    Ok(packet) => packet,
+                    Err(error) => {
+                        transport.close();
+                        session.close(pool);
+                        return Err(error);
+                    }
+                };
+                if let Err(error) = run_checkpoint(
+                    &mut checkpoint,
+                    GameRunnerCheckpoint::GameplayOutboundMessage,
+                ) {
+                    self.close_after_write_failure(&mut session, pool, &packet);
+                    transport.close();
+                    return Err(error);
+                }
+                if let Err(error) = transport.send(&packet).await {
+                    self.close_after_write_failure(&mut session, pool, &packet);
+                    transport.close();
+                    return Err(error);
+                }
+                let now_ms = monotonic_ms();
+                let planned = match planned_packet_with_live_sequence(&packet, step) {
+                    Ok(planned) => planned,
+                    Err(error) => {
+                        self.close_after_timeout(&mut session, pool, &packet);
+                        transport.close();
+                        return Err(gameplay_failure(error, &tracker));
+                    }
+                };
+                if let Err(error) = tracker.begin_planned_action(&planned, now_ms) {
+                    self.close_after_timeout(&mut session, pool, &packet);
+                    transport.close();
+                    return Err(gameplay_failure(error, &tracker));
+                }
+                let response = match receive_gameplay_response(
+                    transport,
+                    &mut session,
+                    pool,
+                    &mut tracker,
+                    &packet,
+                    step_timeout_ms,
+                    Some(&gameplay.approved_room_id),
+                    &mut checkpoint,
+                )
+                .await
+                {
+                    Ok(response) => response,
+                    Err(error) => {
+                        transport.close();
+                        return Err(error);
+                    }
+                };
+                match response {
+                    MessageType::RoomJoinRes => {
+                        steps.push(GameRunnerStep::RoomJoined);
+                    }
+                    MessageType::PlayerInputRes => {
+                        steps.push(GameRunnerStep::FrameInputAcknowledged);
+                        if tracker.metrics().frame_bundles_received == frame_bundles_before {
+                            receive_frame_bundle(
+                                transport,
+                                &mut session,
+                                pool,
+                                &mut tracker,
+                                step_timeout_ms,
+                                &mut checkpoint,
+                            )
+                            .await?;
+                        }
+                        steps.push(GameRunnerStep::FrameBundleReceived);
+                    }
+                    MessageType::RoomLeaveRes => steps.push(GameRunnerStep::RoomLeft),
+                    _ => {}
+                }
+            }
+            if let Some(cursor) = gameplay.reconnect_cursor {
+                transport.close();
+                let delay_ms = match session.handle_disconnect(pool, 0) {
+                    Ok(VirtualPlayerEvent::ReconnectScheduled { delay_ms, .. }) => delay_ms,
+                    Ok(VirtualPlayerEvent::Failed) => {
+                        steps.push(GameRunnerStep::Failed);
+                        return Ok(result(session, steps, Some(tracker.telemetry())));
+                    }
+                    Ok(_) => {
+                        session.close(pool);
+                        return Err(GameLiveError::UnexpectedLifecycleEvent);
+                    }
+                    Err(error) => {
+                        session.close(pool);
+                        return Err(error.into());
+                    }
+                };
+                if let Err(error) = run_checkpoint(&mut checkpoint, GameRunnerCheckpoint::Control) {
+                    session.close(pool);
+                    return Err(gameplay_failure(error, &tracker));
+                }
+                let remaining = match transport.remaining() {
+                    Ok(remaining) => remaining,
+                    Err(error) => {
+                        transport.close();
+                        session.close(pool);
+                        return Err(gameplay_failure(error, &tracker));
+                    }
+                };
+                if timeout(remaining, sleep(Duration::from_millis(delay_ms)))
+                    .await
+                    .is_err()
+                {
+                    transport.close();
+                    session.close(pool);
+                    return Err(gameplay_failure(
+                        "KCP reconnect backoff exceeded action deadline",
+                        &tracker,
+                    ));
+                }
+                if let Err(error) = run_checkpoint(&mut checkpoint, GameRunnerCheckpoint::Control) {
+                    transport.close();
+                    session.close(pool);
+                    return Err(gameplay_failure(error, &tracker));
+                }
+                let connection = match reconnect_live_transport(
+                    transport,
+                    config,
+                    access,
+                    endpoint,
+                    &mut checkpoint,
+                )
+                .await
+                {
+                    Ok(connection) => connection,
+                    Err(error) => {
+                        session.close(pool);
+                        return Err(error);
+                    }
+                };
+                let auth = match session.connect_and_begin_auth(pool, connection, ticket) {
+                    Ok(outbound) => outbound,
+                    Err(error) => {
+                        transport.close();
+                        session.close(pool);
+                        return Err(error.into());
+                    }
+                };
+                if let Err(error) =
+                    run_checkpoint(&mut checkpoint, GameRunnerCheckpoint::OutboundMessage)
+                {
+                    self.close_after_write_failure(&mut session, pool, &auth);
+                    transport.close();
+                    return Err(error);
+                }
+                if let Err(error) = transport.send(&auth).await {
+                    self.close_after_write_failure(&mut session, pool, &auth);
+                    transport.close();
+                    return Err(error);
+                }
+                let auth_packet = match transport.receive().await {
+                    Ok(packet) => packet,
+                    Err(error) => {
+                        self.close_after_timeout(&mut session, pool, &auth);
+                        transport.close();
+                        return Err(error);
+                    }
+                };
+                match session.handle_packet(pool, auth_packet) {
+                    Ok(VirtualPlayerEvent::GameAuthenticated) => {
+                        steps.push(GameRunnerStep::KcpReconnected)
+                    }
+                    Ok(VirtualPlayerEvent::Failed) => {
+                        steps.push(GameRunnerStep::Failed);
+                        transport.close();
+                        return Ok(result(session, steps, Some(tracker.telemetry())));
+                    }
+                    Ok(_) => {
+                        transport.close();
+                        session.close(pool);
+                        return Err(GameLiveError::UnexpectedLifecycleEvent);
+                    }
+                    Err(error) => {
+                        transport.close();
+                        session.close(pool);
+                        return Err(error.into());
+                    }
+                }
+                if let Err(error) = session.activate(pool) {
+                    transport.close();
+                    session.close(pool);
+                    return Err(error.into());
+                }
+                let reconnect = match room_reconnect_packet(&mut session, pool, cursor) {
+                    Ok(packet) => packet,
+                    Err(error) => {
+                        transport.close();
+                        session.close(pool);
+                        return Err(error);
+                    }
+                };
+                if let Err(error) = run_checkpoint(
+                    &mut checkpoint,
+                    GameRunnerCheckpoint::GameplayOutboundMessage,
+                ) {
+                    self.close_after_write_failure(&mut session, pool, &reconnect);
+                    transport.close();
+                    return Err(error);
+                }
+                if let Err(error) = transport.send(&reconnect).await {
+                    self.close_after_write_failure(&mut session, pool, &reconnect);
+                    transport.close();
+                    return Err(error);
+                }
+                let reconnect_step = match reconnect_profile_packet(cursor) {
+                    Ok(packet) => packet.step,
+                    Err(error) => {
+                        transport.close();
+                        session.close(pool);
+                        return Err(gameplay_failure(error, &tracker));
+                    }
+                };
+                let reconnect_planned =
+                    match planned_packet_with_live_sequence(&reconnect, reconnect_step) {
+                        Ok(packet) => packet,
+                        Err(error) => {
+                            transport.close();
+                            session.close(pool);
+                            return Err(gameplay_failure(error, &tracker));
+                        }
+                    };
+                if let Err(error) = tracker.begin_planned_action(&reconnect_planned, monotonic_ms())
+                {
+                    self.close_after_timeout(&mut session, pool, &reconnect);
+                    transport.close();
+                    return Err(error.into());
+                }
+                let response = receive_gameplay_response(
+                    transport,
+                    &mut session,
+                    pool,
+                    &mut tracker,
+                    &reconnect,
+                    reconnect_planned.step.timeout_ms,
+                    Some(&gameplay.approved_room_id),
+                    &mut checkpoint,
+                )
+                .await?;
+                if response != MessageType::RoomReconnectRes {
+                    transport.close();
+                    session.close(pool);
+                    return Err(GameLiveError::UnexpectedLifecycleEvent);
+                }
+                steps.push(GameRunnerStep::RoomReconnected);
+            }
+            let leave = match prepare_outbound_gameplay_packet(&mut session, pool, &gameplay.leave)
+            {
+                Ok(leave) => leave,
+                Err(error) => {
+                    transport.close();
+                    session.close(pool);
+                    return Err(gameplay_failure(error, &tracker));
+                }
+            };
+            if let Err(error) = run_checkpoint(
+                &mut checkpoint,
+                GameRunnerCheckpoint::GameplayOutboundMessage,
+            ) {
+                self.close_after_write_failure(&mut session, pool, &leave);
+                transport.close();
+                return Err(error);
+            }
+            if let Err(error) = transport.send(&leave).await {
+                self.close_after_write_failure(&mut session, pool, &leave);
+                transport.close();
+                return Err(error);
+            }
+            let leave_planned =
+                match planned_packet_with_live_sequence(&leave, gameplay.leave.step.clone()) {
+                    Ok(packet) => packet,
+                    Err(error) => {
+                        transport.close();
+                        session.close(pool);
+                        return Err(gameplay_failure(error, &tracker));
+                    }
+                };
+            if let Err(error) = tracker.begin_planned_action(&leave_planned, monotonic_ms()) {
+                transport.close();
+                session.close(pool);
+                return Err(gameplay_failure(error, &tracker));
+            }
+            let response = receive_gameplay_response(
+                transport,
+                &mut session,
+                pool,
+                &mut tracker,
+                &leave,
+                gameplay.leave.step.timeout_ms,
+                Some(&gameplay.approved_room_id),
+                &mut checkpoint,
+            )
+            .await?;
+            if response != MessageType::RoomLeaveRes {
+                transport.close();
+                session.close(pool);
+                return Err(GameLiveError::UnexpectedLifecycleEvent);
+            }
+            steps.push(GameRunnerStep::RoomLeft);
+            Some(tracker.telemetry())
+        } else {
+            None
+        };
         if let Err(error) = session.begin_leaving(pool) {
             transport.close();
             session.close(pool);
@@ -418,7 +785,7 @@ impl GameSessionRunner {
         transport.close();
         session.close(pool);
         steps.push(GameRunnerStep::Closed);
-        Ok(result(session, steps))
+        Ok(result(session, steps, gameplay_metrics))
     }
 }
 
@@ -429,12 +796,331 @@ fn run_checkpoint(
     checkpoint(kind)
 }
 
-fn result(session: VirtualPlayerSession, steps: Vec<GameRunnerStep>) -> GameRunResult {
+fn prepare_live_gameplay(
+    gameplay: &LiveGameplayScenario,
+) -> Result<PreparedLiveGameplay, GameLiveError> {
+    let profile = GameplayProfilePlan::from_lockstep_scenario_json(
+        gameplay.profile,
+        &gameplay.lockstep_scenario_json,
+    )?;
+    let mut packets = profile.packet_plan_with_input_limit(
+        &gameplay.room_id,
+        &gameplay.policy_id,
+        gameplay.max_frame_inputs,
+    )?;
+    let leave = packets
+        .pop()
+        .filter(|packet| packet.step.request_type == MessageType::RoomLeaveReq)
+        .ok_or(GameLiveError::Transport(
+            "live gameplay plan has no room leave",
+        ))?;
+    Ok(PreparedLiveGameplay {
+        approved_room_id: gameplay.room_id.clone(),
+        before_reconnect: packets,
+        leave,
+        reconnect_cursor: gameplay
+            .reconnect
+            .as_ref()
+            .map(|reconnect| reconnect.last_character_push_sequence),
+    })
+}
+
+fn prepare_outbound_gameplay_packet(
+    session: &mut VirtualPlayerSession,
+    pool: &mut AccountLeasePool,
+    packet: &PlannedPacket,
+) -> Result<OutboundPacket, GameLiveError> {
+    let expected_response = packet
+        .step
+        .response_type
+        .ok_or(GameplayError::MissingExpectedResponse(packet.step.name))?;
+    Ok(session.begin_gameplay_request(
+        pool,
+        packet.step.request_type,
+        expected_response,
+        packet.body()?,
+    )?)
+}
+
+fn planned_packet_with_live_sequence(
+    outbound: &OutboundPacket,
+    step: crate::gameplay::GameplayStep,
+) -> Result<PlannedPacket, GameLiveError> {
+    let packet = PlannedPacket {
+        step,
+        packet: game_protocol::encode_packet(
+            outbound.message_type(),
+            outbound.seq(),
+            outbound.body(),
+        ),
+        sequence: outbound.seq(),
+    };
+    packet.packet_header()?;
+    Ok(packet)
+}
+
+fn reconnect_profile_packet(cursor: u64) -> Result<PlannedPacket, GameLiveError> {
+    let step = room_reconnect_step(crate::gameplay::DEFAULT_MAX_MESSAGES_PER_CONNECTION_PER_SECOND);
+    let packet = PlannedPacket {
+        packet: game_protocol::encode_packet(
+            MessageType::RoomReconnectReq,
+            1,
+            &game_protocol::encode_body(&RoomReconnectReq {
+                last_character_push_sequence: cursor,
+            }),
+        ),
+        step,
+        sequence: 1,
+    };
+    packet.packet_header()?;
+    Ok(packet)
+}
+
+fn room_reconnect_packet(
+    session: &mut VirtualPlayerSession,
+    pool: &mut AccountLeasePool,
+    cursor: u64,
+) -> Result<OutboundPacket, GameLiveError> {
+    let profile_packet = reconnect_profile_packet(cursor)?;
+    prepare_outbound_gameplay_packet(session, pool, &profile_packet)
+}
+
+async fn receive_gameplay_response(
+    transport: &mut LiveKcpTransport,
+    session: &mut VirtualPlayerSession,
+    pool: &mut AccountLeasePool,
+    tracker: &mut RoomFlowTracker,
+    outbound: &OutboundPacket,
+    step_timeout_ms: u64,
+    approved_room_id: Option<&str>,
+    checkpoint: &mut impl FnMut(GameRunnerCheckpoint) -> Result<(), GameLiveError>,
+) -> Result<MessageType, GameLiveError> {
+    let step_deadline = Instant::now() + Duration::from_millis(step_timeout_ms);
+    loop {
+        if let Err(error) = run_checkpoint(checkpoint, GameRunnerCheckpoint::Control) {
+            transport.close();
+            session.close(pool);
+            return Err(gameplay_failure(error, tracker));
+        }
+        let packet = match transport.receive_until(step_deadline).await {
+            Ok(packet) => packet,
+            Err(error) => {
+                let _ = session.handle_request_timeout(pool, outbound, 0);
+                transport.close();
+                session.close(pool);
+                return Err(gameplay_failure(error, tracker));
+            }
+        };
+        let message_type = match packet.message_type() {
+            Some(message_type) => message_type,
+            None => {
+                transport.close();
+                session.close(pool);
+                return Err(gameplay_failure(
+                    "KCP gameplay message type is invalid",
+                    tracker,
+                ));
+            }
+        };
+        if let Some(approved_room_id) = approved_room_id {
+            if ensure_approved_room_packet(&packet, approved_room_id).is_err() {
+                transport.close();
+                session.close(pool);
+                return Err(gameplay_failure("approved room response mismatch", tracker));
+            }
+        }
+        match session.handle_packet(pool, packet.clone()) {
+            Ok(VirtualPlayerEvent::Response {
+                message_type: response_type,
+                ..
+            }) => {
+                if response_type != message_type {
+                    transport.close();
+                    session.close(pool);
+                    return Err(gameplay_failure(
+                        GameLiveError::UnexpectedLifecycleEvent,
+                        tracker,
+                    ));
+                }
+                if let Err(error) = tracker.ingest(packet, monotonic_ms()) {
+                    transport.close();
+                    session.close(pool);
+                    return Err(gameplay_failure(error, tracker));
+                }
+                return Ok(response_type);
+            }
+            Ok(VirtualPlayerEvent::Push { .. }) => {
+                if let Err(error) = tracker.ingest(packet, monotonic_ms()) {
+                    transport.close();
+                    session.close(pool);
+                    return Err(gameplay_failure(error, tracker));
+                }
+            }
+            Ok(VirtualPlayerEvent::Failed) => {
+                transport.close();
+                session.close(pool);
+                return Err(gameplay_failure("KCP gameplay session failed", tracker));
+            }
+            Ok(_) => {
+                transport.close();
+                session.close(pool);
+                return Err(gameplay_failure(
+                    GameLiveError::UnexpectedLifecycleEvent,
+                    tracker,
+                ));
+            }
+            Err(error) => {
+                transport.close();
+                session.close(pool);
+                return Err(gameplay_failure(error, tracker));
+            }
+        }
+    }
+}
+
+fn gameplay_failure(message: impl Display, tracker: &RoomFlowTracker) -> GameLiveError {
+    GameLiveError::GameplayFailed {
+        message: message.to_string(),
+        metrics: tracker.telemetry(),
+    }
+}
+
+async fn receive_frame_bundle(
+    transport: &mut LiveKcpTransport,
+    session: &mut VirtualPlayerSession,
+    pool: &mut AccountLeasePool,
+    tracker: &mut RoomFlowTracker,
+    step_timeout_ms: u64,
+    checkpoint: &mut impl FnMut(GameRunnerCheckpoint) -> Result<(), GameLiveError>,
+) -> Result<(), GameLiveError> {
+    let step_deadline = Instant::now() + Duration::from_millis(step_timeout_ms);
+    loop {
+        if let Err(error) = run_checkpoint(checkpoint, GameRunnerCheckpoint::Control) {
+            transport.close();
+            session.close(pool);
+            return Err(gameplay_failure(error, tracker));
+        }
+        let packet = match transport.receive_until(step_deadline).await {
+            Ok(packet) => packet,
+            Err(error) => {
+                transport.close();
+                session.close(pool);
+                return Err(gameplay_failure(error, tracker));
+            }
+        };
+        if packet.message_type().is_none() {
+            transport.close();
+            session.close(pool);
+            return Err(gameplay_failure(
+                "KCP frame message type is invalid",
+                tracker,
+            ));
+        }
+        match session.handle_packet(pool, packet.clone()) {
+            Ok(VirtualPlayerEvent::Push {
+                message_type: MessageType::FrameBundlePush,
+                ..
+            }) => {
+                if let Err(error) = tracker.ingest(packet, monotonic_ms()) {
+                    transport.close();
+                    session.close(pool);
+                    return Err(gameplay_failure(error, tracker));
+                }
+                return Ok(());
+            }
+            Ok(VirtualPlayerEvent::Push { .. }) => {
+                if let Err(error) = tracker.ingest(packet, monotonic_ms()) {
+                    transport.close();
+                    session.close(pool);
+                    return Err(gameplay_failure(error, tracker));
+                }
+            }
+            Ok(VirtualPlayerEvent::Failed) => {
+                transport.close();
+                session.close(pool);
+                return Err(gameplay_failure("KCP frame session failed", tracker));
+            }
+            Ok(_) => {
+                transport.close();
+                session.close(pool);
+                return Err(gameplay_failure(
+                    GameLiveError::UnexpectedLifecycleEvent,
+                    tracker,
+                ));
+            }
+            Err(error) => {
+                transport.close();
+                session.close(pool);
+                return Err(gameplay_failure(error, tracker));
+            }
+        }
+    }
+}
+
+fn ensure_approved_room_packet(
+    packet: &Packet,
+    approved_room_id: &str,
+) -> Result<(), GameplayError> {
+    let body = packet.body.as_slice();
+    let response_type = packet
+        .message_type()
+        .ok_or(GameplayError::UnknownMessageType(packet.header.msg_type))?;
+    let room_id = match response_type {
+        MessageType::RoomJoinRes => {
+            RoomJoinRes::decode(body)
+                .map_err(|_| GameplayError::InvalidBody)?
+                .room_id
+        }
+        MessageType::RoomReconnectRes => {
+            RoomReconnectRes::decode(body)
+                .map_err(|_| GameplayError::InvalidBody)?
+                .room_id
+        }
+        MessageType::RoomLeaveRes => {
+            RoomLeaveRes::decode(body)
+                .map_err(|_| GameplayError::InvalidBody)?
+                .room_id
+        }
+        MessageType::PlayerInputRes => {
+            PlayerInputRes::decode(body)
+                .map_err(|_| GameplayError::InvalidBody)?
+                .room_id
+        }
+        _ => return Ok(()),
+    };
+    if room_id != approved_room_id {
+        return Err(GameplayError::RoomMismatch);
+    }
+    Ok(())
+}
+
+async fn reconnect_live_transport(
+    transport: &mut LiveKcpTransport,
+    config: &LoadTestConfig,
+    access: RunAccess<'_>,
+    endpoint: &GameProxyEndpoint,
+    checkpoint: &mut impl FnMut(GameRunnerCheckpoint) -> Result<(), GameLiveError>,
+) -> Result<LiveKcpConnection, GameLiveError> {
+    run_checkpoint(checkpoint, GameRunnerCheckpoint::ReconnectConnection)?;
+    transport.connect(config, access, endpoint).await
+}
+
+fn monotonic_ms() -> u64 {
+    static STARTED: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    STARTED.get_or_init(Instant::now).elapsed().as_millis() as u64
+}
+
+fn result(
+    session: VirtualPlayerSession,
+    steps: Vec<GameRunnerStep>,
+    gameplay_metrics: Option<crate::metrics::MetricsSnapshot>,
+) -> GameRunResult {
     GameRunResult {
         terminal_state: session.state(),
         connection_released: !session.connection_attached(),
         lease_released: !session.lease_held(),
         steps,
+        gameplay_metrics,
     }
 }
 
@@ -509,7 +1195,11 @@ impl LiveKcpTransport {
     }
 
     pub async fn receive(&mut self) -> Result<Packet, GameLiveError> {
-        let remaining = self.remaining()?;
+        self.receive_until(self.deadline).await
+    }
+
+    pub async fn receive_until(&mut self, deadline: Instant) -> Result<Packet, GameLiveError> {
+        let remaining = self.remaining_until(deadline)?;
         let stream = self
             .stream
             .as_mut()
@@ -526,7 +1216,12 @@ impl LiveKcpTransport {
     }
 
     fn remaining(&self) -> Result<Duration, GameLiveError> {
-        let remaining = self.deadline.saturating_duration_since(Instant::now());
+        self.remaining_until(self.deadline)
+    }
+
+    fn remaining_until(&self, deadline: Instant) -> Result<Duration, GameLiveError> {
+        let effective_deadline = self.deadline.min(deadline);
+        let remaining = effective_deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
             return Err(GameLiveError::Transport("KCP session deadline elapsed"));
         }
@@ -577,7 +1272,11 @@ impl GameTransport for FakeGameTransport {
 mod tests {
     use super::*;
     use crate::auth_http::AuthDispatchAdmission;
-    use crate::config::HardBudget;
+    use crate::config::{
+        HardBudget, LiveGameplayReconnect, LiveGameplayScenario, ReconnectPolicyConfig,
+    };
+    use crate::pb::{FrameBundlePush, FrameInput, PlayerInputRes, RoomJoinRes, RoomLeaveRes};
+    use prost::Message;
 
     fn gate() -> GameExecutionGate<'static> {
         GameExecutionGate {
@@ -603,6 +1302,38 @@ mod tests {
 
     fn lease(pool: &mut AccountLeasePool) -> AccountLease {
         pool.acquire("account-a", "player-a", 0, 1_000).unwrap()
+    }
+
+    fn gameplay() -> LiveGameplayScenario {
+        LiveGameplayScenario {
+            room_id: "approved-room".into(),
+            policy_id: "approved-policy".into(),
+            profile: crate::gameplay::PlayerProfile::Normal,
+            lockstep_scenario_json: include_str!("../../lockstep-client/scenarios/move_stop.json")
+                .into(),
+            max_frame_inputs: 1,
+            reconnect: Some(LiveGameplayReconnect {
+                last_character_push_sequence: 0,
+                reconnect_policy: ReconnectPolicyConfig {
+                    max_attempts: 1,
+                    base_delay_ms: 1,
+                    max_delay_ms: 1,
+                    max_jitter_ms: 0,
+                },
+            }),
+        }
+    }
+
+    fn response<M: Message>(message_type: MessageType, seq: u32, body: &M) -> Packet {
+        let body = game_protocol::encode_body(body);
+        Packet::new(
+            game_protocol::PacketHeader {
+                msg_type: message_type as u16,
+                seq,
+                body_len: body.len() as u32,
+            },
+            body,
+        )
     }
 
     #[test]
@@ -735,6 +1466,214 @@ mod tests {
 
         assert!(error.to_string().contains("--execute-game"));
         assert_eq!(transport.active_connections(), 0);
+        assert!(pool.acquire("account-a", "replacement", 1, 1_000).is_ok());
+    }
+
+    #[test]
+    fn prepared_live_gameplay_is_bounded_and_carries_no_identity_or_ticket() {
+        let prepared = prepare_live_gameplay(&gameplay()).unwrap();
+        assert_eq!(prepared.before_reconnect.len(), 2);
+        assert_eq!(
+            prepared.before_reconnect[0].step.request_type,
+            MessageType::RoomJoinReq
+        );
+        assert_eq!(
+            prepared.before_reconnect[1].step.request_type,
+            MessageType::PlayerInputReq
+        );
+        assert_eq!(prepared.leave.step.request_type, MessageType::RoomLeaveReq);
+        assert_eq!(prepared.reconnect_cursor, Some(0));
+        let debug = format!("{prepared:?}");
+        assert!(!debug.contains("private-ticket"));
+        assert!(!debug.contains("account-a"));
+    }
+
+    #[test]
+    fn room_tracker_handles_a_minimal_shared_packet_flow_and_frame_bundle() {
+        let prepared = prepare_live_gameplay(&gameplay()).unwrap();
+        let mut tracker = RoomFlowTracker::default();
+        let join = prepared.before_reconnect[0].with_sequence(3).unwrap();
+        tracker.begin_planned_action(&join, 1).unwrap();
+        tracker
+            .ingest(
+                response(
+                    MessageType::RoomJoinRes,
+                    3,
+                    &RoomJoinRes {
+                        ok: true,
+                        room_id: "approved-room".into(),
+                        error_code: String::new(),
+                    },
+                ),
+                2,
+            )
+            .unwrap();
+        let input = prepared.before_reconnect[1].with_sequence(4).unwrap();
+        tracker.begin_planned_action(&input, 3).unwrap();
+        tracker
+            .ingest(
+                response(
+                    MessageType::PlayerInputRes,
+                    4,
+                    &PlayerInputRes {
+                        ok: true,
+                        room_id: "approved-room".into(),
+                        error_code: String::new(),
+                    },
+                ),
+                4,
+            )
+            .unwrap();
+        tracker
+            .ingest(
+                response(
+                    MessageType::FrameBundlePush,
+                    0,
+                    &FrameBundlePush {
+                        room_id: "approved-room".into(),
+                        frame_id: 1,
+                        fps: 20,
+                        inputs: vec![FrameInput {
+                            character_id: "ignored-by-metrics".into(),
+                            action: "sim_input".into(),
+                            payload_json: "{}".into(),
+                            frame_id: 1,
+                        }],
+                        is_silent_frame: false,
+                        snapshot: None,
+                    },
+                ),
+                5,
+            )
+            .unwrap();
+        let leave = prepared.leave.with_sequence(5).unwrap();
+        tracker.begin_planned_action(&leave, 6).unwrap();
+        tracker
+            .ingest(
+                response(
+                    MessageType::RoomLeaveRes,
+                    5,
+                    &RoomLeaveRes {
+                        ok: true,
+                        room_id: "approved-room".into(),
+                        error_code: String::new(),
+                    },
+                ),
+                7,
+            )
+            .unwrap();
+        let metrics = tracker.metrics();
+        assert_eq!(metrics.room_create_or_join, 1);
+        assert_eq!(metrics.frame_inputs_sent, 1);
+        assert_eq!(metrics.frame_bundles_received, 1);
+        assert_eq!(metrics.room_leave, 1);
+        assert!(!format!("{:?}", tracker.telemetry()).contains("ignored-by-metrics"));
+    }
+
+    #[test]
+    fn approved_room_guard_rejects_server_canonicalization_to_another_room() {
+        let packet = response(
+            MessageType::RoomJoinRes,
+            3,
+            &RoomJoinRes {
+                ok: true,
+                room_id: "unexpected-room".into(),
+                error_code: String::new(),
+            },
+        );
+        assert!(matches!(
+            ensure_approved_room_packet(&packet, "approved-room"),
+            Err(GameplayError::RoomMismatch)
+        ));
+    }
+
+    fn active_session(pool: &mut AccountLeasePool) -> VirtualPlayerSession {
+        let account_lease = lease(pool);
+        let mut session = VirtualPlayerSession::new(
+            account_lease,
+            1_024,
+            ReconnectPolicy {
+                max_attempts: 1,
+                base_delay_ms: 1,
+                max_delay_ms: 1,
+                max_jitter_ms: 0,
+            },
+        )
+        .unwrap();
+        session.mark_logged_in(pool).unwrap();
+        session.mark_character_selected(pool).unwrap();
+        session.mark_ticket_issued(pool).unwrap();
+        let connection = LiveKcpConnection;
+        let auth = session
+            .connect_and_begin_auth(pool, connection, "private-ticket")
+            .unwrap();
+        session
+            .handle_packet(
+                pool,
+                response(
+                    MessageType::AuthRes,
+                    auth.seq(),
+                    &crate::pb::AuthRes {
+                        ok: true,
+                        player_id: "fake-player".into(),
+                        error_code: String::new(),
+                        server_protocol_version: 1,
+                        minimum_client_protocol_version: 1,
+                        upgrade_message: String::new(),
+                        upgrade_url: String::new(),
+                    },
+                ),
+            )
+            .unwrap();
+        session.activate(pool).unwrap();
+        session
+    }
+
+    #[tokio::test]
+    async fn frame_bundle_timeout_releases_the_session_lease() {
+        let mut pool = AccountLeasePool::default();
+        let mut session = active_session(&mut pool);
+
+        let mut transport = LiveKcpTransport::new(Instant::now(), 1_024).unwrap();
+        let mut tracker = RoomFlowTracker::default();
+        let error = receive_frame_bundle(
+            &mut transport,
+            &mut session,
+            &mut pool,
+            &mut tracker,
+            1,
+            &mut |_| Ok(()),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.to_string().contains("deadline"));
+        assert!(!session.connection_attached());
+        assert!(!session.lease_held());
+        assert!(pool.acquire("account-a", "replacement", 1, 1_000).is_ok());
+    }
+
+    #[tokio::test]
+    async fn frame_bundle_abort_releases_the_session_lease() {
+        let mut pool = AccountLeasePool::default();
+        let mut session = active_session(&mut pool);
+        let mut transport =
+            LiveKcpTransport::new(Instant::now() + Duration::from_secs(1), 1_024).unwrap();
+        let mut tracker = RoomFlowTracker::default();
+        let error = receive_frame_bundle(
+            &mut transport,
+            &mut session,
+            &mut pool,
+            &mut tracker,
+            1,
+            &mut |_| Err(GameLiveError::Transport("test checkpoint abort")),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.to_string().contains("test checkpoint abort"));
+        assert!(!session.connection_attached());
+        assert!(!session.lease_held());
         assert!(pool.acquire("account-a", "replacement", 1, 1_000).is_ok());
     }
 }

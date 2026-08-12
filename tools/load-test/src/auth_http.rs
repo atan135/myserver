@@ -310,6 +310,28 @@ impl AuthDispatchAdmission {
         self.admit_outbound(false, false, true, true, 0, deadline, checkpoint)
     }
 
+    /// Gameplay room/input operations are mutable by contract. Reserve their
+    /// conservative effect before dispatching the KCP packet.
+    pub fn admit_gameplay_message<F>(
+        &mut self,
+        potential_data_writes: u64,
+        deadline: Instant,
+        checkpoint: F,
+    ) -> Result<Duration, AuthAdmissionError>
+    where
+        F: FnMut() -> Result<(), String>,
+    {
+        self.admit_outbound(
+            false,
+            false,
+            true,
+            true,
+            potential_data_writes,
+            deadline,
+            checkpoint,
+        )
+    }
+
     fn admit_outbound<F>(
         &mut self,
         is_login: bool,

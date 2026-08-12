@@ -11,6 +11,7 @@ use thiserror::Error;
 use crate::SCHEMA_VERSION;
 use crate::calibration::CalibrationThresholds;
 use crate::game_kcp::ReconnectPolicy;
+use crate::gameplay::{GameplayProfilePlan, PlayerProfile};
 use crate::step::ScenarioStep;
 
 #[derive(Debug, Error)]
@@ -136,6 +137,38 @@ pub struct Scenario {
     pub auth: Option<AuthScenario>,
     #[serde(default)]
     pub reconnect_burst: Option<ReconnectBurstScenario>,
+    /// Absent by default so the guarded KCP smoke remains auth/heartbeat-only.
+    #[serde(default)]
+    pub live_gameplay: Option<LiveGameplayScenario>,
+}
+
+pub const MAX_LIVE_GAMEPLAY_FRAME_INPUTS: u32 = 8;
+pub const MAX_LIVE_GAMEPLAY_SCENARIO_BYTES: usize = 64 * 1024;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct LiveGameplayScenario {
+    /// A pre-provisioned, explicitly approved room. The tool never discovers
+    /// or guesses a room identifier.
+    pub room_id: String,
+    /// A production policy is supplied by the profile; no binary default.
+    pub policy_id: String,
+    pub profile: PlayerProfile,
+    pub lockstep_scenario_json: String,
+    pub max_frame_inputs: u32,
+    /// One deliberate KCP reconnect plus ticket-bound room reconnect.
+    #[serde(default)]
+    pub reconnect: Option<LiveGameplayReconnect>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct LiveGameplayReconnect {
+    /// Cursor from an explicitly approved prior CharacterPushMeta; zero is
+    /// valid only when supplied intentionally by this opt-in block.
+    pub last_character_push_sequence: u64,
+    /// Exactly one KCP reconnect is allowed for the opt-in live profile.
+    pub reconnect_policy: ReconnectPolicyConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -605,6 +638,62 @@ impl LoadTestConfig {
                 .validate()
                 .map_err(|error| ConfigError::Rejected(error.to_string()))?;
         }
+        if let Some(gameplay) = &self.scenario.live_gameplay {
+            if gameplay.room_id.trim().is_empty() || gameplay.policy_id.trim().is_empty() {
+                return Err(ConfigError::Rejected(
+                    "live gameplay requires explicit non-empty room_id and policy_id".into(),
+                ));
+            }
+            if gameplay.profile == PlayerProfile::Idle {
+                return Err(ConfigError::Rejected(
+                    "live gameplay requires a profile that emits a frame input".into(),
+                ));
+            }
+            if gameplay.lockstep_scenario_json.trim().is_empty()
+                || gameplay.lockstep_scenario_json.len() > MAX_LIVE_GAMEPLAY_SCENARIO_BYTES
+            {
+                return Err(ConfigError::Rejected(format!(
+                    "live gameplay lockstep_scenario_json must be 1..={MAX_LIVE_GAMEPLAY_SCENARIO_BYTES} bytes"
+                )));
+            }
+            if gameplay.max_frame_inputs == 0
+                || gameplay.max_frame_inputs > MAX_LIVE_GAMEPLAY_FRAME_INPUTS
+            {
+                return Err(ConfigError::Rejected(format!(
+                    "live gameplay max_frame_inputs must be 1..={MAX_LIVE_GAMEPLAY_FRAME_INPUTS}"
+                )));
+            }
+            let plan = GameplayProfilePlan::from_lockstep_scenario_json(
+                gameplay.profile,
+                &gameplay.lockstep_scenario_json,
+            )
+            .map_err(|error| {
+                ConfigError::Rejected(format!("live gameplay profile rejected: {error}"))
+            })?;
+            plan.packet_plan_with_input_limit(
+                &gameplay.room_id,
+                &gameplay.policy_id,
+                gameplay.max_frame_inputs,
+            )
+            .map_err(|error| {
+                ConfigError::Rejected(format!("live gameplay packet plan rejected: {error}"))
+            })?;
+            if !self.scenario.writes_data {
+                return Err(ConfigError::Rejected(
+                    "live gameplay emits room/input writes and requires writes_data=true".into(),
+                ));
+            }
+            if let Some(reconnect) = gameplay.reconnect {
+                if reconnect.reconnect_policy.max_attempts != 1 {
+                    return Err(ConfigError::Rejected(
+                        "live gameplay reconnect_policy.max_attempts must equal 1".into(),
+                    ));
+                }
+                ReconnectPolicy::from(reconnect.reconnect_policy)
+                    .validate()
+                    .map_err(|error| ConfigError::Rejected(error.to_string()))?;
+            }
+        }
         Ok(())
     }
 
@@ -795,6 +884,7 @@ mod tests {
                 writes_data: false,
                 auth: None,
                 reconnect_burst: None,
+                live_gameplay: None,
             },
             reports_root: "reports".into(),
             prepare_reports_root: "prepare-reports".into(),
@@ -882,6 +972,51 @@ mod tests {
         value.scenario.steps[0].idempotency = Idempotency::Write;
         value.scenario.steps[0].retry = RetryPolicy::Bounded { attempts: 2 };
         assert!(value.validate_structural().is_err());
+    }
+
+    #[test]
+    fn live_gameplay_is_default_off_and_requires_explicit_bounded_room_inputs() {
+        let value = config();
+        assert!(value.scenario.live_gameplay.is_none());
+        value.validate_structural().unwrap();
+
+        let mut enabled = config();
+        enabled.scenario.writes_data = true;
+        enabled.budget.max_data_writes = 16;
+        enabled.scenario.live_gameplay = Some(LiveGameplayScenario {
+            room_id: "approved-room".into(),
+            policy_id: "approved-policy".into(),
+            profile: PlayerProfile::Normal,
+            lockstep_scenario_json: include_str!("../../lockstep-client/scenarios/move_stop.json")
+                .into(),
+            max_frame_inputs: 1,
+            reconnect: None,
+        });
+        enabled.validate_structural().unwrap();
+
+        enabled.scenario.writes_data = false;
+        assert!(
+            enabled
+                .validate_structural()
+                .unwrap_err()
+                .to_string()
+                .contains("writes_data")
+        );
+        enabled.scenario.writes_data = true;
+        enabled
+            .scenario
+            .live_gameplay
+            .as_mut()
+            .unwrap()
+            .room_id
+            .clear();
+        assert!(
+            enabled
+                .validate_structural()
+                .unwrap_err()
+                .to_string()
+                .contains("room_id")
+        );
     }
 
     #[test]
