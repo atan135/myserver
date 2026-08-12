@@ -4,16 +4,20 @@ use std::process::ExitCode;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use loadtest_core::SCHEMA_VERSION;
-use loadtest_core::abort::{AbortController, GracefulShutdown, ShutdownPhase, install_ctrl_c_flag};
+use loadtest_core::abort::{
+    AbortController, AbortReason, GracefulShutdown, ShutdownPhase, install_ctrl_c_flag,
+};
 use loadtest_core::accounts::{
     AccountLeasePool, EnvironmentSecretProvider, SecretProvider, read_manifest,
 };
 use loadtest_core::auth_budget::{
-    estimate_auth_run, validate_auth_run_budget, validate_staged_auth_windows,
+    estimate_auth_run, validate_auth_run_budget, validate_game_run_budget,
+    validate_staged_auth_windows,
 };
 use loadtest_core::auth_http::{
     AuthAdmissionError, AuthDispatchAdmission, AuthRunMetrics, FakeAuthHttpService,
-    FakeAuthOutcome, ReqwestAuthHttpTransport, execute_auth_operations,
+    FakeAuthOutcome, ReqwestAuthHttpTransport, execute_auth_operations, execute_deferred_logout,
+    split_game_auth_operations,
 };
 use loadtest_core::calibration::{
     CalibrationRun, bounded_calibration_duration_ms, bounded_calibration_operations,
@@ -23,6 +27,10 @@ use loadtest_core::config::{
     BudgetOverride, LoadModel, LoadTestConfig, RunAccess, load_config, load_private_config,
 };
 use loadtest_core::contracts::{RunPlan, single_process_assignment};
+use loadtest_core::game_kcp::{GameProxyEndpoint, ReconnectPolicy};
+use loadtest_core::game_live::{
+    GameExecutionGate, GameLiveError, GameRunnerCheckpoint, GameSessionRunner, LiveKcpTransport,
+};
 use loadtest_core::lifecycle::{Lifecycle, RunState};
 use loadtest_core::metrics::Metrics;
 use loadtest_core::preflight::summarize_run;
@@ -69,7 +77,7 @@ fn run(cli: &Cli) -> Result<(), String> {
     if cli.dry_run {
         run_dry(cli)
     } else {
-        run_auth_live(cli)
+        run_live(cli)
     }
 }
 
@@ -455,7 +463,69 @@ fn record_auth_metrics(metrics: &mut Metrics, auth: &AuthRunMetrics) {
     }
 }
 
-fn run_auth_live(cli: &Cli) -> Result<(), String> {
+/// Every scheduled action has already performed some auth work before it can
+/// reach a game follow-up failure. Keep the merge and threshold check in one
+/// terminal path so a missing ticket or rejected KCP admission cannot make
+/// completed auth requests disappear from the report.
+fn finish_live_action(
+    aggregate: &mut AuthRunMetrics,
+    action: &AuthRunMetrics,
+    abort: &mut AbortController,
+    budget: &loadtest_core::config::HardBudget,
+) {
+    aggregate.merge(action);
+    let successes = aggregate
+        .outcomes
+        .get(&loadtest_core::auth_http::AuthOutcomeCategory::Success)
+        .copied()
+        .unwrap_or(0);
+    let error_rate = if aggregate.requests == 0 {
+        0.0
+    } else {
+        1.0 - successes as f64 / aggregate.requests as f64
+    };
+    abort.check_thresholds(
+        error_rate,
+        aggregate.connection_failure_rate(),
+        aggregate.p99_ms(),
+        budget.max_error_rate,
+        budget.max_connection_failure_rate,
+        budget.max_p99_ms,
+        true,
+    );
+}
+
+fn can_attempt_deferred_logout(
+    deferred_logout: bool,
+    pre_game_auth_completed: bool,
+    abort: &AbortController,
+) -> bool {
+    deferred_logout && pre_game_auth_completed && !abort.should_stop_new_sessions()
+}
+
+fn deferred_logout_skip_message(abort: &AbortController) -> &'static str {
+    match abort.reason() {
+        Some(AbortReason::BudgetExceeded) => {
+            "post-game logout was not dispatched because the operation budget was exhausted"
+        }
+        Some(AbortReason::Deadline) => {
+            "post-game logout was not dispatched because the action deadline elapsed"
+        }
+        Some(AbortReason::ProtectionUnknown) => {
+            "post-game logout was not dispatched because target protection could not be confirmed"
+        }
+        Some(AbortReason::CtrlC) => {
+            "post-game logout was not dispatched because Ctrl+C stopped execution"
+        }
+        Some(AbortReason::StopFile) => {
+            "post-game logout was not dispatched because the stop file stopped execution"
+        }
+        Some(_) => "post-game logout was not dispatched because execution was already aborting",
+        None => "post-game logout was not dispatched",
+    }
+}
+
+fn run_live(cli: &Cli) -> Result<(), String> {
     if !cli.execute_auth {
         return Err(
             "real auth-http execution requires --execute-auth; use --dry-run for the offline fake"
@@ -467,18 +537,29 @@ fn run_auth_live(cli: &Cli) -> Result<(), String> {
     if cli.confirm_auth.as_deref() != Some(config.environment.name.as_str()) {
         return Err("real auth-http execution requires --confirm-auth <environment>".into());
     }
+    let game_mode = cli.execute_game;
+    if game_mode {
+        validate_game_execution_gate(cli, &config)?;
+    }
     let auth = config
         .scenario
         .auth
         .as_ref()
         .ok_or("--execute-auth requires scenario.auth operations")?;
-    validate_live_auth_load_model(&config.scenario.load)?;
+    if game_mode {
+        validate_live_game_load_model(&config.scenario.load)?;
+    } else {
+        validate_live_auth_load_model(&config.scenario.load)?;
+    }
     let budget = config
         .effective_budget(&cli.budget_override)
         .map_err(|error| error.to_string())?;
     let auth_budget_estimate = estimate_auth_run(&config.scenario, &budget)?;
     validate_staged_auth_windows(&config.scenario, &budget)?;
     validate_auth_run_budget(&auth_budget_estimate, &budget)?;
+    if game_mode {
+        validate_game_run_budget(&auth_budget_estimate, &budget)?;
+    }
     let manifest_path = cli
         .account_manifest
         .as_deref()
@@ -495,6 +576,22 @@ fn run_auth_live(cli: &Cli) -> Result<(), String> {
         return Err(
             "account manifest environment or batch does not match the selected config".into(),
         );
+    }
+    let (game_auth_operations, deferred_logout) = if game_mode {
+        split_game_auth_operations(&auth.operations)?
+    } else {
+        (auth.operations.clone(), false)
+    };
+    if game_mode
+        && !game_auth_operations.iter().any(|operation| {
+            matches!(
+                operation,
+                loadtest_core::config::AuthOperation::IssueTicket
+                    | loadtest_core::config::AuthOperation::SelectCharacter
+            )
+        })
+    {
+        return Err("--execute-game requires a ticket-producing scenario.auth operation".into());
     }
 
     let started = unix_ms();
@@ -549,6 +646,23 @@ fn run_auth_live(cli: &Cli) -> Result<(), String> {
         Instant::now() + Duration::from_millis(deadline_unix_ms.saturating_sub(unix_ms()));
     let mut transport =
         ReqwestAuthHttpTransport::new(&config.targets.auth_http, Duration::from_millis(1))?;
+    let endpoint = if game_mode {
+        Some(
+            GameProxyEndpoint::parse(&config.targets.game_proxy)
+                .map_err(|error| error.to_string())?,
+        )
+    } else {
+        None
+    };
+    let game_runner = GameSessionRunner {
+        max_body_len: 1024 * 1024,
+        reconnect_policy: ReconnectPolicy {
+            max_attempts: 1,
+            base_delay_ms: 100,
+            max_delay_ms: 100,
+            max_jitter_ms: 0,
+        },
+    };
     let secret_provider = EnvironmentSecretProvider::new(&private);
     let protection = DryRunProtection::new(&config);
     let ctrl_c = install_ctrl_c_flag()
@@ -620,9 +734,9 @@ fn run_auth_live(cli: &Cli) -> Result<(), String> {
                     break;
                 }
             };
-            let execution = execute_auth_operations(
+            let mut execution = execute_auth_operations(
                 &mut transport,
-                &auth.operations,
+                &game_auth_operations,
                 &format!("{}_auth", config.account_prepare.character_name_prefix),
                 &lease.logical_account_id,
                 &password,
@@ -639,21 +753,11 @@ fn run_auth_live(cli: &Cli) -> Result<(), String> {
                             }
                             Ok(())
                         })
-                        .map_err(|error| match error {
-                            AuthAdmissionError::BudgetExceeded(error) => {
-                                abort.request(loadtest_core::abort::AbortReason::BudgetExceeded);
-                                error
-                            }
-                            AuthAdmissionError::DeadlineExceeded => {
-                                abort.request(loadtest_core::abort::AbortReason::Deadline);
-                                "auth admission deadline elapsed before request dispatch".into()
-                            }
-                            AuthAdmissionError::Stopped(error) => error,
-                        })
+                        .map_err(|error| map_auth_admission_to_string(&mut abort, error))
                 },
             );
-            auth_metrics.merge(&execution.metrics);
-            let execution_failed = execution.error.is_some();
+            let mut execution_failed = execution.error.is_some();
+            let pre_game_auth_completed = !execution_failed;
             if execution_failed {
                 errors.push(
                     "auth_operation_failed",
@@ -662,25 +766,197 @@ fn run_auth_live(cli: &Cli) -> Result<(), String> {
                 );
                 failed = true;
             }
-            let successes = auth_metrics
-                .outcomes
-                .get(&loadtest_core::auth_http::AuthOutcomeCategory::Success)
-                .copied()
-                .unwrap_or(0);
-            let error_rate = if auth_metrics.requests == 0 {
-                0.0
-            } else {
-                1.0 - successes as f64 / auth_metrics.requests as f64
-            };
-            abort.check_thresholds(
-                error_rate,
-                auth_metrics.connection_failure_rate(),
-                auth_metrics.p99_ms(),
-                budget.max_error_rate,
-                budget.max_connection_failure_rate,
-                budget.max_p99_ms,
-                true,
-            );
+            if !execution_failed && game_mode {
+                let mut game_ticket = None;
+                match execution.take_game_credentials() {
+                    None => {
+                        errors.push(
+                            "game_ticket_missing",
+                            "auth completed without a transferable game ticket",
+                            Default::default(),
+                        );
+                        failed = true;
+                        execution_failed = true;
+                    }
+                    Some((ticket, _character_id)) => {
+                        game_ticket = Some(ticket);
+                        let game_admission =
+                            dispatch_admission.admit_game_connection(action_deadline, || {
+                                abort.check_ctrl_c(&ctrl_c);
+                                abort.check_stop_file(config.stop_file.as_deref().map(Path::new));
+                                abort.check_deadline(unix_ms(), deadline_unix_ms);
+                                if abort.should_stop_new_sessions()
+                                    || revalidate_or_abort(&protection, &mut abort).is_some()
+                                {
+                                    return Err("game connection admission stopped".into());
+                                }
+                                Ok(())
+                            });
+                        if let Err(error) = game_admission {
+                            let _ = map_auth_admission_to_game_error(&mut abort, error);
+                            errors.push(
+                                "game_connection_admission_failed",
+                                "game connection was rejected before KCP setup",
+                                Default::default(),
+                            );
+                            failed = true;
+                            execution_failed = true;
+                        }
+                    }
+                }
+                if !execution_failed {
+                    let remaining = action_deadline.saturating_duration_since(Instant::now());
+                    let mut game_transport = match LiveKcpTransport::new(
+                        Instant::now() + remaining,
+                        game_runner.max_body_len,
+                    ) {
+                        Ok(transport) => Some(transport),
+                        Err(_) => {
+                            errors.push(
+                                "game_transport_setup_failed",
+                                "game transport could not be set up",
+                                Default::default(),
+                            );
+                            failed = true;
+                            execution_failed = true;
+                            None
+                        }
+                    };
+                    if let Some(game_transport) = game_transport.as_mut() {
+                        // Auth and game are one player flow. The virtual game
+                        // session takes this exact lease and releases it on
+                        // every terminal path; no second lease is acquired.
+                        let game_lease = lease.clone();
+                        let game_result =
+                            match tokio::runtime::Builder::new_current_thread()
+                                .enable_io()
+                                .enable_time()
+                                .build()
+                            {
+                                Ok(runtime) => runtime.block_on(game_runner.run_live_kcp(
+                                    GameExecutionGate {
+                                        execute_game: cli.execute_game,
+                                        confirm_game: cli.confirm_game.as_deref(),
+                                        environment: &config.environment.name,
+                                        account_manifest_supplied: cli.account_manifest.is_some(),
+                                        private_config_supplied: cli.private_config.is_some(),
+                                    },
+                                    game_transport,
+                                    &config,
+                                    RunAccess {
+                                        allow_remote: cli.allow_remote,
+                                        confirmation: cli.confirmation.as_deref(),
+                                    },
+                                    endpoint.as_ref().expect("game mode creates endpoint"),
+                                    &mut account_pool,
+                                    game_lease,
+                                    game_ticket.as_deref().expect(
+                                        "successful game admission retains the local ticket",
+                                    ),
+                                    |checkpoint| {
+                                        let mut control = || -> Result<(), String> {
+                                            abort.check_ctrl_c(&ctrl_c);
+                                            abort.check_stop_file(
+                                                config.stop_file.as_deref().map(Path::new),
+                                            );
+                                            abort.check_deadline(unix_ms(), deadline_unix_ms);
+                                            if abort.should_stop_new_sessions()
+                                                || revalidate_or_abort(&protection, &mut abort)
+                                                    .is_some()
+                                            {
+                                                return Err(
+                                                    "game execution checkpoint stopped".into()
+                                                );
+                                            }
+                                            Ok(())
+                                        };
+                                        control().map_err(|_| {
+                                            GameLiveError::Transport(
+                                                "game execution checkpoint stopped",
+                                            )
+                                        })?;
+                                        if checkpoint == GameRunnerCheckpoint::OutboundMessage {
+                                            dispatch_admission
+                                                .admit_game_message(action_deadline, control)
+                                                .map_err(|error| {
+                                                    map_auth_admission_to_game_error(
+                                                        &mut abort, error,
+                                                    )
+                                                })?;
+                                        }
+                                        Ok(())
+                                    },
+                                )),
+                                Err(_) => Err(GameLiveError::Transport(
+                                    "could not create guarded KCP runtime",
+                                )),
+                            };
+                        match game_result {
+                            Ok(result)
+                                if result.terminal_state
+                                    == loadtest_core::virtual_player::VirtualPlayerSessionState::Closed =>
+                            {
+                                core_metrics.increment("game_sessions_completed", 1);
+                                core_metrics.increment("game_auth_requests", 1);
+                                core_metrics.increment("game_heartbeat_requests", 1);
+                            }
+                            Ok(_) | Err(_) => {
+                                errors.push(
+                                    "game_session_failed",
+                                    "KCP game session did not complete",
+                                    Default::default(),
+                                );
+                                failed = true;
+                                execution_failed = true;
+                            }
+                        }
+                    }
+                }
+                if deferred_logout && pre_game_auth_completed {
+                    if !can_attempt_deferred_logout(
+                        deferred_logout,
+                        pre_game_auth_completed,
+                        &abort,
+                    ) {
+                        errors.push(
+                            "deferred_logout_not_dispatched",
+                            deferred_logout_skip_message(&abort),
+                            Default::default(),
+                        );
+                    } else if execute_deferred_logout(&mut transport, &mut execution, |request| {
+                        dispatch_admission
+                            .admit(request, action_deadline, || {
+                                abort.check_ctrl_c(&ctrl_c);
+                                abort.check_stop_file(config.stop_file.as_deref().map(Path::new));
+                                abort.check_deadline(unix_ms(), deadline_unix_ms);
+                                if abort.should_stop_new_sessions()
+                                    || revalidate_or_abort(&protection, &mut abort).is_some()
+                                {
+                                    return Err("deferred logout stopped".into());
+                                }
+                                Ok(())
+                            })
+                            .map_err(|error| map_auth_admission_to_string(&mut abort, error))
+                    })
+                    .is_err()
+                    {
+                        let category = if abort.should_stop_new_sessions() {
+                            "deferred_logout_not_dispatched"
+                        } else {
+                            "deferred_logout_failed"
+                        };
+                        let message = if abort.should_stop_new_sessions() {
+                            deferred_logout_skip_message(&abort)
+                        } else {
+                            "post-game logout failed"
+                        };
+                        errors.push(category, message, Default::default());
+                        failed = true;
+                        execution_failed = true;
+                    }
+                }
+            }
+            finish_live_action(&mut auth_metrics, &execution.metrics, &mut abort, &budget);
             if execution_failed {
                 break;
             }
@@ -754,6 +1030,67 @@ fn validate_live_auth_load_model(model: &LoadModel) -> Result<(), String> {
     }
 }
 
+fn validate_live_game_load_model(model: &LoadModel) -> Result<(), String> {
+    match model {
+        LoadModel::FixedConcurrency {
+            virtual_players: 1,
+            ..
+        } => Ok(()),
+        LoadModel::Staged { stages }
+            if stages.len() == 1 && stages[0].virtual_players == 1 =>
+        {
+            Ok(())
+        }
+        _ => Err(
+            "live game runner currently requires one bounded virtual-player flow; use fixed_concurrency=1 or one staged wave with virtual_players=1"
+                .into(),
+        ),
+    }
+}
+
+fn validate_game_execution_gate(cli: &Cli, config: &LoadTestConfig) -> Result<(), String> {
+    GameExecutionGate {
+        execute_game: cli.execute_game,
+        confirm_game: cli.confirm_game.as_deref(),
+        environment: &config.environment.name,
+        account_manifest_supplied: cli.account_manifest.is_some(),
+        private_config_supplied: cli.private_config.is_some(),
+    }
+    .validate()
+    .map_err(|error| error.to_string())
+}
+
+fn map_auth_admission_to_string(abort: &mut AbortController, error: AuthAdmissionError) -> String {
+    match error {
+        AuthAdmissionError::BudgetExceeded(error) => {
+            abort.request(AbortReason::BudgetExceeded);
+            error
+        }
+        AuthAdmissionError::DeadlineExceeded => {
+            abort.request(AbortReason::Deadline);
+            "auth admission deadline elapsed before request dispatch".into()
+        }
+        AuthAdmissionError::Stopped(error) => error,
+    }
+}
+
+fn map_auth_admission_to_game_error(
+    abort: &mut AbortController,
+    error: AuthAdmissionError,
+) -> GameLiveError {
+    match error {
+        AuthAdmissionError::BudgetExceeded(_) => {
+            abort.request(AbortReason::BudgetExceeded);
+            GameLiveError::Transport("game budget exhausted")
+        }
+        AuthAdmissionError::DeadlineExceeded => {
+            abort.request(AbortReason::Deadline);
+            GameLiveError::Transport("game deadline elapsed")
+        }
+        AuthAdmissionError::Stopped(_) => GameLiveError::Transport("game admission stopped"),
+    }
+}
+
 fn effective_deadline(
     config: &LoadTestConfig,
     budget: &loadtest_core::config::HardBudget,
@@ -811,6 +1148,8 @@ struct Cli {
     dry_run: bool,
     execute_auth: bool,
     confirm_auth: Option<String>,
+    execute_game: bool,
+    confirm_game: Option<String>,
     deadline_unix_ms: Option<u64>,
     budget_override: BudgetOverride,
 }
@@ -830,6 +1169,8 @@ impl Cli {
             dry_run: false,
             execute_auth: false,
             confirm_auth: None,
+            execute_game: false,
+            confirm_game: None,
             deadline_unix_ms: None,
             budget_override: BudgetOverride::default(),
         };
@@ -872,6 +1213,14 @@ impl Cli {
                             .ok_or("--confirm-auth requires the environment name")?,
                     )
                 }
+                "--execute-game" => cli.execute_game = true,
+                "--confirm-game" => {
+                    cli.confirm_game = Some(
+                        values
+                            .next()
+                            .ok_or("--confirm-game requires the environment name")?,
+                    )
+                }
                 "--deadline-unix-ms" => {
                     cli.deadline_unix_ms = Some(parse_value(values.next(), "--deadline-unix-ms")?)
                 }
@@ -911,12 +1260,14 @@ fn parse_value<T: std::str::FromStr>(value: Option<String>, flag: &str) -> Resul
         .map_err(|_| format!("{flag} has an invalid value"))
 }
 fn usage() -> String {
-    "usage: loadtest validate|calibrate --config <file> [--private-config <file>] [--allow-remote --confirm <environment>] [--dry-run]\n       loadtest run --config <file> --dry-run\n       loadtest run --config <file> --execute-auth --confirm-auth <environment> --account-manifest <file> --private-config <file> [--allow-remote --confirm <environment>]\n       loadtest report --report-dir <reports/run-id>".into()
+    "usage: loadtest validate|calibrate --config <file> [--private-config <file>] [--allow-remote --confirm <environment>] [--dry-run]\n       loadtest run --config <file> --dry-run\n       loadtest run --config <file> --execute-auth --confirm-auth <environment> --account-manifest <file> --private-config <file> [--allow-remote --confirm <environment>]\n       loadtest run --config <file> --execute-auth --confirm-auth <environment> --execute-game --confirm-game <environment> --account-manifest <file> --private-config <file> [--allow-remote --confirm <environment>]\n       loadtest report --report-dir <reports/run-id>".into()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use loadtest_core::abort::AbortReason;
+    use loadtest_core::auth_http::{AuthHttpStatusCategory, AuthOutcomeCategory};
 
     #[test]
     fn dry_run_reconnect_burst_writes_offline_plan_metrics_without_transport() {
@@ -988,6 +1339,79 @@ mod tests {
         assert_eq!(metrics.counters["reconnect_burst_backoff_ms"], 100);
         assert_eq!(metrics.counters["reconnect_burst_potential_data_writes"], 4);
         std::fs::remove_dir_all(temp_root).unwrap();
+    }
+
+    #[test]
+    fn game_follow_up_failure_keeps_completed_auth_metrics_in_the_action_total() {
+        let budget = loadtest_core::config::HardBudget {
+            max_virtual_players: 1,
+            max_login_qps: 1.0,
+            max_new_connections_per_second: 1.0,
+            max_business_messages_per_second: 1.0,
+            max_messages_per_connection_per_second: 1.0,
+            max_duration_secs: 1,
+            max_total_operations: 3,
+            max_error_rate: 1.0,
+            max_connection_failure_rate: 1.0,
+            max_p99_ms: 1_000,
+            max_data_writes: 0,
+        };
+        let action = AuthRunMetrics {
+            requests: 2,
+            login_requests: 1,
+            login_successes: 1,
+            http_statuses: [(AuthHttpStatusCategory::Http2xx, 2)].into(),
+            outcomes: [(AuthOutcomeCategory::Success, 2)].into(),
+            ..Default::default()
+        };
+        let mut aggregate = AuthRunMetrics::default();
+        let mut abort = AbortController::default();
+
+        // This is the action finalizer used after an auth-complete game
+        // ticket-missing or KCP-admission failure; it always retains auth data.
+        finish_live_action(&mut aggregate, &action, &mut abort, &budget);
+
+        assert_eq!(aggregate.requests, 2);
+        assert_eq!(aggregate.login_requests, 1);
+        assert_eq!(aggregate.login_successes, 1);
+        assert_eq!(aggregate.outcomes[&AuthOutcomeCategory::Success], 2);
+        assert!(!abort.should_stop_new_sessions());
+    }
+
+    #[test]
+    fn game_admission_budget_and_deadline_failures_abort_consistently() {
+        let mut budget_abort = AbortController::default();
+        let budget_error = map_auth_admission_to_game_error(
+            &mut budget_abort,
+            AuthAdmissionError::BudgetExceeded("quota exhausted".into()),
+        );
+        assert_eq!(budget_abort.reason(), Some(&AbortReason::BudgetExceeded));
+        assert!(budget_error.to_string().contains("budget"));
+
+        let mut deadline_abort = AbortController::default();
+        let deadline_error = map_auth_admission_to_game_error(
+            &mut deadline_abort,
+            AuthAdmissionError::DeadlineExceeded,
+        );
+        assert_eq!(deadline_abort.reason(), Some(&AbortReason::Deadline));
+        assert!(deadline_error.to_string().contains("deadline"));
+    }
+
+    #[test]
+    fn deferred_logout_cleanup_never_overrides_an_existing_abort_reason() {
+        let mut budget_abort = AbortController::default();
+        budget_abort.request(AbortReason::BudgetExceeded);
+        assert!(!can_attempt_deferred_logout(true, true, &budget_abort));
+        assert!(deferred_logout_skip_message(&budget_abort).contains("budget"));
+
+        let mut deadline_abort = AbortController::default();
+        deadline_abort.request(AbortReason::Deadline);
+        assert!(!can_attempt_deferred_logout(true, true, &deadline_abort));
+        assert!(deferred_logout_skip_message(&deadline_abort).contains("deadline"));
+
+        let clean = AbortController::default();
+        assert!(can_attempt_deferred_logout(true, true, &clean));
+        assert!(!can_attempt_deferred_logout(true, false, &clean));
     }
 
     #[test]
@@ -1091,6 +1515,66 @@ mod tests {
         .unwrap_err();
         assert!(stage_window.contains("stage 'too-fast'"));
         assert!(!stage_window.contains("--account-manifest"));
+        std::fs::remove_file(config_path).unwrap();
+    }
+
+    #[test]
+    fn game_execution_requires_both_explicit_gates_before_any_transport_setup() {
+        let config_path = std::env::temp_dir().join(format!(
+            "loadtest-game-gate-{}-{}.json",
+            std::process::id(),
+            unix_ms()
+        ));
+        std::fs::write(
+            &config_path,
+            serde_json::to_vec(&serde_json::json!({
+                "schema_version": 1,
+                "environment": {"name": "local", "kind": "local"},
+                "targets": {"auth_http": "http://127.0.0.1:3000", "game_proxy": "kcp://127.0.0.1:4000"},
+                "budget": {"max_virtual_players": 1, "max_login_qps": 10.0, "max_new_connections_per_second": 10.0, "max_business_messages_per_second": 10.0, "max_messages_per_connection_per_second": 10.0, "max_duration_secs": 10, "max_total_operations": 16, "max_error_rate": 0.1, "max_connection_failure_rate": 0.1, "max_p99_ms": 100, "max_data_writes": 16},
+                "scenario": {"name": "game", "load": {"type": "fixed_concurrency", "virtual_players": 1, "duration_secs": 10}, "auth": {"operations": ["login", "list_characters", "select_character", "issue_ticket", "logout"]}},
+                "reports_root": "reports",
+                "prepare_reports_root": "prepare"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let auth_missing = execute(vec![
+            "run".into(),
+            "--config".into(),
+            config_path.display().to_string(),
+            "--execute-game".into(),
+        ])
+        .unwrap_err();
+        assert!(auth_missing.contains("--execute-auth"));
+
+        let game_confirmation_missing = execute(vec![
+            "run".into(),
+            "--config".into(),
+            config_path.display().to_string(),
+            "--execute-auth".into(),
+            "--confirm-auth".into(),
+            "local".into(),
+            "--execute-game".into(),
+        ])
+        .unwrap_err();
+        assert!(game_confirmation_missing.contains("--confirm-game"));
+
+        let manifest_missing = execute(vec![
+            "run".into(),
+            "--config".into(),
+            config_path.display().to_string(),
+            "--execute-auth".into(),
+            "--confirm-auth".into(),
+            "local".into(),
+            "--execute-game".into(),
+            "--confirm-game".into(),
+            "local".into(),
+        ])
+        .unwrap_err();
+        assert!(manifest_missing.contains("--account-manifest"));
+        assert!(!manifest_missing.contains("does not support fixed_concurrency"));
         std::fs::remove_file(config_path).unwrap();
     }
 }

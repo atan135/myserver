@@ -51,6 +51,58 @@ pub struct AuthRunBudgetEstimate {
     pub minimum_dispatch_admission_ms: u64,
 }
 
+/// The minimum player-protocol work emitted by the guarded KCP runner:
+/// one connection, then `AuthReq` and `PingReq`. These values have no data
+/// writes but must be reserved before an auth+game live run begins.
+pub const MIN_GAME_CONNECTIONS_PER_FLOW: u64 = 1;
+pub const MIN_GAME_MESSAGES_PER_FLOW: u64 = 2;
+
+pub fn validate_game_run_budget(
+    auth: &AuthRunBudgetEstimate,
+    budget: &HardBudget,
+) -> Result<(), String> {
+    let kcp_connections = auth
+        .scheduled_flows
+        .checked_mul(MIN_GAME_CONNECTIONS_PER_FLOW)
+        .ok_or("game connection budget estimate overflowed")?;
+    let operations = auth
+        .http_operations
+        .checked_add(
+            kcp_connections
+                .checked_add(
+                    auth.scheduled_flows
+                        .checked_mul(MIN_GAME_MESSAGES_PER_FLOW)
+                        .ok_or("game operation budget estimate overflowed")?,
+                )
+                .ok_or("game operation budget estimate overflowed")?,
+        )
+        .ok_or("game operation budget estimate overflowed")?;
+    if operations > budget.max_total_operations {
+        return Err(format!(
+            "auth+game scenario estimates {operations} total operations (including {kcp_connections} KCP connections), exceeding max_total_operations {}",
+            budget.max_total_operations
+        ));
+    }
+    let available_duration_ms = auth.scenario_duration_secs.saturating_mul(1_000);
+    let connection_admission_ms =
+        minimum_admission_ms(kcp_connections, budget.max_new_connections_per_second)?;
+    let message_admission_ms = minimum_admission_ms(
+        auth.http_operations.saturating_add(
+            auth.scheduled_flows
+                .saturating_mul(MIN_GAME_MESSAGES_PER_FLOW),
+        ),
+        budget
+            .max_business_messages_per_second
+            .min(budget.max_messages_per_connection_per_second),
+    )?;
+    if connection_admission_ms >= available_duration_ms
+        || message_admission_ms >= available_duration_ms
+    {
+        return Err("auth+game scenario cannot admit its KCP connection and player messages within the duration budget".into());
+    }
+    Ok(())
+}
+
 pub fn is_login_operation(operation: AuthOperation) -> bool {
     matches!(
         operation,
@@ -454,6 +506,7 @@ fn ceil_div(numerator: u64, denominator: u64) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::auth_http::AuthDispatchAdmission;
     use crate::config::{AuthScenario, LoadStage};
 
     fn budget() -> HardBudget {
@@ -571,6 +624,48 @@ mod tests {
         .unwrap();
         assert_eq!(staged.virtual_player_slots, 3);
         assert!(validate_auth_run_budget(&staged, &budget()).is_err());
+    }
+
+    #[test]
+    fn game_runner_reserves_connection_and_two_player_messages_before_execution() {
+        let scenario = auth_scenario(LoadModel::FixedConcurrency {
+            virtual_players: 1,
+            duration_secs: 10,
+        });
+        let estimate = estimate_auth_run(&scenario, &budget()).unwrap();
+        let mut too_small = budget();
+        too_small.max_total_operations = estimate.http_operations + 2;
+        assert!(
+            validate_game_run_budget(&estimate, &too_small)
+                .unwrap_err()
+                .contains("total operations")
+        );
+
+        let mut admitted = AuthDispatchAdmission::new(&budget()).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        admitted.admit_game_connection(deadline, || Ok(())).unwrap();
+        admitted.admit_game_message(deadline, || Ok(())).unwrap();
+        admitted.admit_game_message(deadline, || Ok(())).unwrap();
+        assert_eq!(admitted.used_operations(), 3);
+        assert_eq!(admitted.used_data_writes(), 0);
+    }
+
+    #[test]
+    fn game_connection_rate_counts_only_kcp_connections() {
+        let scenario = auth_scenario(LoadModel::FixedConcurrency {
+            virtual_players: 1,
+            duration_secs: 10,
+        });
+        let estimate = estimate_auth_run(&scenario, &budget()).unwrap();
+        let mut constrained = budget();
+        constrained.max_total_operations = estimate.http_operations + 3;
+        constrained.max_new_connections_per_second = 0.2;
+        constrained.max_business_messages_per_second = 1.0;
+        constrained.max_messages_per_connection_per_second = 1.0;
+
+        // The existing auth estimate accounts for its HTTP connection. The
+        // game extension must reserve only the additional KCP connection.
+        assert!(validate_game_run_budget(&estimate, &constrained).is_ok());
     }
 
     #[test]

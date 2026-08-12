@@ -15,6 +15,7 @@ pub mod config;
 pub mod contracts;
 pub mod fake;
 pub mod game_kcp;
+pub mod game_live;
 pub mod gameplay;
 pub mod lifecycle;
 pub mod metrics;

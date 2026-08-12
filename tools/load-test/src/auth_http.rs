@@ -267,6 +267,57 @@ impl AuthDispatchAdmission {
         &mut self,
         request: &AuthHttpRequest,
         deadline: Instant,
+        checkpoint: F,
+    ) -> Result<Duration, AuthAdmissionError>
+    where
+        F: FnMut() -> Result<(), String>,
+    {
+        self.admit_outbound(
+            request.is_login_attempt(),
+            true,
+            true,
+            true,
+            request.potential_data_writes(),
+            deadline,
+            checkpoint,
+        )
+    }
+
+    /// Accounts for a formal KCP connection in the same hard operation and
+    /// connection budgets as auth-http. It has no business payload yet.
+    pub fn admit_game_connection<F>(
+        &mut self,
+        deadline: Instant,
+        checkpoint: F,
+    ) -> Result<Duration, AuthAdmissionError>
+    where
+        F: FnMut() -> Result<(), String>,
+    {
+        self.admit_outbound(false, true, false, false, 0, deadline, checkpoint)
+    }
+
+    /// Accounts for a player-protocol request after its KCP connection exists.
+    /// The minimal game runner currently emits `AuthReq` and `PingReq`; both
+    /// have zero declared data writes and use this common rate boundary.
+    pub fn admit_game_message<F>(
+        &mut self,
+        deadline: Instant,
+        checkpoint: F,
+    ) -> Result<Duration, AuthAdmissionError>
+    where
+        F: FnMut() -> Result<(), String>,
+    {
+        self.admit_outbound(false, false, true, true, 0, deadline, checkpoint)
+    }
+
+    fn admit_outbound<F>(
+        &mut self,
+        is_login: bool,
+        is_new_connection: bool,
+        is_business_message: bool,
+        is_per_connection_message: bool,
+        potential_data_writes: u64,
+        deadline: Instant,
         mut checkpoint: F,
     ) -> Result<Duration, AuthAdmissionError>
     where
@@ -274,10 +325,17 @@ impl AuthDispatchAdmission {
     {
         self.checkpoint(deadline, &mut checkpoint)?;
         let now_us = self.started.elapsed().as_micros() as u64;
-        let mut admitted_at_us = self.connections.reserve(now_us);
-        admitted_at_us = admitted_at_us.max(self.business_messages.reserve(now_us));
-        admitted_at_us = admitted_at_us.max(self.messages_per_connection.reserve(now_us));
-        if request.is_login_attempt() {
+        let mut admitted_at_us = now_us;
+        if is_new_connection {
+            admitted_at_us = admitted_at_us.max(self.connections.reserve(now_us));
+        }
+        if is_business_message {
+            admitted_at_us = admitted_at_us.max(self.business_messages.reserve(now_us));
+        }
+        if is_per_connection_message {
+            admitted_at_us = admitted_at_us.max(self.messages_per_connection.reserve(now_us));
+        }
+        if is_login {
             admitted_at_us = admitted_at_us.max(self.login.reserve(now_us));
         }
 
@@ -291,7 +349,7 @@ impl AuthDispatchAdmission {
         }
         self.checkpoint(deadline, &mut checkpoint)?;
         self.quota
-            .admit_potential_writes(request.potential_data_writes())
+            .admit_potential_writes(potential_data_writes)
             .map_err(AuthAdmissionError::BudgetExceeded)?;
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
@@ -829,6 +887,11 @@ where
 pub struct AuthExecution {
     pub metrics: AuthRunMetrics,
     pub error: Option<String>,
+    // These values are intentionally neither serializable nor debuggable.
+    // The caller must consume them before starting a game session.
+    ticket: Option<String>,
+    character_id: Option<String>,
+    access_token: Option<String>,
 }
 
 impl AuthExecution {
@@ -836,6 +899,9 @@ impl AuthExecution {
         Self {
             metrics,
             error: None,
+            ticket: None,
+            character_id: None,
+            access_token: None,
         }
     }
 
@@ -843,8 +909,86 @@ impl AuthExecution {
         Self {
             metrics,
             error: Some(error.into()),
+            ticket: None,
+            character_id: None,
+            access_token: None,
         }
     }
+
+    /// Transfers ephemeral game credentials to the next runner stage without
+    /// making them serializable or including them in reports.
+    pub fn take_game_credentials(&mut self) -> Option<(String, String)> {
+        self.ticket.take().zip(self.character_id.take())
+    }
+
+    fn take_logout_request(&mut self) -> Option<AuthHttpRequest> {
+        self.access_token
+            .take()
+            .map(|access_token| AuthHttpRequest::Logout { access_token })
+    }
+}
+
+/// Splits a scenario's terminal logout from the ticket-producing auth flow.
+/// `auth-http` invalidates every player ticket on logout, so a game runner must
+/// complete its KCP session before it may dispatch this operation.
+pub fn split_game_auth_operations(
+    operations: &[AuthOperation],
+) -> Result<(Vec<AuthOperation>, bool), String> {
+    let Some(logout_index) = operations
+        .iter()
+        .position(|operation| matches!(operation, AuthOperation::Logout))
+    else {
+        return Ok((operations.to_vec(), false));
+    };
+    if logout_index + 1 != operations.len() {
+        return Err("game scenarios may only place logout as the final auth operation".into());
+    }
+    let before_logout = operations[..logout_index].to_vec();
+    if !before_logout.iter().any(|operation| {
+        matches!(
+            operation,
+            AuthOperation::IssueTicket | AuthOperation::SelectCharacter
+        )
+    }) {
+        return Err(
+            "game scenarios require a ticket-producing auth operation before logout".into(),
+        );
+    }
+    Ok((before_logout, true))
+}
+
+/// Sends the terminal logout after the caller has closed its ticket-authenticated
+/// game session. Access tokens stay in this non-debug, non-serializable object
+/// until this one-shot operation consumes them.
+pub fn execute_deferred_logout<T, F>(
+    transport: &mut T,
+    execution: &mut AuthExecution,
+    mut before_request: F,
+) -> Result<(), String>
+where
+    T: AuthHttpTransport,
+    F: FnMut(&AuthHttpRequest) -> Result<Duration, String>,
+{
+    let request = execution
+        .take_logout_request()
+        .ok_or("deferred logout requires an authenticated access token")?;
+    let response = send_with_bounded_retry_after_admission(
+        transport,
+        request.clone(),
+        0,
+        &mut execution.metrics,
+        || before_request(&request),
+    )?;
+    if !matches!(response.body, AuthResponseBody::Success(_)) {
+        return Err(format!(
+            "deferred logout ended with {:?}",
+            response.outcome()
+        ));
+    }
+    execution.ticket = None;
+    execution.character_id = None;
+    execution.metrics.mark_state(VirtualPlayerState::LoggedOut);
+    Ok(())
 }
 
 pub fn execute_auth_operations<T, F>(
@@ -863,6 +1007,7 @@ where
     metrics.mark_state(VirtualPlayerState::AwaitingLogin);
     let mut access_token: Option<String> = None;
     let mut character_id: Option<String> = None;
+    let mut game_credentials: Option<(String, String)> = None;
     let mut state = VirtualPlayerState::AwaitingLogin;
 
     for operation in operations {
@@ -1009,17 +1154,33 @@ where
                 }
             }
             AuthOperation::SelectCharacter | AuthOperation::IssueTicket => {
-                if success.ticket.is_none() {
+                let Some(ticket) = success.ticket else {
                     metrics.mark_state(VirtualPlayerState::Failed);
                     return AuthExecution::failed(
                         metrics,
                         "ticket operation did not return a ticket",
                     );
-                }
+                };
+                let Some(selected_character_id) = character_id.clone() else {
+                    metrics.mark_state(VirtualPlayerState::Failed);
+                    return AuthExecution::failed(
+                        metrics,
+                        "ticket operation requires a prepared character",
+                    );
+                };
+                // A select response may already contain a character-bound
+                // ticket; an explicit issue response replaces it. Neither
+                // opaque value enters metrics, diagnostics, or reports.
+                game_credentials = Some((ticket, selected_character_id));
                 state = VirtualPlayerState::TicketIssued;
                 metrics.mark_state(state);
             }
             AuthOperation::Logout => {
+                // The production logout invalidates every ticket for the
+                // player. Do not leave a now-invalid opaque ticket reachable
+                // from this execution object.
+                access_token = None;
+                game_credentials = None;
                 state = VirtualPlayerState::LoggedOut;
                 metrics.mark_state(state);
             }
@@ -1027,7 +1188,13 @@ where
         }
     }
     metrics.mark_state(state);
-    AuthExecution::completed(metrics)
+    let mut execution = AuthExecution::completed(metrics);
+    if let Some((ticket, character_id)) = game_credentials {
+        execution.ticket = Some(ticket);
+        execution.character_id = Some(character_id);
+    }
+    execution.access_token = access_token;
+    execution
 }
 
 pub fn operation_name(operation: AuthOperation) -> &'static str {
@@ -1056,18 +1223,25 @@ pub enum FakeAuthOutcome {
 
 pub struct FakeAuthHttpService {
     outcomes: VecDeque<FakeAuthOutcome>,
+    request_count: u64,
 }
 
 impl FakeAuthHttpService {
     pub fn scripted(outcomes: impl IntoIterator<Item = FakeAuthOutcome>) -> Self {
         Self {
             outcomes: outcomes.into_iter().collect(),
+            request_count: 0,
         }
+    }
+
+    pub fn request_count(&self) -> u64 {
+        self.request_count
     }
 }
 
 impl AuthHttpTransport for FakeAuthHttpService {
     fn send(&mut self, request: AuthHttpRequest) -> AuthHttpResponse {
+        self.request_count = self.request_count.saturating_add(1);
         let outcome = self
             .outcomes
             .pop_front()
@@ -1539,6 +1713,93 @@ mod tests {
         assert!(!output.contains("in-memory-only"));
         assert!(!output.contains("fake-access-token"));
         assert!(!output.contains("fake-ticket"));
+    }
+
+    #[test]
+    fn game_credentials_transfer_once_before_deferred_logout_without_metrics_or_debug_exposure() {
+        let mut service = FakeAuthHttpService::scripted([FakeAuthOutcome::Success; 4]);
+        let mut execution = execute_auth_operations(
+            &mut service,
+            &[
+                AuthOperation::Login,
+                AuthOperation::ListCharacters,
+                AuthOperation::IssueTicket,
+            ],
+            "loadtest_000001",
+            "loadtest_local_default_000001",
+            "in-memory-only",
+            |_, _| Ok(Duration::MAX),
+        );
+
+        assert!(execution.error.is_none());
+        assert_eq!(
+            execution.take_game_credentials(),
+            Some(("fake-ticket".into(), "fake-character".into()))
+        );
+        assert_eq!(execution.take_game_credentials(), None);
+        let output = serde_json::to_string(&execution.metrics).unwrap();
+        assert!(!output.contains("fake-ticket"));
+        assert!(!output.contains("fake-character"));
+    }
+
+    #[test]
+    fn game_mode_defers_final_logout_until_game_cleanup_and_only_sends_once() {
+        let operations = [
+            AuthOperation::Login,
+            AuthOperation::ListCharacters,
+            AuthOperation::IssueTicket,
+            AuthOperation::Logout,
+        ];
+        assert_eq!(
+            split_game_auth_operations(&operations).unwrap(),
+            (
+                vec![
+                    AuthOperation::Login,
+                    AuthOperation::ListCharacters,
+                    AuthOperation::IssueTicket,
+                ],
+                true,
+            )
+        );
+        assert!(
+            split_game_auth_operations(&[
+                AuthOperation::Login,
+                AuthOperation::Logout,
+                AuthOperation::IssueTicket,
+            ])
+            .is_err()
+        );
+
+        let mut transport = FakeAuthHttpService::scripted([FakeAuthOutcome::Success; 4]);
+        let mut execution = execute_auth_operations(
+            &mut transport,
+            &operations[..3],
+            "loadtest_000001",
+            "loadtest_local_default_000001",
+            "in-memory-only",
+            |_, _| Ok(Duration::MAX),
+        );
+        assert!(execution.take_game_credentials().is_some());
+        // The game follow-up may fail after it consumes the ticket. Cleanup
+        // still owns the authenticated access token and must send logout.
+        execute_deferred_logout(&mut transport, &mut execution, |_| Ok(Duration::MAX)).unwrap();
+        assert_eq!(transport.request_count(), 4);
+        assert_eq!(execution.take_game_credentials(), None);
+        assert!(
+            execute_deferred_logout(&mut transport, &mut execution, |_| Ok(Duration::MAX)).is_err()
+        );
+        assert_eq!(transport.request_count(), 4);
+
+        let mut inline_transport = FakeAuthHttpService::scripted([FakeAuthOutcome::Success; 4]);
+        let mut inline_execution = execute_auth_operations(
+            &mut inline_transport,
+            &operations,
+            "loadtest_000001",
+            "loadtest_local_default_000001",
+            "in-memory-only",
+            |_, _| Ok(Duration::MAX),
+        );
+        assert_eq!(inline_execution.take_game_credentials(), None);
     }
 
     #[test]
