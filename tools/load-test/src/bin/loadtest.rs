@@ -15,6 +15,10 @@ use loadtest_core::auth_http::{
     AuthAdmissionError, AuthDispatchAdmission, AuthRunMetrics, FakeAuthHttpService,
     FakeAuthOutcome, ReqwestAuthHttpTransport, execute_auth_operations,
 };
+use loadtest_core::calibration::{
+    CalibrationRun, bounded_calibration_duration_ms, bounded_calibration_operations,
+    progressive_levels, run_local_workload,
+};
 use loadtest_core::config::{
     BudgetOverride, LoadModel, LoadTestConfig, RunAccess, load_config, load_private_config,
 };
@@ -46,7 +50,7 @@ fn execute(arguments: Vec<String>) -> Result<(), String> {
             println!("configuration is valid for {}", config.environment.name);
         }
         "run" => run(&parsed)?,
-        "calibrate" => run_dry(&parsed)?,
+        "calibrate" => calibrate_dry(&parsed)?,
         "report" => show_report(
             parsed
                 .report_dir
@@ -227,12 +231,131 @@ fn run_dry(cli: &Cli) -> Result<(), String> {
             resources,
             errors: &errors,
             auth_metrics: auth_metrics.as_ref(),
+            calibration: None,
         },
     )
     .map_err(|error| error.to_string())?;
     println!(
         "{} finished without connecting to services (status={status}). report={}",
         cli.command,
+        report.display()
+    );
+    Ok(())
+}
+
+fn calibrate_dry(cli: &Cli) -> Result<(), String> {
+    if !cli.dry_run {
+        return Err("calibrate requires --dry-run".into());
+    }
+    let config = cli.load()?;
+    validate(&config, cli)?;
+    let budget = config
+        .effective_budget(&cli.budget_override)
+        .map_err(|error| error.to_string())?;
+    let planned_calibration_operations =
+        bounded_calibration_operations(budget.max_virtual_players, config.calibration);
+    if planned_calibration_operations > budget.max_total_operations {
+        return Err(format!(
+            "calibration would schedule {planned_calibration_operations} synthetic operations, exceeding max_total_operations {}",
+            budget.max_total_operations
+        ));
+    }
+    let calibration_duration_ms =
+        bounded_calibration_duration_ms(budget.max_virtual_players, config.calibration);
+    if calibration_duration_ms > budget.max_duration_secs.saturating_mul(1_000) {
+        return Err(format!(
+            "calibration would run for {calibration_duration_ms}ms, exceeding max_duration_secs {}",
+            budget.max_duration_secs
+        ));
+    }
+    let started = unix_ms();
+    let deadline_unix_ms = effective_deadline(&config, &budget, cli.deadline_unix_ms, started)?;
+    let preflight = summarize_run(
+        "calibrate",
+        &config,
+        &budget,
+        RunAccess {
+            allow_remote: cli.allow_remote,
+            confirmation: cli.confirmation.as_deref(),
+        },
+        deadline_unix_ms,
+        true,
+        false,
+    )?;
+    println!(
+        "preflight={}",
+        serde_json::to_string(&preflight).expect("preflight summary serializes")
+    );
+
+    let sampler = ResourceSampler;
+    let mut calibration = CalibrationRun::new(config.calibration);
+    let mut metrics = Metrics::default();
+    let mut final_resources = sampler.sample(0, 0, 0);
+    let protection = DryRunProtection::new(&config);
+    let mut abort = AbortController::default();
+    let mut errors = ErrorBuffer::default();
+    let ctrl_c = install_ctrl_c_flag()
+        .map_err(|error| format!("failed to install Ctrl+C handler: {error}"))?;
+    for players in progressive_levels(budget.max_virtual_players) {
+        abort.check_deadline(unix_ms(), deadline_unix_ms);
+        abort.check_stop_file(config.stop_file.as_deref().map(Path::new));
+        abort.check_ctrl_c(&ctrl_c);
+        if !calibration.should_continue() || abort.should_stop_new_sessions() {
+            break;
+        }
+        if let Some(error) = revalidate_or_abort(&protection, &mut abort) {
+            errors.push("protection_unknown", error, Default::default());
+            break;
+        }
+        let before = sampler.sample(0, 0, 0);
+        let workload = run_local_workload(players, config.calibration);
+        let resources = sampler.sample(
+            workload.max_scheduler_lag_ms,
+            workload.max_queue_depth,
+            workload.dropped_actions,
+        );
+        let level = calibration.observe(players, workload, &before, &resources);
+        metrics.increment("virtual_players", players as u64);
+        metrics.increment("started", level.scheduled_actions);
+        metrics.increment("scheduler_lag_ms", level.scheduler_lag_ms.unwrap_or(0));
+        metrics.increment("scheduler_queue_depth", level.max_queue_depth);
+        metrics.increment("metrics_dropped", level.dropped_actions);
+        println!(
+            "calibration_level={}",
+            serde_json::to_string(&level).expect("calibration level serializes")
+        );
+        final_resources = resources;
+    }
+    let calibration = calibration.finish(None);
+    let abort_reason = abort.reason().map(|reason| format!("{reason:?}"));
+    let run_id = format!("calibrate-{}-{}", std::process::id(), started);
+    let report = write_report(
+        Path::new(&config.reports_root),
+        ReportInput {
+            run_id: &run_id,
+            config: &config,
+            effective_budget: &budget,
+            status: if abort.should_stop_new_sessions() {
+                "aborted"
+            } else {
+                "completed"
+            },
+            abort_reason: abort_reason.as_deref(),
+            shutdown_phase: None,
+            deadline_unix_ms,
+            graceful_shutdown_ms: config.graceful_shutdown_ms,
+            started_unix_ms: started,
+            ended_unix_ms: unix_ms(),
+            metrics: metrics.snapshot(),
+            resources: final_resources,
+            errors: &errors,
+            auth_metrics: None,
+            calibration: Some(&calibration),
+        },
+    )
+    .map_err(|error| error.to_string())?;
+    println!(
+        "calibrate finished without connecting to services. report={}",
         report.display()
     );
     Ok(())
@@ -562,6 +685,7 @@ fn run_auth_live(cli: &Cli) -> Result<(), String> {
             resources: ResourceSampler.sample(0, 0, 0),
             errors: &errors,
             auth_metrics: Some(&auth_metrics),
+            calibration: None,
         },
     )
     .map_err(|error| error.to_string())?;

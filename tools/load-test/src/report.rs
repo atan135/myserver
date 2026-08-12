@@ -8,6 +8,7 @@ use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
 use crate::auth_http::AuthRunMetrics;
+use crate::calibration::CalibrationReport;
 use crate::config::{HardBudget, LoadTestConfig};
 use crate::metrics::MetricsSnapshot;
 use crate::resource::GeneratorResources;
@@ -76,6 +77,7 @@ pub struct ReportInput<'a> {
     pub resources: GeneratorResources,
     pub errors: &'a ErrorBuffer,
     pub auth_metrics: Option<&'a AuthRunMetrics>,
+    pub calibration: Option<&'a CalibrationReport>,
 }
 
 #[derive(Debug, Serialize)]
@@ -97,6 +99,7 @@ struct RunJson<'a> {
     graceful_shutdown_ms: u64,
     budget: &'a HardBudget,
     generator_resources: GeneratorResources,
+    calibration: Option<&'a CalibrationReport>,
 }
 
 pub fn write_report(root: &Path, input: ReportInput<'_>) -> std::io::Result<PathBuf> {
@@ -128,6 +131,7 @@ pub fn write_report(root: &Path, input: ReportInput<'_>) -> std::io::Result<Path
         graceful_shutdown_ms: input.graceful_shutdown_ms,
         budget: input.effective_budget,
         generator_resources: input.resources,
+        calibration: input.calibration,
     };
     write_json(report_dir.join("run.json"), &run)?;
     write_json(report_dir.join("metrics.json"), &input.metrics)?;
@@ -141,6 +145,7 @@ pub fn write_report(root: &Path, input: ReportInput<'_>) -> std::io::Result<Path
         &run,
         &input.metrics,
         input.auth_metrics,
+        input.calibration,
     )?;
     Ok(report_dir)
 }
@@ -321,6 +326,7 @@ fn write_summary(
     run: &RunJson<'_>,
     metrics: &MetricsSnapshot,
     auth_metrics: Option<&AuthRunMetrics>,
+    calibration: Option<&CalibrationReport>,
 ) -> std::io::Result<()> {
     let operation = metrics.histograms.get("operation_ms");
     let auth = auth_metrics.map_or_else(String::new, |auth| {
@@ -339,10 +345,18 @@ fn write_summary(
             serde_json::to_string(&auth.virtual_player_states).expect("auth state metrics serialize"),
         )
     });
+    let calibration = calibration.map_or_else(String::new, |calibration| {
+        format!(
+            "\nCalibration generator capacity: {}\n\nCalibration service stable capacity: {}\n\nCalibration system burst capacity: {}\n",
+            capacity_summary(&calibration.generator_capacity),
+            capacity_summary(&calibration.service_stable_capacity),
+            capacity_summary(&calibration.system_burst_capacity),
+        )
+    });
     fs::write(
         path,
         format!(
-            "# Load Test Summary\n\nStatus: {}\n\nEnvironment: {}\n\nP50/P90/P95/P99/max operation latency (ms): {}/{}/{}/{}/{}\n\nAbort reason: {}\n{}",
+            "# Load Test Summary\n\nStatus: {}\n\nEnvironment: {}\n\nP50/P90/P95/P99/max operation latency (ms): {}/{}/{}/{}/{}\n\nAbort reason: {}\n{}{}",
             run.status,
             run.environment,
             operation.map_or(0, |histogram| histogram.percentile(0.50)),
@@ -352,8 +366,20 @@ fn write_summary(
             operation.map_or(0, |histogram| histogram.max()),
             run.abort_reason.unwrap_or("none"),
             auth,
+            calibration,
         ),
     )
+}
+
+fn capacity_summary(capacity: &crate::calibration::CapacityConclusion) -> String {
+    match capacity {
+        crate::calibration::CapacityConclusion::Available { virtual_players } => {
+            format!("available ({virtual_players} virtual players)")
+        }
+        crate::calibration::CapacityConclusion::Unavailable { reason } => {
+            format!("unavailable ({reason})")
+        }
+    }
 }
 
 #[cfg(test)]
@@ -399,6 +425,7 @@ mod tests {
                 resources: ResourceSampler.sample(0, 0, 0),
                 errors: &errors,
                 auth_metrics: None,
+                calibration: None,
             },
         )
         .unwrap();
@@ -501,6 +528,7 @@ mod tests {
                 resources: ResourceSampler.sample(0, 0, 0),
                 errors: &ErrorBuffer::default(),
                 auth_metrics: Some(&auth_metrics),
+                calibration: None,
             },
         )
         .unwrap();

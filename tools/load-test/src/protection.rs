@@ -145,6 +145,7 @@ mod tests {
             deadline_unix_ms: None,
             graceful_shutdown_ms: 1,
             account_prepare: AccountPrepareConfig::default(),
+            calibration: Default::default(),
         }
     }
 

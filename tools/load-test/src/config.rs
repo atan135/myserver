@@ -9,6 +9,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::SCHEMA_VERSION;
+use crate::calibration::CalibrationThresholds;
 use crate::step::ScenarioStep;
 
 #[derive(Debug, Error)]
@@ -39,6 +40,8 @@ pub struct LoadTestConfig {
     pub graceful_shutdown_ms: u64,
     #[serde(default)]
     pub account_prepare: AccountPrepareConfig,
+    #[serde(default)]
+    pub calibration: CalibrationThresholds,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -325,6 +328,7 @@ impl LoadTestConfig {
         self.validate_budget()?;
         self.validate_scenario()?;
         self.validate_account_prepare()?;
+        self.calibration.validate().map_err(ConfigError::Rejected)?;
         if self.graceful_shutdown_ms == 0 || self.graceful_shutdown_ms > MAX_GRACEFUL_SHUTDOWN_MS {
             return Err(ConfigError::Rejected(format!(
                 "graceful_shutdown_ms must be within 1..={MAX_GRACEFUL_SHUTDOWN_MS}"
@@ -748,6 +752,7 @@ mod tests {
             deadline_unix_ms: None,
             graceful_shutdown_ms: default_graceful_shutdown_ms(),
             account_prepare: AccountPrepareConfig::default(),
+            calibration: CalibrationThresholds::default(),
         }
     }
 

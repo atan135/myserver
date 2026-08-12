@@ -38,6 +38,42 @@ offline-only and requires `--dry-run`. A `run --dry-run` with `scenario.auth`
 uses the deterministic auth fake; it does not create a HTTP client or contact
 the loopback endpoint.
 
+`calibrate --dry-run` performs a local, transport-free 1/2/4/... progressive
+generator probe up to the profile virtual-player limit. Each level drives a
+fixed-cadence synthetic scheduler through a bounded monotonic time window and
+records its planned, scheduled, and dropped actions, maximum queue depth, and
+a deterministic work checksum alongside Windows process CPU, working set,
+scheduler lag, and metric-channel drops. The sum of all levels is rejected
+before execution if it exceeds either `max_total_operations` or
+`max_duration_secs`. It stops before the next level when CPU, memory,
+scheduler lag, or metric-drop thresholds are met; unavailable CPU, memory,
+lag, or drop measurements are fail-closed and are never interpreted as zero.
+The default thresholds reserve 20% of the highest stable generator level for
+normal test runs. Profiles may tighten or otherwise set these explicit
+thresholds with a `calibration` object:
+
+```json
+{
+  "calibration": {
+    "max_cpu_utilization_basis_points": 8000,
+    "max_working_set_bytes": 2147483648,
+    "max_scheduler_lag_ms": 50,
+    "max_metrics_dropped": 0,
+    "reserve_percent": 20,
+    "level_window_ms": 100,
+    "tick_interval_ms": 25
+  }
+}
+```
+
+Calibration reports always distinguish three conclusions: generator capacity,
+service stable capacity, and system burst capacity. Offline calibration has no
+server observation, so both service conclusions are explicitly `unavailable`.
+Even with live observations added later, a service capacity conclusion remains
+unavailable if service telemetry is incomplete or the generator saturated
+first. This prevents a generator bottleneck from being reported as server
+capacity.
+
 `account-prepare plan` writes a manifest and a write estimate under
 `prepare_reports_root/account-manifests/<environment>/<batch>/`. It does not
 read a secret or make a network request. `plan` estimates registration and
