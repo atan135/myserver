@@ -525,6 +525,26 @@ fn deferred_logout_skip_message(abort: &AbortController) -> &'static str {
     }
 }
 
+fn record_completed_game_session_metrics(core_metrics: &mut Metrics) {
+    core_metrics.increment("game_sessions_completed", 1);
+    core_metrics.increment("game_auth_requests", 1);
+    core_metrics.increment("game_heartbeat_requests", 1);
+}
+
+fn finish_game_action_after_cleanup<C, R>(
+    completed_game_session: bool,
+    cleanup: C,
+    record_completed_session: R,
+) where
+    C: FnOnce(),
+    R: FnOnce(),
+{
+    cleanup();
+    if completed_game_session {
+        record_completed_session();
+    }
+}
+
 fn run_live(cli: &Cli) -> Result<(), String> {
     if !cli.execute_auth {
         return Err(
@@ -767,6 +787,7 @@ fn run_live(cli: &Cli) -> Result<(), String> {
                 failed = true;
             }
             if !execution_failed && game_mode {
+                let mut completed_game_session = false;
                 let mut game_ticket = None;
                 match execution.take_game_credentials() {
                     None => {
@@ -896,9 +917,7 @@ fn run_live(cli: &Cli) -> Result<(), String> {
                                 if result.terminal_state
                                     == loadtest_core::virtual_player::VirtualPlayerSessionState::Closed =>
                             {
-                                core_metrics.increment("game_sessions_completed", 1);
-                                core_metrics.increment("game_auth_requests", 1);
-                                core_metrics.increment("game_heartbeat_requests", 1);
+                                completed_game_session = true;
                             }
                             Ok(_) | Err(_) => {
                                 errors.push(
@@ -912,49 +931,64 @@ fn run_live(cli: &Cli) -> Result<(), String> {
                         }
                     }
                 }
-                if deferred_logout && pre_game_auth_completed {
-                    if !can_attempt_deferred_logout(
-                        deferred_logout,
-                        pre_game_auth_completed,
-                        &abort,
-                    ) {
-                        errors.push(
-                            "deferred_logout_not_dispatched",
-                            deferred_logout_skip_message(&abort),
-                            Default::default(),
-                        );
-                    } else if execute_deferred_logout(&mut transport, &mut execution, |request| {
-                        dispatch_admission
-                            .admit(request, action_deadline, || {
-                                abort.check_ctrl_c(&ctrl_c);
-                                abort.check_stop_file(config.stop_file.as_deref().map(Path::new));
-                                abort.check_deadline(unix_ms(), deadline_unix_ms);
-                                if abort.should_stop_new_sessions()
-                                    || revalidate_or_abort(&protection, &mut abort).is_some()
-                                {
-                                    return Err("deferred logout stopped".into());
-                                }
-                                Ok(())
-                            })
-                            .map_err(|error| map_auth_admission_to_string(&mut abort, error))
-                    })
-                    .is_err()
-                    {
-                        let category = if abort.should_stop_new_sessions() {
-                            "deferred_logout_not_dispatched"
-                        } else {
-                            "deferred_logout_failed"
-                        };
-                        let message = if abort.should_stop_new_sessions() {
-                            deferred_logout_skip_message(&abort)
-                        } else {
-                            "post-game logout failed"
-                        };
-                        errors.push(category, message, Default::default());
-                        failed = true;
-                        execution_failed = true;
-                    }
-                }
+                finish_game_action_after_cleanup(
+                    completed_game_session,
+                    || {
+                        if deferred_logout && pre_game_auth_completed {
+                            if !can_attempt_deferred_logout(
+                                deferred_logout,
+                                pre_game_auth_completed,
+                                &abort,
+                            ) {
+                                errors.push(
+                                    "deferred_logout_not_dispatched",
+                                    deferred_logout_skip_message(&abort),
+                                    Default::default(),
+                                );
+                            } else if execute_deferred_logout(
+                                &mut transport,
+                                &mut execution,
+                                |request| {
+                                    dispatch_admission
+                                        .admit(request, action_deadline, || {
+                                            abort.check_ctrl_c(&ctrl_c);
+                                            abort.check_stop_file(
+                                                config.stop_file.as_deref().map(Path::new),
+                                            );
+                                            abort.check_deadline(unix_ms(), deadline_unix_ms);
+                                            if abort.should_stop_new_sessions()
+                                                || revalidate_or_abort(&protection, &mut abort)
+                                                    .is_some()
+                                            {
+                                                return Err("deferred logout stopped".into());
+                                            }
+                                            Ok(())
+                                        })
+                                        .map_err(|error| {
+                                            map_auth_admission_to_string(&mut abort, error)
+                                        })
+                                },
+                            )
+                            .is_err()
+                            {
+                                let category = if abort.should_stop_new_sessions() {
+                                    "deferred_logout_not_dispatched"
+                                } else {
+                                    "deferred_logout_failed"
+                                };
+                                let message = if abort.should_stop_new_sessions() {
+                                    deferred_logout_skip_message(&abort)
+                                } else {
+                                    "post-game logout failed"
+                                };
+                                errors.push(category, message, Default::default());
+                                failed = true;
+                                execution_failed = true;
+                            }
+                        }
+                    },
+                    || record_completed_game_session_metrics(&mut core_metrics),
+                );
             }
             finish_live_action(&mut auth_metrics, &execution.metrics, &mut abort, &budget);
             if execution_failed {
@@ -1412,6 +1446,19 @@ mod tests {
         let clean = AbortController::default();
         assert!(can_attempt_deferred_logout(true, true, &clean));
         assert!(!can_attempt_deferred_logout(true, false, &clean));
+    }
+
+    #[test]
+    fn completed_game_session_metrics_are_recorded_after_cleanup() {
+        let events = std::cell::RefCell::new(Vec::new());
+
+        finish_game_action_after_cleanup(
+            true,
+            || events.borrow_mut().push("cleanup"),
+            || events.borrow_mut().push("game_metrics"),
+        );
+
+        assert_eq!(events.into_inner(), vec!["cleanup", "game_metrics"]);
     }
 
     #[test]

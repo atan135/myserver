@@ -226,6 +226,9 @@ pub fn is_low_cardinality_key(key: &str) -> bool {
             | "auth_ticket_successes"
             | "auth_rate_limited"
             | "auth_potential_data_writes"
+            | "game_sessions_completed"
+            | "game_auth_requests"
+            | "game_heartbeat_requests"
             | "room_create_or_join"
             | "room_leave"
             | "room_reconnect"
@@ -298,5 +301,16 @@ mod tests {
     #[should_panic(expected = "low-cardinality")]
     fn identity_cannot_be_used_as_metric_label() {
         Metrics::default().increment("account:alice@example.com", 1);
+    }
+
+    #[test]
+    fn completed_game_session_keys_are_fixed_low_cardinality_categories() {
+        for key in [
+            "game_sessions_completed",
+            "game_auth_requests",
+            "game_heartbeat_requests",
+        ] {
+            assert!(is_low_cardinality_key(key));
+        }
     }
 }
