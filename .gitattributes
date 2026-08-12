@@ -11,3 +11,4 @@ tests/proto/fixtures/compatibility/*.bin binary
 # SQLx records migration checksums from exact file bytes. Keep migrations stable
 # between Windows development, WSL builds and Linux production containers.
 *.sql text eol=lf
+*.sql.example text eol=lf
