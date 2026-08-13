@@ -140,6 +140,7 @@ mod tests {
                 auth: None,
                 reconnect_burst: None,
                 live_gameplay: None,
+                side_services: None,
             },
             reports_root: "reports".into(),
             prepare_reports_root: "prepare".into(),

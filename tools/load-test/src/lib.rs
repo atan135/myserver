@@ -13,6 +13,8 @@ pub mod calibration;
 pub mod compatibility;
 pub mod config;
 pub mod contracts;
+pub mod control_plane;
+pub mod distributed;
 pub mod fake;
 pub mod game_kcp;
 pub mod game_live;
@@ -25,6 +27,7 @@ pub mod reconnect_burst;
 pub mod report;
 pub mod resource;
 pub mod scheduler;
+pub mod side_services;
 pub mod step;
 pub mod virtual_player;
 
@@ -37,6 +40,14 @@ pub mod protocol_version_policy {
 
 pub mod pb {
     include!(concat!(env!("OUT_DIR"), "/myserver.game.rs"));
+}
+
+pub mod chat_pb {
+    include!(concat!(env!("OUT_DIR"), "/myserver.chat.rs"));
+}
+
+pub mod match_pb {
+    include!(concat!(env!("OUT_DIR"), "/myserver.matchservice.rs"));
 }
 
 pub use config::{LoadTestConfig, RunAccess, load_config};

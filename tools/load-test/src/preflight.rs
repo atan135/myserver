@@ -2,6 +2,7 @@ use serde::Serialize;
 
 use crate::auth_budget::{AuthRunBudgetEstimate, estimate_auth_run};
 use crate::config::{EnvironmentKind, HardBudget, LoadModel, LoadTestConfig, RunAccess};
+use crate::side_services::ServiceDescriptor;
 
 const SUPPORTED_LOAD_MODELS: [&str; 4] = ["fixed_concurrency", "arrival_rate", "staged", "burst"];
 const PROTECTION_CONTRACT: &str = "fail_closed: revalidate DNS, certificate, descriptor, and environment identity before ramp and every controller tick";
@@ -30,6 +31,8 @@ pub struct PreflightSummary<'a> {
     pub dry_run: bool,
     pub remote_gate: &'static str,
     pub protection_revalidation: &'static str,
+    pub side_service_steps: usize,
+    pub side_service_descriptors: Vec<String>,
 }
 
 pub fn summarize_run<'a>(
@@ -65,6 +68,28 @@ pub fn summarize_run<'a>(
     } else {
         "local_loopback_only"
     };
+    let (side_service_steps, side_service_descriptors) = config
+        .scenario
+        .side_services
+        .as_ref()
+        .map(|side| {
+            let steps = side
+                .executable_plan(budget)
+                .map(|plan| plan.steps.len())
+                .unwrap_or(0);
+            let descriptors = [
+                side.chat.as_ref().and_then(|c| c.descriptor.as_ref()),
+                side.mail.as_ref().and_then(|c| c.descriptor.as_ref()),
+                side.announce.as_ref().and_then(|c| c.descriptor.as_ref()),
+                side.r#match.as_ref().and_then(|c| c.descriptor.as_ref()),
+            ]
+            .into_iter()
+            .flatten()
+            .map(ServiceDescriptor::safe_summary)
+            .collect();
+            (steps, descriptors)
+        })
+        .unwrap_or_default();
     Ok(PreflightSummary {
         schema_version: crate::SCHEMA_VERSION,
         command,
@@ -96,6 +121,8 @@ pub fn summarize_run<'a>(
         dry_run,
         remote_gate,
         protection_revalidation: PROTECTION_CONTRACT,
+        side_service_steps,
+        side_service_descriptors,
     })
 }
 

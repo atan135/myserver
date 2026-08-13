@@ -140,6 +140,8 @@ pub struct Scenario {
     /// Absent by default so the guarded KCP smoke remains auth/heartbeat-only.
     #[serde(default)]
     pub live_gameplay: Option<LiveGameplayScenario>,
+    #[serde(default)]
+    pub side_services: Option<crate::side_services::SideServicesScenario>,
 }
 
 pub const MAX_LIVE_GAMEPLAY_FRAME_INPUTS: u32 = 8;
@@ -752,6 +754,11 @@ impl LoadTestConfig {
                 }
             }
         }
+        if let Some(side_services) = &self.scenario.side_services {
+            side_services
+                .validate_for_environment(self.environment.kind)
+                .map_err(ConfigError::Rejected)?;
+        }
         Ok(())
     }
 
@@ -943,6 +950,7 @@ mod tests {
                 auth: None,
                 reconnect_burst: None,
                 live_gameplay: None,
+                side_services: None,
             },
             reports_root: "reports".into(),
             prepare_reports_root: "prepare-reports".into(),

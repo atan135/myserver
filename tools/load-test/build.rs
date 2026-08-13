@@ -4,12 +4,18 @@ use std::path::PathBuf;
 use std::process::Command;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    println!("cargo:rerun-if-changed=../../packages/proto/game.proto");
+    for proto in ["game.proto", "chat.proto", "match.proto"] {
+        println!("cargo:rerun-if-changed=../../packages/proto/{proto}");
+    }
     let protoc = protoc_bin_vendored::protoc_bin_path()?;
     let mut config = prost_build::Config::new();
     config.protoc_executable(protoc);
     config.compile_protos(
-        &[PathBuf::from("../../packages/proto/game.proto")],
+        &[
+            PathBuf::from("../../packages/proto/game.proto"),
+            PathBuf::from("../../packages/proto/chat.proto"),
+            PathBuf::from("../../packages/proto/match.proto"),
+        ],
         &[PathBuf::from("../../packages/proto")],
     )?;
     emit_git_commit();

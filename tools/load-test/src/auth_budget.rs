@@ -645,6 +645,7 @@ mod tests {
             }),
             reconnect_burst: None,
             live_gameplay: None,
+            side_services: None,
         }
     }
 

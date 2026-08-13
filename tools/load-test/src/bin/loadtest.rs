@@ -42,6 +42,7 @@ use loadtest_core::reconnect_burst::{
 use loadtest_core::report::{ErrorBuffer, ReportInput, write_report};
 use loadtest_core::resource::ResourceSampler;
 use loadtest_core::scheduler::MonotonicScheduler;
+use loadtest_core::side_services::execute_side_services_dry;
 
 fn main() -> ExitCode {
     match execute(env::args().skip(1).collect()) {
@@ -188,6 +189,11 @@ fn run_dry(cli: &Cli) -> Result<(), String> {
     };
     if let Some(auth) = &auth_metrics {
         record_auth_metrics(&mut metrics, auth);
+    }
+    if !abort.should_stop_new_sessions() {
+        if let Some(side_services) = &config.scenario.side_services {
+            execute_side_services_dry(side_services, &budget, &mut metrics)?;
+        }
     }
     if !abort.should_stop_new_sessions() {
         if let Some(reconnect) = &config.scenario.reconnect_burst {

@@ -27,6 +27,13 @@ const PHASE_LATENCY_KEYS: [(&str, &str); 8] = [
     ("gameplay_step_ms", "Gameplay operation"),
 ];
 
+const SIDE_LATENCY_KEYS: [(&str, &str); 4] = [
+    ("side_chat_ms", "Chat"),
+    ("side_mail_ms", "Mail"),
+    ("side_announce_ms", "Announce"),
+    ("side_match_ms", "Match"),
+];
+
 const FLOW_COUNTER_KEYS: [(&str, &str); 13] = [
     ("connections_opened", "Connections opened"),
     ("connections_active", "Connections active"),
@@ -414,6 +421,15 @@ fn phase_latency_summary(metrics: &MetricsSnapshot) -> String {
                 histogram.map_or(0, |value| value.percentile(0.99)),
             )
         })
+        .chain(SIDE_LATENCY_KEYS.iter().map(|(key, label)| {
+            let histogram = metrics.histograms.get(*key);
+            format!(
+                "- {label} side service: P50/P95/P99={}/{}/{} ms",
+                histogram.map_or(0, |value| value.percentile(0.50)),
+                histogram.map_or(0, |value| value.percentile(0.95)),
+                histogram.map_or(0, |value| value.percentile(0.99)),
+            )
+        }))
         .collect::<Vec<_>>()
         .join("\n")
 }
