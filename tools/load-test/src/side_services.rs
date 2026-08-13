@@ -320,6 +320,8 @@ pub struct SideServiceConfig {
     /// only for explicit local/test diagnostics.
     #[serde(default, alias = "live_wss")]
     pub live_websocket: bool,
+    #[serde(default)]
+    pub live_grpc: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -427,6 +429,15 @@ impl SideServicesScenario {
                     "plain chat ws requires the explicit local/test live_websocket diagnostic gate"
                         .into(),
                 );
+            }
+        }
+        if let Some(matcher) = &self.r#match {
+            if matcher.live_grpc && matcher.descriptor.is_none() {
+                return Err("live match gRPC requires an explicit descriptor".into());
+            }
+            if matcher.live_grpc && !matches!(kind, EnvironmentKind::Local | EnvironmentKind::Test)
+            {
+                return Err("live match gRPC is restricted to local/test diagnostics".into());
             }
         }
         Ok(())
@@ -878,6 +889,7 @@ mod tests {
                 }],
                 writes: false,
                 live_websocket: false,
+                live_grpc: false,
             }),
             ..Default::default()
         };
@@ -979,6 +991,7 @@ mod tests {
                 }],
                 writes: true,
                 live_websocket: false,
+                live_grpc: false,
             }),
             ..Default::default()
         };
@@ -999,6 +1012,7 @@ mod tests {
             }],
             writes: true,
             live_websocket: false,
+            live_grpc: false,
         });
         assert!(
             match_scenario

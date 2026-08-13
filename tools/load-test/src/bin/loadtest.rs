@@ -34,6 +34,7 @@ use loadtest_core::game_live::{
     GameExecutionGate, GameLiveError, GameRunnerCheckpoint, GameSessionRunner, LiveKcpTransport,
 };
 use loadtest_core::lifecycle::{Lifecycle, RunState};
+use loadtest_core::match_grpc::execute_live_match_steps;
 use loadtest_core::metrics::Metrics;
 use loadtest_core::preflight::summarize_run;
 use loadtest_core::protection::{DryRunProtection, revalidate_or_abort};
@@ -579,7 +580,13 @@ fn run_live(cli: &Cli) -> Result<(), String> {
         .as_ref()
         .and_then(|side| side.chat.as_ref())
         .is_some_and(|chat| chat.live_websocket);
-    if live_chat && game_mode {
+    let live_match = config
+        .scenario
+        .side_services
+        .as_ref()
+        .and_then(|side| side.r#match.as_ref())
+        .is_some_and(|matcher| matcher.live_grpc);
+    if (live_chat || live_match) && game_mode {
         return Err(
             "live chat WebSocket cannot be combined with --execute-game until a ticket-sharing flow is explicitly configured".into(),
         );
@@ -635,12 +642,12 @@ fn run_live(cli: &Cli) -> Result<(), String> {
         split_game_auth_operations(&auth.operations)?
     } else {
         (
-            if live_chat {
+            if live_chat || live_match {
                 loadtest_core::auth_http::split_game_auth_operations(&auth.operations)?.0
             } else {
                 auth.operations.clone()
             },
-            if live_chat {
+            if live_chat || live_match {
                 auth.operations.last().is_some_and(|operation| {
                     matches!(operation, loadtest_core::config::AuthOperation::Logout)
                 })
@@ -1510,42 +1517,119 @@ fn run_live(cli: &Cli) -> Result<(), String> {
                         }
                     }
                 }
-                if live_chat && deferred_logout && pre_game_auth_completed {
-                    if !can_attempt_deferred_logout(
-                        deferred_logout,
-                        pre_game_auth_completed,
-                        &abort,
-                    ) {
-                        errors.push(
-                            "deferred_logout_not_dispatched",
-                            deferred_logout_skip_message(&abort),
-                            Default::default(),
-                        );
-                        failed = true;
-                    } else if execute_deferred_logout(&mut transport, &mut execution, |request| {
-                        dispatch_admission
-                            .admit(request, action_deadline, || {
+            }
+            if !execution_failed && live_match {
+                let matcher = config
+                    .scenario
+                    .side_services
+                    .as_ref()
+                    .and_then(|side| side.r#match.as_ref())
+                    .ok_or("live match configuration disappeared after validation")?;
+                let descriptor = matcher
+                    .descriptor
+                    .as_ref()
+                    .ok_or("live match requires an explicit descriptor")?;
+                let plan = config
+                    .scenario
+                    .side_services
+                    .as_ref()
+                    .expect("live match configuration exists")
+                    .executable_plan(&budget)
+                    .map_err(|error| format!("live match plan rejected: {error}"))?;
+                let match_steps = plan
+                    .steps
+                    .iter()
+                    .filter(|step| step.service == SideServiceKind::Match)
+                    .cloned()
+                    .collect::<Vec<_>>();
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_io()
+                    .enable_time()
+                    .build()
+                    .map_err(|_| "could not create guarded match gRPC runtime")?;
+                match runtime.block_on(execute_live_match_steps(
+                    descriptor,
+                    config.environment.kind,
+                    matcher.live_grpc,
+                    &lease.logical_account_id,
+                    &match_steps,
+                    action_deadline
+                        .saturating_duration_since(Instant::now())
+                        .as_millis() as u64,
+                    |is_connection| {
+                        let admission = if is_connection {
+                            dispatch_admission.admit_side_connection(action_deadline, || {
                                 abort.check_ctrl_c(&ctrl_c);
                                 abort.check_stop_file(config.stop_file.as_deref().map(Path::new));
                                 abort.check_deadline(unix_ms(), deadline_unix_ms);
                                 if abort.should_stop_new_sessions()
                                     || revalidate_or_abort(&protection, &mut abort).is_some()
                                 {
-                                    return Err("chat deferred logout stopped".into());
+                                    return Err("match gRPC connection admission stopped".into());
                                 }
                                 Ok(())
                             })
-                            .map_err(|error| map_auth_admission_to_string(&mut abort, error))
-                    })
-                    .is_err()
-                    {
+                        } else {
+                            dispatch_admission.admit_side_message(action_deadline, || {
+                                abort.check_ctrl_c(&ctrl_c);
+                                abort.check_stop_file(config.stop_file.as_deref().map(Path::new));
+                                abort.check_deadline(unix_ms(), deadline_unix_ms);
+                                if abort.should_stop_new_sessions()
+                                    || revalidate_or_abort(&protection, &mut abort).is_some()
+                                {
+                                    return Err("match gRPC message admission stopped".into());
+                                }
+                                Ok(())
+                            })
+                        };
+                        admission.map(|_| ()).map_err(|error| {
+                            loadtest_core::match_grpc::MatchGrpcError::Grpc(error.to_string())
+                        })
+                    },
+                )) {
+                    Ok(match_metrics) => match_metrics.merge_into_metrics(&mut core_metrics),
+                    Err(error) => {
                         errors.push(
-                            "deferred_logout_failed",
-                            "post-chat logout failed",
+                            "match_grpc_execution_failed",
+                            format!("match gRPC execution failed: {error:?}"),
                             Default::default(),
                         );
                         failed = true;
+                        execution_failed = true;
                     }
+                }
+            }
+            if (live_chat || live_match) && deferred_logout && pre_game_auth_completed {
+                if !can_attempt_deferred_logout(deferred_logout, pre_game_auth_completed, &abort) {
+                    errors.push(
+                        "deferred_logout_not_dispatched",
+                        deferred_logout_skip_message(&abort),
+                        Default::default(),
+                    );
+                    failed = true;
+                } else if execute_deferred_logout(&mut transport, &mut execution, |request| {
+                    dispatch_admission
+                        .admit(request, action_deadline, || {
+                            abort.check_ctrl_c(&ctrl_c);
+                            abort.check_stop_file(config.stop_file.as_deref().map(Path::new));
+                            abort.check_deadline(unix_ms(), deadline_unix_ms);
+                            if abort.should_stop_new_sessions()
+                                || revalidate_or_abort(&protection, &mut abort).is_some()
+                            {
+                                return Err("side-service deferred logout stopped".into());
+                            }
+                            Ok(())
+                        })
+                        .map_err(|error| map_auth_admission_to_string(&mut abort, error))
+                })
+                .is_err()
+                {
+                    errors.push(
+                        "deferred_logout_failed",
+                        "post-side-service logout failed",
+                        Default::default(),
+                    );
+                    failed = true;
                 }
             }
             finish_live_action(&mut auth_metrics, &execution.metrics, &mut abort, &budget);

@@ -21,6 +21,7 @@ pub mod game_kcp;
 pub mod game_live;
 pub mod gameplay;
 pub mod lifecycle;
+pub mod match_grpc;
 pub mod metrics;
 pub mod preflight;
 pub mod protection;

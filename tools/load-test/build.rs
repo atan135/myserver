@@ -8,16 +8,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("cargo:rerun-if-changed=../../packages/proto/{proto}");
     }
     let protoc = protoc_bin_vendored::protoc_bin_path()?;
-    let mut config = prost_build::Config::new();
-    config.protoc_executable(protoc);
-    config.compile_protos(
-        &[
-            PathBuf::from("../../packages/proto/game.proto"),
-            PathBuf::from("../../packages/proto/chat.proto"),
-            PathBuf::from("../../packages/proto/match.proto"),
-        ],
-        &[PathBuf::from("../../packages/proto")],
-    )?;
+    unsafe { env::set_var("PROTOC", &protoc) };
+    tonic_build::configure()
+        .build_server(false)
+        .compile_protos(
+            &[
+                PathBuf::from("../../packages/proto/game.proto"),
+                PathBuf::from("../../packages/proto/chat.proto"),
+                PathBuf::from("../../packages/proto/match.proto"),
+            ],
+            &[PathBuf::from("../../packages/proto")],
+        )?;
     emit_git_commit();
     let _ = env::var_os("OUT_DIR");
     Ok(())
