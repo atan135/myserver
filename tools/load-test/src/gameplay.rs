@@ -917,6 +917,11 @@ impl RoomFlowTracker {
         self.metrics.clone()
     }
 
+    /// Returns the newest in-room frame bundle accepted by this tracker.
+    pub fn latest_frame_id(&self) -> Option<u32> {
+        self.last_frame_id
+    }
+
     pub fn telemetry(&self) -> MetricsSnapshot {
         self.telemetry.snapshot()
     }
