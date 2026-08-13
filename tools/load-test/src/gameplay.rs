@@ -221,6 +221,18 @@ impl GameplayProfilePlan {
             },
         ));
         sequence += 1;
+        packets.push(plan_packet(
+            room_ready_step(self.max_messages_per_connection_per_second),
+            sequence,
+            &RoomReadyReq { ready: true },
+        ));
+        sequence += 1;
+        packets.push(plan_packet(
+            room_start_step(self.max_messages_per_connection_per_second),
+            sequence,
+            &RoomStartReq {},
+        ));
+        sequence += 1;
         for input in self.lockstep_inputs.iter().take(max_frame_inputs as usize) {
             packets.push(plan_packet(
                 player_input_step(self.max_messages_per_connection_per_second),
@@ -1132,20 +1144,30 @@ mod tests {
             GameplayProfilePlan::from_lockstep_scenario_json(PlayerProfile::Normal, MOVE_SCENARIO)
                 .unwrap();
         let plan = profile.packet_plan("room-a", "lockstep_sim_demo").unwrap();
-        assert_eq!(plan.len(), 4);
+        assert_eq!(plan.len(), 6);
         assert_eq!(
             plan[0].packet_header().unwrap().msg_type,
             MessageType::RoomJoinReq as u16
         );
         assert_eq!(
             plan[1].packet_header().unwrap().msg_type,
-            MessageType::PlayerInputReq as u16
+            MessageType::RoomReadyReq as u16
+        );
+        assert_eq!(
+            plan[2].packet_header().unwrap().msg_type,
+            MessageType::RoomStartReq as u16
         );
         assert_eq!(
             plan[3].packet_header().unwrap().msg_type,
+            MessageType::PlayerInputReq as u16
+        );
+        assert_eq!(
+            plan[5].packet_header().unwrap().msg_type,
             MessageType::RoomLeaveReq as u16
         );
-        let body = &plan[1].packet[game_protocol::HEADER_LEN..];
+        assert!(RoomReadyReq::decode(plan[1].body().unwrap()).unwrap().ready);
+        RoomStartReq::decode(plan[2].body().unwrap()).unwrap();
+        let body = &plan[3].packet[game_protocol::HEADER_LEN..];
         let input = PlayerInputReq::decode(body).unwrap();
         assert_eq!(input.action, "sim_input");
         assert!(input.payload_json.contains("move"));
@@ -1159,8 +1181,8 @@ mod tests {
         let packets = profile
             .packet_plan_with_input_limit("approved-room", "approved-policy", 1)
             .unwrap();
-        assert_eq!(packets.len(), 3);
-        let reframed = packets[1].with_sequence(99).unwrap();
+        assert_eq!(packets.len(), 5);
+        let reframed = packets[3].with_sequence(99).unwrap();
         assert_eq!(reframed.sequence, 99);
         assert_eq!(reframed.packet_header().unwrap().seq, 99);
         assert_eq!(reframed.step.request_type, MessageType::PlayerInputReq);

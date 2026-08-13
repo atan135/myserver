@@ -57,9 +57,10 @@ pub struct AuthRunBudgetEstimate {
 pub const MIN_GAME_CONNECTIONS_PER_FLOW: u64 = 1;
 pub const MIN_GAME_MESSAGES_PER_FLOW: u64 = 2;
 
-/// Room join, one or more PlayerInput messages, and leave can append game,
-/// room, audit, and Redis state. This is intentionally an operation-level
-/// upper bound, not a claim about a particular storage implementation.
+/// Room join, ready, start, one or more PlayerInput messages, and leave can
+/// append game, room, audit, and Redis state. This is intentionally an
+/// operation-level upper bound, not a claim about a particular storage
+/// implementation.
 pub const LIVE_GAMEPLAY_POTENTIAL_WRITES_PER_MESSAGE: u64 = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,8 +92,9 @@ pub fn estimate_game_run(scenario: &Scenario) -> Result<GameRunBudgetEstimate, S
             auth_flows_per_game_flow: 2,
         });
     }
+    // join + ready + start + bounded frame inputs + leave
     let business_messages = u64::from(gameplay.max_frame_inputs)
-        .checked_add(2)
+        .checked_add(4)
         .ok_or("live gameplay message estimate overflowed")?;
     let (extra_connections, extra_messages) = if gameplay.reconnect.is_some() {
         // close/reconnect, AuthReq again, and RoomReconnectReq.
@@ -834,8 +836,8 @@ mod tests {
         let estimate = estimate_auth_run(&scenario, &budget()).unwrap();
         let game = estimate_game_run(&scenario).unwrap();
         assert_eq!(game.kcp_connections_per_flow, 2);
-        assert_eq!(game.game_messages_per_flow, 7);
-        assert_eq!(game.gameplay_potential_writes_per_flow, 20);
+        assert_eq!(game.game_messages_per_flow, 9);
+        assert_eq!(game.gameplay_potential_writes_per_flow, 28);
 
         let mut constrained = budget();
         constrained.max_total_operations = estimate.http_operations + 8;

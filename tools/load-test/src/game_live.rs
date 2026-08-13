@@ -781,6 +781,8 @@ impl GameSessionRunner {
                     MessageType::RoomJoinRes => {
                         steps.push(GameRunnerStep::RoomJoined);
                     }
+                    MessageType::RoomReadyRes => steps.push(GameRunnerStep::RoomReady),
+                    MessageType::RoomStartRes => steps.push(GameRunnerStep::RoomStarted),
                     MessageType::PlayerInputRes => {
                         steps.push(GameRunnerStep::FrameInputAcknowledged);
                         if tracker.metrics().frame_bundles_received == frame_bundles_before {
@@ -2667,13 +2669,21 @@ mod tests {
     #[test]
     fn prepared_live_gameplay_is_bounded_and_carries_no_identity_or_ticket() {
         let prepared = prepare_live_gameplay(&gameplay()).unwrap();
-        assert_eq!(prepared.before_reconnect.len(), 2);
+        assert_eq!(prepared.before_reconnect.len(), 4);
         assert_eq!(
             prepared.before_reconnect[0].step.request_type,
             MessageType::RoomJoinReq
         );
         assert_eq!(
             prepared.before_reconnect[1].step.request_type,
+            MessageType::RoomReadyReq
+        );
+        assert_eq!(
+            prepared.before_reconnect[2].step.request_type,
+            MessageType::RoomStartReq
+        );
+        assert_eq!(
+            prepared.before_reconnect[3].step.request_type,
             MessageType::PlayerInputReq
         );
         assert_eq!(prepared.leave.step.request_type, MessageType::RoomLeaveReq);
@@ -2703,20 +2713,26 @@ mod tests {
                 2,
             )
             .unwrap();
-        let input = prepared.before_reconnect[1].with_sequence(4).unwrap();
-        tracker.begin_planned_action(&input, 3).unwrap();
+        let ready = prepared.before_reconnect[1].with_sequence(4).unwrap();
+        tracker.begin_planned_action(&ready, 3).unwrap();
+        tracker.ingest(room_ready_response(4, true), 4).unwrap();
+        let start = prepared.before_reconnect[2].with_sequence(5).unwrap();
+        tracker.begin_planned_action(&start, 5).unwrap();
+        tracker.ingest(room_start_response(5, true), 6).unwrap();
+        let input = prepared.before_reconnect[3].with_sequence(6).unwrap();
+        tracker.begin_planned_action(&input, 7).unwrap();
         tracker
             .ingest(
                 response(
                     MessageType::PlayerInputRes,
-                    4,
+                    6,
                     &PlayerInputRes {
                         ok: true,
                         room_id: "approved-room".into(),
                         error_code: String::new(),
                     },
                 ),
-                4,
+                8,
             )
             .unwrap();
         tracker
@@ -2738,23 +2754,23 @@ mod tests {
                         snapshot: None,
                     },
                 ),
-                5,
+                9,
             )
             .unwrap();
-        let leave = prepared.leave.with_sequence(5).unwrap();
-        tracker.begin_planned_action(&leave, 6).unwrap();
+        let leave = prepared.leave.with_sequence(7).unwrap();
+        tracker.begin_planned_action(&leave, 10).unwrap();
         tracker
             .ingest(
                 response(
                     MessageType::RoomLeaveRes,
-                    5,
+                    7,
                     &RoomLeaveRes {
                         ok: true,
                         room_id: "approved-room".into(),
                         error_code: String::new(),
                     },
                 ),
-                7,
+                11,
             )
             .unwrap();
         let metrics = tracker.metrics();
@@ -2845,7 +2861,7 @@ mod tests {
         let plan = profile
             .packet_plan_with_input_limit("approved-room", "approved-policy", 1)
             .unwrap();
-        let input = &plan[1];
+        let input = &plan[3];
         let materialized =
             materialize_live_gameplay_packet(input, 1_700_000_000_000, Some(8)).unwrap();
 
@@ -2995,7 +3011,7 @@ mod tests {
         let input = profile
             .packet_plan_with_input_limit("approved-room", "approved-policy", 1)
             .unwrap()
-            .remove(1);
+            .remove(3);
         let mut pool = AccountLeasePool::default();
         let mut session = active_session(&mut pool);
         let order = std::cell::RefCell::new(Vec::new());
@@ -3036,7 +3052,7 @@ mod tests {
         let input = profile
             .packet_plan_with_input_limit("approved-room", "approved-policy", 1)
             .unwrap()
-            .remove(1);
+            .remove(3);
         let mut pool = AccountLeasePool::default();
         let mut session = active_session(&mut pool);
         let clock_called = std::cell::Cell::new(false);
