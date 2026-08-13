@@ -10,6 +10,7 @@ pub mod accounts;
 pub mod auth_budget;
 pub mod auth_http;
 pub mod calibration;
+pub mod chat_wss;
 pub mod compatibility;
 pub mod config;
 pub mod contracts;

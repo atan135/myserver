@@ -22,6 +22,7 @@ pub enum SideServiceKind {
 #[serde(rename_all = "snake_case")]
 pub enum SideTransportKind {
     Kcp,
+    Ws,
     Wss,
     Grpc,
     Http,
@@ -32,15 +33,12 @@ impl SideTransportKind {
     pub fn protocol(self) -> &'static str {
         match self {
             Self::Kcp => "kcp",
+            Self::Ws => "ws",
             Self::Wss => "wss",
             Self::Grpc => "grpc",
             Self::Http => "http",
             Self::Https => "https",
         }
-    }
-
-    fn is_secure(self) -> bool {
-        matches!(self, Self::Wss | Self::Https)
     }
 }
 
@@ -151,7 +149,12 @@ impl ServiceDescriptor {
             return Err("descriptor port must not be zero".into());
         }
         let valid = match service {
-            SideServiceKind::Chat => matches!(self.protocol, SideTransportKind::Wss),
+            SideServiceKind::Chat => {
+                matches!(
+                    self.protocol,
+                    SideTransportKind::Ws | SideTransportKind::Wss
+                )
+            }
             SideServiceKind::Mail | SideServiceKind::Announce => {
                 matches!(
                     self.protocol,
@@ -313,6 +316,10 @@ pub struct SideServiceConfig {
     pub steps: Vec<SideServiceStep>,
     #[serde(default)]
     pub writes: bool,
+    /// A real chat WebSocket is never a default capacity path. It is exposed
+    /// only for explicit local/test diagnostics.
+    #[serde(default, alias = "live_wss")]
+    pub live_websocket: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -398,6 +405,30 @@ impl SideServicesScenario {
         if kind == EnvironmentKind::Production && self.announce.as_ref().is_some_and(|c| c.writes) {
             return Err("announce writes are forbidden in production profiles".into());
         }
+        if let Some(chat) = &self.chat {
+            if chat.live_websocket && chat.descriptor.is_none() {
+                return Err("live chat WebSocket requires an explicit chat descriptor".into());
+            }
+            if chat.live_websocket
+                && !matches!(kind, EnvironmentKind::Local | EnvironmentKind::Test)
+            {
+                return Err(
+                    "live chat WebSocket is restricted to explicit local/test diagnostics".into(),
+                );
+            }
+            if chat
+                .descriptor
+                .as_ref()
+                .is_some_and(|descriptor| descriptor.protocol == SideTransportKind::Ws)
+                && (!chat.live_websocket
+                    || !matches!(kind, EnvironmentKind::Local | EnvironmentKind::Test))
+            {
+                return Err(
+                    "plain chat ws requires the explicit local/test live_websocket diagnostic gate"
+                        .into(),
+                );
+            }
+        }
         Ok(())
     }
 
@@ -472,7 +503,7 @@ pub struct SideServicePlan {
     pub per_service: BTreeMap<SideServiceKind, u64>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 pub enum SideOutcomeCategory {
     Success,
     RateLimited,
@@ -846,6 +877,7 @@ mod tests {
                     think_time_ms: 0,
                 }],
                 writes: false,
+                live_websocket: false,
             }),
             ..Default::default()
         };
@@ -946,6 +978,7 @@ mod tests {
                     think_time_ms: 0,
                 }],
                 writes: true,
+                live_websocket: false,
             }),
             ..Default::default()
         };
@@ -965,10 +998,41 @@ mod tests {
                 think_time_ms: 0,
             }],
             writes: true,
+            live_websocket: false,
         });
         assert!(
             match_scenario
                 .validate_for_environment(EnvironmentKind::Staging)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn plain_chat_ws_requires_explicit_local_or_test_diagnostic_gate() {
+        let mut scenario = SideServicesScenario {
+            chat: Some(SideServiceConfig {
+                descriptor: Some(ServiceDescriptor {
+                    host: "127.0.0.1".into(),
+                    port: 9011,
+                    protocol: SideTransportKind::Ws,
+                }),
+                live_websocket: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        scenario
+            .validate_for_environment(EnvironmentKind::Local)
+            .unwrap();
+        assert!(
+            scenario
+                .validate_for_environment(EnvironmentKind::Production)
+                .is_err()
+        );
+        scenario.chat.as_mut().unwrap().live_websocket = false;
+        assert!(
+            scenario
+                .validate_for_environment(EnvironmentKind::Test)
                 .is_err()
         );
     }

@@ -262,6 +262,19 @@ pub fn is_low_cardinality_key(key: &str) -> bool {
             | "side_chat_push_duplicate"
             | "side_chat_slow_consumer"
             | "side_chat_business_error"
+            | "chat_wss_handshakes"
+            | "chat_wss_handshake_successes"
+            | "chat_wss_auth_attempts"
+            | "chat_wss_active_connections"
+            | "chat_wss_messages_sent"
+            | "chat_wss_pushes_received"
+            | "chat_wss_push_duplicates"
+            | "chat_wss_push_out_of_order"
+            | "chat_wss_queue_backlog"
+            | "chat_wss_slow_consumer_disconnects"
+            | "chat_wss_disconnects"
+            | "chat_wss_reconnects"
+            | "chat_wss_reconnect_backoff_ms"
             | "side_mail_operations"
             | "side_mail_success"
             | "side_mail_rate_limited"
@@ -323,6 +336,8 @@ fn is_latency_key(key: &str) -> bool {
             | "side_mail_ms"
             | "side_announce_ms"
             | "side_match_ms"
+            | "chat_wss_handshake_ms"
+            | "chat_wss_message_ms"
     )
 }
 
