@@ -1496,10 +1496,10 @@ async fn receive_gameplay_response(
             }
         };
         if let Some(approved_room_id) = approved_room_id {
-            if ensure_approved_room_packet(&packet, approved_room_id).is_err() {
+            if let Err(error) = ensure_approved_room_packet(&packet, approved_room_id) {
                 transport.close();
                 session.close(pool);
-                return Err(gameplay_failure("approved room response mismatch", tracker));
+                return Err(gameplay_failure(error, tracker));
             }
         }
         match session.handle_packet(pool, packet.clone()) {
@@ -1640,34 +1640,47 @@ fn ensure_approved_room_packet(
         .ok_or(GameplayError::UnknownMessageType(packet.header.msg_type))?;
     let room_id = match response_type {
         MessageType::RoomJoinRes => {
-            RoomJoinRes::decode(body)
-                .map_err(|_| GameplayError::InvalidBody)?
-                .room_id
+            let response = RoomJoinRes::decode(body).map_err(|_| GameplayError::InvalidBody)?;
+            if !response.ok {
+                return Err(GameplayError::BusinessRejected(response_type));
+            }
+            response.room_id
         }
         MessageType::RoomReconnectRes => {
-            RoomReconnectRes::decode(body)
-                .map_err(|_| GameplayError::InvalidBody)?
-                .room_id
+            let response =
+                RoomReconnectRes::decode(body).map_err(|_| GameplayError::InvalidBody)?;
+            if !response.ok {
+                return Err(GameplayError::BusinessRejected(response_type));
+            }
+            response.room_id
         }
         MessageType::RoomLeaveRes => {
-            RoomLeaveRes::decode(body)
-                .map_err(|_| GameplayError::InvalidBody)?
-                .room_id
+            let response = RoomLeaveRes::decode(body).map_err(|_| GameplayError::InvalidBody)?;
+            if !response.ok {
+                return Err(GameplayError::BusinessRejected(response_type));
+            }
+            response.room_id
         }
         MessageType::PlayerInputRes => {
-            PlayerInputRes::decode(body)
-                .map_err(|_| GameplayError::InvalidBody)?
-                .room_id
+            let response = PlayerInputRes::decode(body).map_err(|_| GameplayError::InvalidBody)?;
+            if !response.ok {
+                return Err(GameplayError::BusinessRejected(response_type));
+            }
+            response.room_id
         }
         MessageType::RoomReadyRes => {
-            RoomReadyRes::decode(body)
-                .map_err(|_| GameplayError::InvalidBody)?
-                .room_id
+            let response = RoomReadyRes::decode(body).map_err(|_| GameplayError::InvalidBody)?;
+            if !response.ok || !response.ready {
+                return Err(GameplayError::BusinessRejected(response_type));
+            }
+            response.room_id
         }
         MessageType::RoomStartRes => {
-            RoomStartRes::decode(body)
-                .map_err(|_| GameplayError::InvalidBody)?
-                .room_id
+            let response = RoomStartRes::decode(body).map_err(|_| GameplayError::InvalidBody)?;
+            if !response.ok {
+                return Err(GameplayError::BusinessRejected(response_type));
+            }
+            response.room_id
         }
         _ => return Ok(()),
     };
@@ -2040,12 +2053,12 @@ mod tests {
         )
     }
 
-    fn input_response(sequence: u32) -> Packet {
+    fn input_response(sequence: u32, ok: bool) -> Packet {
         response(
             MessageType::PlayerInputRes,
             sequence,
             &PlayerInputRes {
-                ok: true,
+                ok,
                 room_id: "approved-room".into(),
                 error_code: String::new(),
             },
@@ -2328,6 +2341,31 @@ mod tests {
     }
 
     #[test]
+    fn approved_room_guard_rejects_every_unsuccessful_room_response() {
+        let packets = [
+            room_join_response(3, false),
+            response(
+                MessageType::RoomLeaveRes,
+                3,
+                &RoomLeaveRes {
+                    ok: false,
+                    room_id: "approved-room".into(),
+                    error_code: "ignored".into(),
+                },
+            ),
+            room_ready_response(3, false),
+            room_start_response(3, false),
+            input_response(3, false),
+        ];
+        for packet in packets {
+            assert!(matches!(
+                ensure_approved_room_packet(&packet, "approved-room"),
+                Err(GameplayError::BusinessRejected(_))
+            ));
+        }
+    }
+
+    #[test]
     fn two_player_preparation_and_room_echo_cover_ready_and_start() {
         let mut multiplayer = gameplay();
         multiplayer.policy_id = "default_match".into();
@@ -2503,7 +2541,7 @@ mod tests {
             Ok(room_join_response(3, true)),
             Ok(room_ready_response(4, true)),
             Ok(room_start_response(5, true)),
-            Ok(input_response(6)),
+            Ok(input_response(6, true)),
             Ok(leave_response(7)),
         ]);
         let mut second = ScriptedTwoPlayerTransport::scripted([
@@ -2511,7 +2549,7 @@ mod tests {
             Ok(heartbeat_response(2)),
             Ok(room_join_response(3, true)),
             Ok(room_ready_response(4, true)),
-            Ok(input_response(5)),
+            Ok(input_response(5, true)),
             Ok(leave_response(6)),
         ]);
         let result = runner()
@@ -2610,6 +2648,51 @@ mod tests {
             assert!(pool.acquire("account-a", "replacement-a", 1, 1_000).is_ok());
             assert!(pool.acquire("account-b", "replacement-b", 1, 1_000).is_ok());
         }
+    }
+
+    #[test]
+    fn guarded_two_player_input_rejection_releases_both_players_before_progress() {
+        let mut pool = AccountLeasePool::default();
+        let leases = [
+            pool.acquire("account-a", "player-a", 0, 1_000).unwrap(),
+            pool.acquire("account-b", "player-b", 0, 1_000).unwrap(),
+        ];
+        let mut first = ScriptedTwoPlayerTransport::scripted([
+            Ok(authenticated_response(1)),
+            Ok(heartbeat_response(2)),
+            Ok(room_join_response(3, true)),
+            Ok(room_ready_response(4, true)),
+            Ok(room_start_response(5, true)),
+            Ok(input_response(6, false)),
+        ]);
+        let mut second = ScriptedTwoPlayerTransport::scripted([
+            Ok(authenticated_response(1)),
+            Ok(heartbeat_response(2)),
+            Ok(room_join_response(3, true)),
+            Ok(room_ready_response(4, true)),
+        ]);
+        assert!(
+            runner()
+                .run_guarded_two_player_default_match(
+                    gate(),
+                    [&mut first, &mut second],
+                    &mut pool,
+                    leases,
+                    ["private-ticket-a", "private-ticket-b"],
+                    &two_player_gameplay(),
+                )
+                .is_err()
+        );
+        assert_eq!(first.active_connections(), 0);
+        assert_eq!(second.active_connections(), 0);
+        assert!(pool.acquire("account-a", "replacement-a", 1, 1_000).is_ok());
+        assert!(pool.acquire("account-b", "replacement-b", 1, 1_000).is_ok());
+        assert!(
+            !first
+                .sent
+                .iter()
+                .any(|(message, _)| *message == MessageType::RoomLeaveReq)
+        );
     }
 
     fn active_session(pool: &mut AccountLeasePool) -> VirtualPlayerSession {
