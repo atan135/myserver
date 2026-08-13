@@ -332,6 +332,28 @@ impl AuthDispatchAdmission {
         )
     }
 
+    pub fn admit_side_connection<F>(
+        &mut self,
+        deadline: Instant,
+        checkpoint: F,
+    ) -> Result<Duration, AuthAdmissionError>
+    where
+        F: FnMut() -> Result<(), String>,
+    {
+        self.admit_outbound(false, true, false, false, 0, deadline, checkpoint)
+    }
+
+    pub fn admit_side_message<F>(
+        &mut self,
+        deadline: Instant,
+        checkpoint: F,
+    ) -> Result<Duration, AuthAdmissionError>
+    where
+        F: FnMut() -> Result<(), String>,
+    {
+        self.admit_outbound(false, false, true, true, 0, deadline, checkpoint)
+    }
+
     fn admit_outbound<F>(
         &mut self,
         is_login: bool,

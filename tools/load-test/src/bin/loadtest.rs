@@ -23,6 +23,7 @@ use loadtest_core::calibration::{
     CalibrationRun, bounded_calibration_duration_ms, bounded_calibration_operations,
     progressive_levels, run_local_workload,
 };
+use loadtest_core::chat_wss::execute_live_chat_steps;
 use loadtest_core::config::{
     BudgetOverride, LiveGameplayCoordination, LoadModel, LoadTestConfig, RunAccess, load_config,
     load_private_config,
@@ -42,6 +43,7 @@ use loadtest_core::reconnect_burst::{
 use loadtest_core::report::{ErrorBuffer, ReportInput, write_report};
 use loadtest_core::resource::ResourceSampler;
 use loadtest_core::scheduler::MonotonicScheduler;
+use loadtest_core::side_services::SideServiceKind;
 use loadtest_core::side_services::execute_side_services_dry;
 
 fn main() -> ExitCode {
@@ -571,6 +573,17 @@ fn run_live(cli: &Cli) -> Result<(), String> {
         return Err("real auth-http execution requires --confirm-auth <environment>".into());
     }
     let game_mode = cli.execute_game;
+    let live_chat = config
+        .scenario
+        .side_services
+        .as_ref()
+        .and_then(|side| side.chat.as_ref())
+        .is_some_and(|chat| chat.live_websocket);
+    if live_chat && game_mode {
+        return Err(
+            "live chat WebSocket cannot be combined with --execute-game until a ticket-sharing flow is explicitly configured".into(),
+        );
+    }
     if game_mode {
         validate_game_execution_gate(cli, &config)?;
     }
@@ -621,7 +634,20 @@ fn run_live(cli: &Cli) -> Result<(), String> {
     let (game_auth_operations, deferred_logout) = if game_mode {
         split_game_auth_operations(&auth.operations)?
     } else {
-        (auth.operations.clone(), false)
+        (
+            if live_chat {
+                loadtest_core::auth_http::split_game_auth_operations(&auth.operations)?.0
+            } else {
+                auth.operations.clone()
+            },
+            if live_chat {
+                auth.operations.last().is_some_and(|operation| {
+                    matches!(operation, loadtest_core::config::AuthOperation::Logout)
+                })
+            } else {
+                false
+            },
+        )
     };
     let two_player_default_match = game_mode
         && config
@@ -1370,6 +1396,157 @@ fn run_live(cli: &Cli) -> Result<(), String> {
                     },
                     || record_completed_game_session_metrics(&mut core_metrics),
                 );
+            }
+            if !execution_failed && live_chat {
+                let chat = config
+                    .scenario
+                    .side_services
+                    .as_ref()
+                    .and_then(|side| side.chat.as_ref())
+                    .ok_or("live chat configuration disappeared after validation")?;
+                let descriptor = chat
+                    .descriptor
+                    .as_ref()
+                    .ok_or("live chat requires an explicit descriptor")?;
+                let plan = config
+                    .scenario
+                    .side_services
+                    .as_ref()
+                    .expect("live chat configuration exists")
+                    .executable_plan(&budget)
+                    .map_err(|error| format!("live chat plan rejected: {error}"))?;
+                let Some((ticket, _)) = execution.take_game_credentials() else {
+                    errors.push(
+                        "chat_ticket_missing",
+                        "auth completed without a transferable chat ticket",
+                        Default::default(),
+                    );
+                    failed = true;
+                    execution_failed = true;
+                    finish_live_action(&mut auth_metrics, &execution.metrics, &mut abort, &budget);
+                    continue;
+                };
+                let chat_steps = plan
+                    .steps
+                    .iter()
+                    .filter(|step| step.service == SideServiceKind::Chat)
+                    .cloned()
+                    .collect::<Vec<_>>();
+                let chat_deadline = action_deadline.saturating_duration_since(Instant::now());
+                let admitted = dispatch_admission.admit_side_connection(action_deadline, || {
+                    abort.check_ctrl_c(&ctrl_c);
+                    abort.check_stop_file(config.stop_file.as_deref().map(Path::new));
+                    abort.check_deadline(unix_ms(), deadline_unix_ms);
+                    if abort.should_stop_new_sessions()
+                        || revalidate_or_abort(&protection, &mut abort).is_some()
+                    {
+                        return Err("chat connection admission stopped".into());
+                    }
+                    Ok(())
+                });
+                let mut chat_admission_failed = false;
+                if admitted.is_ok() {
+                    for _ in 0..chat_steps.len().saturating_add(1) {
+                        if let Err(error) =
+                            dispatch_admission.admit_side_message(action_deadline, || {
+                                abort.check_ctrl_c(&ctrl_c);
+                                abort.check_stop_file(config.stop_file.as_deref().map(Path::new));
+                                abort.check_deadline(unix_ms(), deadline_unix_ms);
+                                if abort.should_stop_new_sessions()
+                                    || revalidate_or_abort(&protection, &mut abort).is_some()
+                                {
+                                    return Err("chat message admission stopped".into());
+                                }
+                                Ok(())
+                            })
+                        {
+                            let _ = map_auth_admission_to_game_error(&mut abort, error);
+                            failed = true;
+                            execution_failed = true;
+                            chat_admission_failed = true;
+                            break;
+                        }
+                    }
+                }
+                if let Err(error) = admitted {
+                    let _ = map_auth_admission_to_game_error(&mut abort, error);
+                    errors.push(
+                        "chat_connection_admission_failed",
+                        "chat WebSocket connection was rejected before setup",
+                        Default::default(),
+                    );
+                    failed = true;
+                    execution_failed = true;
+                } else if !chat_admission_failed {
+                    let runtime = tokio::runtime::Builder::new_current_thread()
+                        .enable_io()
+                        .enable_time()
+                        .build()
+                        .map_err(|_| "could not create guarded chat WebSocket runtime")?;
+                    match runtime.block_on(execute_live_chat_steps(
+                        descriptor,
+                        config.environment.kind,
+                        chat.live_websocket,
+                        ticket,
+                        &lease.logical_account_id,
+                        &chat_steps,
+                        chat_deadline.as_millis() as u64,
+                        ReconnectPolicy {
+                            max_attempts: 1,
+                            base_delay_ms: 100,
+                            max_delay_ms: 500,
+                            max_jitter_ms: 50,
+                        },
+                    )) {
+                        Ok(chat_metrics) => chat_metrics.merge_into_metrics(&mut core_metrics),
+                        Err(error) => {
+                            errors.push(
+                                "chat_wss_execution_failed",
+                                format!("chat WebSocket execution failed: {error:?}"),
+                                Default::default(),
+                            );
+                            failed = true;
+                            execution_failed = true;
+                        }
+                    }
+                }
+                if live_chat && deferred_logout && pre_game_auth_completed {
+                    if !can_attempt_deferred_logout(
+                        deferred_logout,
+                        pre_game_auth_completed,
+                        &abort,
+                    ) {
+                        errors.push(
+                            "deferred_logout_not_dispatched",
+                            deferred_logout_skip_message(&abort),
+                            Default::default(),
+                        );
+                        failed = true;
+                    } else if execute_deferred_logout(&mut transport, &mut execution, |request| {
+                        dispatch_admission
+                            .admit(request, action_deadline, || {
+                                abort.check_ctrl_c(&ctrl_c);
+                                abort.check_stop_file(config.stop_file.as_deref().map(Path::new));
+                                abort.check_deadline(unix_ms(), deadline_unix_ms);
+                                if abort.should_stop_new_sessions()
+                                    || revalidate_or_abort(&protection, &mut abort).is_some()
+                                {
+                                    return Err("chat deferred logout stopped".into());
+                                }
+                                Ok(())
+                            })
+                            .map_err(|error| map_auth_admission_to_string(&mut abort, error))
+                    })
+                    .is_err()
+                    {
+                        errors.push(
+                            "deferred_logout_failed",
+                            "post-chat logout failed",
+                            Default::default(),
+                        );
+                        failed = true;
+                    }
+                }
             }
             finish_live_action(&mut auth_metrics, &execution.metrics, &mut abort, &budget);
             if execution_failed {

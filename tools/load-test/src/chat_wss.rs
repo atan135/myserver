@@ -11,7 +11,10 @@ use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
 use crate::chat_pb::{ChatAuthReq, ChatAuthRes, ChatGroupReq, ChatHistoryReq, ChatPrivateReq};
 use crate::config::EnvironmentKind;
 use crate::game_kcp::ReconnectPolicy;
-use crate::side_services::{ServiceDescriptor, SideOutcomeCategory, SideServiceKind};
+use crate::side_services::{
+    PlannedSideServiceStep, ServiceDescriptor, SideOutcomeCategory, SideServiceKind,
+    SideServiceOperation,
+};
 
 pub const CHAT_PACKET_HEADER_LEN: usize = 14;
 pub const CHAT_MAX_BODY_BYTES: usize = 4 * 1024;
@@ -183,6 +186,12 @@ impl ChatWssSession {
         self.metrics.reconnect_backoff_ms += delay;
         Ok(delay)
     }
+    fn prepare_reconnect(&mut self) {
+        self.state = ChatConnectionState::Disconnected;
+        self.pending.clear();
+        self.outbound.clear();
+        self.last_push_sequence = None;
+    }
     /// Chat-server derives the authenticated player exclusively from the
     /// ticket. `ChatAuthReq.player_id` remains in the shared compatibility
     /// proto but must never be populated by the load generator.
@@ -332,32 +341,29 @@ impl ChatWssSession {
     }
 
     pub fn merge_into_metrics(&self, metrics: &mut crate::metrics::Metrics) {
+        self.metrics.merge_into_metrics(metrics);
+    }
+}
+
+impl ChatWssMetrics {
+    pub fn merge_into_metrics(&self, metrics: &mut crate::metrics::Metrics) {
         for (key, value) in [
-            ("chat_wss_handshakes", self.metrics.handshake_attempts),
-            (
-                "chat_wss_handshake_successes",
-                self.metrics.handshake_successes,
-            ),
-            ("chat_wss_auth_attempts", self.metrics.auth_attempts),
-            (
-                "chat_wss_active_connections",
-                self.metrics.active_connections,
-            ),
-            ("chat_wss_messages_sent", self.metrics.messages_sent),
-            ("chat_wss_pushes_received", self.metrics.pushes_received),
-            ("chat_wss_push_duplicates", self.metrics.push_duplicates),
-            ("chat_wss_push_out_of_order", self.metrics.push_out_of_order),
-            ("chat_wss_queue_backlog", self.metrics.queue_backlog),
+            ("chat_wss_handshakes", self.handshake_attempts),
+            ("chat_wss_handshake_successes", self.handshake_successes),
+            ("chat_wss_auth_attempts", self.auth_attempts),
+            ("chat_wss_active_connections", self.active_connections),
+            ("chat_wss_messages_sent", self.messages_sent),
+            ("chat_wss_pushes_received", self.pushes_received),
+            ("chat_wss_push_duplicates", self.push_duplicates),
+            ("chat_wss_push_out_of_order", self.push_out_of_order),
+            ("chat_wss_queue_backlog", self.queue_backlog),
             (
                 "chat_wss_slow_consumer_disconnects",
-                self.metrics.slow_consumer_disconnects,
+                self.slow_consumer_disconnects,
             ),
-            ("chat_wss_disconnects", self.metrics.disconnects),
-            ("chat_wss_reconnects", self.metrics.reconnects),
-            (
-                "chat_wss_reconnect_backoff_ms",
-                self.metrics.reconnect_backoff_ms,
-            ),
+            ("chat_wss_disconnects", self.disconnects),
+            ("chat_wss_reconnects", self.reconnects),
+            ("chat_wss_reconnect_backoff_ms", self.reconnect_backoff_ms),
         ] {
             metrics.increment(key, value);
         }
@@ -366,6 +372,125 @@ impl ChatWssSession {
 
 pub struct LiveChatWssTransport {
     websocket: WebSocketStream<MaybeTlsStream<TcpStream>>,
+}
+
+/// Runs a bounded live chat flow for one authenticated account. The caller
+/// owns admission, deadlines, and the ticket lifecycle; this function only
+/// performs the explicitly planned WebSocket operations.
+pub async fn execute_live_chat_steps(
+    descriptor: &ServiceDescriptor,
+    environment: EnvironmentKind,
+    live_websocket: bool,
+    ticket: String,
+    player_id: &str,
+    steps: &[PlannedSideServiceStep],
+    timeout_ms: u64,
+    reconnect_policy: ReconnectPolicy,
+) -> Result<ChatWssMetrics, ChatWssError> {
+    if steps.is_empty() {
+        return Ok(ChatWssMetrics::default());
+    }
+    if steps
+        .iter()
+        .any(|step| step.service != SideServiceKind::Chat)
+    {
+        return Err(ChatWssError::InvalidState);
+    }
+    let mut session = ChatWssSession::new(reconnect_policy)?;
+    let mut transport =
+        LiveChatWssTransport::connect(descriptor, environment, live_websocket, timeout_ms).await?;
+    session.connected();
+    let auth = session.queue_auth(ticket.clone())?;
+    drive_chat_request(&mut session, &mut transport, auth, timeout_ms).await?;
+
+    for step in steps {
+        let mut request = match step.operation {
+            SideServiceOperation::ChatAuth => continue,
+            SideServiceOperation::ChatPrivate => session.queue_private(
+                format!("{player_id}-loadtest-peer"),
+                "loadtest private message".into(),
+            )?,
+            SideServiceOperation::ChatGroup => session.queue_group(
+                format!("{player_id}-loadtest-group"),
+                "loadtest group message".into(),
+            )?,
+            SideServiceOperation::ChatHistory => {
+                session.queue_history(1, format!("{player_id}-loadtest-peer"), 0, 20)?
+            }
+            _ => return Err(ChatWssError::InvalidState),
+        };
+        let mut attempt = 0;
+        loop {
+            match drive_chat_request(&mut session, &mut transport, request, timeout_ms).await {
+                Ok(()) => break,
+                Err(error)
+                    if is_reconnectable(&error) && attempt < reconnect_policy.max_attempts =>
+                {
+                    attempt += 1;
+                    let delay = session.disconnected(attempt, attempt as u64)?;
+                    session.prepare_reconnect();
+                    tokio::time::sleep(Duration::from_millis(delay)).await;
+                    transport = LiveChatWssTransport::connect(
+                        descriptor,
+                        environment,
+                        live_websocket,
+                        timeout_ms,
+                    )
+                    .await?;
+                    session.connected();
+                    let auth = session.queue_auth(ticket.clone())?;
+                    drive_chat_request(&mut session, &mut transport, auth, timeout_ms).await?;
+                    request = match step.operation {
+                        SideServiceOperation::ChatPrivate => session.queue_private(
+                            format!("{player_id}-loadtest-peer"),
+                            "loadtest private message".into(),
+                        )?,
+                        SideServiceOperation::ChatGroup => session.queue_group(
+                            format!("{player_id}-loadtest-group"),
+                            "loadtest group message".into(),
+                        )?,
+                        SideServiceOperation::ChatHistory => {
+                            session.queue_history(1, format!("{player_id}-loadtest-peer"), 0, 20)?
+                        }
+                        SideServiceOperation::ChatAuth => continue,
+                        _ => return Err(ChatWssError::InvalidState),
+                    };
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+    Ok(session.metrics)
+}
+
+fn is_reconnectable(error: &ChatWssError) -> bool {
+    matches!(
+        error,
+        ChatWssError::Transport(reason)
+            if matches!(reason.as_str(), "closed" | "read_failed" | "write_failed")
+    )
+}
+
+async fn drive_chat_request(
+    session: &mut ChatWssSession,
+    transport: &mut LiveChatWssTransport,
+    sequence: u32,
+    timeout_ms: u64,
+) -> Result<(), ChatWssError> {
+    let packet = session.pop_outbound().ok_or(ChatWssError::InvalidState)?;
+    if packet.sequence != sequence {
+        return Err(ChatWssError::SequenceMismatch);
+    }
+    transport.send(packet, timeout_ms).await?;
+    loop {
+        let response = transport.receive(timeout_ms).await?;
+        let is_response = response.sequence == sequence
+            && !matches!(response.message_type, CHAT_PUSH | MAIL_NOTIFY_PUSH);
+        session.handle_inbound(response)?;
+        if is_response {
+            return Ok(());
+        }
+    }
 }
 
 impl LiveChatWssTransport {
