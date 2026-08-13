@@ -6,7 +6,7 @@
 //! future KCP transport must drive.
 
 use std::fmt::Display;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use game_protocol::{MessageType, Packet, read_packet};
 use prost::Message;
@@ -23,8 +23,8 @@ use crate::gameplay::{
     room_reconnect_step,
 };
 use crate::pb::{
-    PlayerInputRes, RoomJoinRes, RoomLeaveRes, RoomReadyRes, RoomReconnectReq, RoomReconnectRes,
-    RoomStartRes,
+    PlayerInputReq, PlayerInputRes, RoomJoinRes, RoomLeaveRes, RoomReadyRes, RoomReconnectReq,
+    RoomReconnectRes, RoomStartRes,
 };
 use crate::virtual_player::{
     PlayerConnection, VirtualPlayerError, VirtualPlayerEvent, VirtualPlayerSession,
@@ -85,6 +85,8 @@ pub enum GameLiveError {
     Gate(&'static str),
     #[error("game transport failed: {0}")]
     Transport(&'static str),
+    #[error("system clock is unavailable for live gameplay timestamps")]
+    Clock,
     #[error("game session lifecycle failed")]
     Session(#[source] VirtualPlayerError),
     #[error("gameplay flow failed: {0}")]
@@ -93,6 +95,7 @@ pub enum GameLiveError {
     GameplayFailed {
         message: String,
         metrics: crate::metrics::MetricsSnapshot,
+        failure_category: Option<&'static str>,
     },
     #[error("game transport returned an unexpected lifecycle event")]
     UnexpectedLifecycleEvent,
@@ -110,6 +113,17 @@ impl GameLiveError {
     pub fn gameplay_metrics(&self) -> Option<&crate::metrics::MetricsSnapshot> {
         match self {
             Self::GameplayFailed { metrics, .. } => Some(metrics),
+            _ => None,
+        }
+    }
+
+    /// A deliberately small, public-safe set of gameplay failure categories.
+    /// Arbitrary server error codes must never become report dimensions.
+    pub fn reportable_failure_category(&self) -> Option<&'static str> {
+        match self {
+            Self::GameplayFailed {
+                failure_category, ..
+            } => *failure_category,
             _ => None,
         }
     }
@@ -411,10 +425,11 @@ impl GameSessionRunner {
         for coordinated in &prepared.packets {
             let player_index = coordinated.player_index;
             let step = coordinated.packet.step.clone();
-            let outbound = match prepare_outbound_gameplay_packet(
+            let outbound = match prepare_outbound_gameplay_packet_with_clock(
                 &mut sessions[player_index],
                 pool,
                 &coordinated.packet,
+                || Ok(1_700_000_000_000),
             ) {
                 Ok(packet) => packet,
                 Err(error) => {
@@ -451,8 +466,13 @@ impl GameSessionRunner {
                 }
             };
             if let Err(error) = ensure_approved_room_packet(&packet, &prepared.approved_room_id) {
+                let failure_category = reportable_room_failure_category(&packet);
                 close_guarded_two_player_sessions(&mut sessions, pool);
-                return Err(gameplay_failure(error, &trackers[player_index]));
+                return Err(gameplay_failure_with_category(
+                    error,
+                    &trackers[player_index],
+                    failure_category,
+                ));
             }
             match sessions[player_index].handle_packet(pool, packet.clone()) {
                 Ok(VirtualPlayerEvent::Response { message_type, .. })
@@ -703,7 +723,12 @@ impl GameSessionRunner {
                 let step = packet.step.clone();
                 let step_timeout_ms = step.timeout_ms;
                 let frame_bundles_before = tracker.metrics().frame_bundles_received;
-                let packet = match prepare_outbound_gameplay_packet(&mut session, pool, packet) {
+                let packet = match prepare_admitted_outbound_gameplay_packet(
+                    &mut session,
+                    pool,
+                    packet,
+                    &mut checkpoint,
+                ) {
                     Ok(packet) => packet,
                     Err(error) => {
                         transport.close();
@@ -711,14 +736,6 @@ impl GameSessionRunner {
                         return Err(error);
                     }
                 };
-                if let Err(error) = run_checkpoint(
-                    &mut checkpoint,
-                    GameRunnerCheckpoint::GameplayOutboundMessage,
-                ) {
-                    self.close_after_write_failure(&mut session, pool, &packet);
-                    transport.close();
-                    return Err(error);
-                }
                 if let Err(error) = transport.send(&packet).await {
                     self.close_after_write_failure(&mut session, pool, &packet);
                     transport.close();
@@ -892,7 +909,7 @@ impl GameSessionRunner {
                     session.close(pool);
                     return Err(error.into());
                 }
-                let reconnect = match room_reconnect_packet(&mut session, pool, cursor) {
+                let reconnect_profile = match reconnect_profile_packet(cursor) {
                     Ok(packet) => packet,
                     Err(error) => {
                         transport.close();
@@ -900,14 +917,19 @@ impl GameSessionRunner {
                         return Err(error);
                     }
                 };
-                if let Err(error) = run_checkpoint(
+                let reconnect = match prepare_admitted_outbound_gameplay_packet(
+                    &mut session,
+                    pool,
+                    &reconnect_profile,
                     &mut checkpoint,
-                    GameRunnerCheckpoint::GameplayOutboundMessage,
                 ) {
-                    self.close_after_write_failure(&mut session, pool, &reconnect);
-                    transport.close();
-                    return Err(error);
-                }
+                    Ok(packet) => packet,
+                    Err(error) => {
+                        transport.close();
+                        session.close(pool);
+                        return Err(error);
+                    }
+                };
                 if let Err(error) = transport.send(&reconnect).await {
                     self.close_after_write_failure(&mut session, pool, &reconnect);
                     transport.close();
@@ -954,8 +976,12 @@ impl GameSessionRunner {
                 }
                 steps.push(GameRunnerStep::RoomReconnected);
             }
-            let leave = match prepare_outbound_gameplay_packet(&mut session, pool, &gameplay.leave)
-            {
+            let leave = match prepare_admitted_outbound_gameplay_packet(
+                &mut session,
+                pool,
+                &gameplay.leave,
+                &mut checkpoint,
+            ) {
                 Ok(leave) => leave,
                 Err(error) => {
                     transport.close();
@@ -963,14 +989,6 @@ impl GameSessionRunner {
                     return Err(gameplay_failure(error, &tracker));
                 }
             };
-            if let Err(error) = run_checkpoint(
-                &mut checkpoint,
-                GameRunnerCheckpoint::GameplayOutboundMessage,
-            ) {
-                self.close_after_write_failure(&mut session, pool, &leave);
-                transport.close();
-                return Err(error);
-            }
             if let Err(error) = transport.send(&leave).await {
                 self.close_after_write_failure(&mut session, pool, &leave);
                 transport.close();
@@ -1214,10 +1232,11 @@ impl GameSessionRunner {
             }
             let player_index = coordinated.player_index;
             let step = coordinated.packet.step.clone();
-            let outbound = match prepare_outbound_gameplay_packet(
+            let outbound = match prepare_admitted_outbound_gameplay_packet(
                 &mut sessions[player_index],
                 pool,
                 &coordinated.packet,
+                &mut checkpoint,
             ) {
                 Ok(packet) => packet,
                 Err(error) => {
@@ -1225,14 +1244,6 @@ impl GameSessionRunner {
                     return Err(error);
                 }
             };
-            if let Err(error) = run_checkpoint(
-                &mut checkpoint,
-                GameRunnerCheckpoint::GameplayOutboundMessage,
-            ) {
-                self.close_after_write_failure(&mut sessions[player_index], pool, &outbound);
-                close_two_player_sessions(&mut sessions, &mut transports, pool);
-                return Err(error);
-            }
             if let Err(error) = transports[player_index].send(&outbound).await {
                 self.close_after_write_failure(&mut sessions[player_index], pool, &outbound);
                 close_two_player_sessions(&mut sessions, &mut transports, pool);
@@ -1398,11 +1409,17 @@ fn close_two_player_sessions(
     }
 }
 
-fn prepare_outbound_gameplay_packet(
+fn prepare_outbound_gameplay_packet_with_clock(
     session: &mut VirtualPlayerSession,
     pool: &mut AccountLeasePool,
     packet: &PlannedPacket,
+    current_unix_ms: impl FnOnce() -> Result<i64, GameLiveError>,
 ) -> Result<OutboundPacket, GameLiveError> {
+    let packet = if packet.step.request_type == MessageType::PlayerInputReq {
+        materialize_live_gameplay_packet(packet, current_unix_ms()?)?
+    } else {
+        packet.clone()
+    };
     let expected_response = packet
         .step
         .response_type
@@ -1413,6 +1430,76 @@ fn prepare_outbound_gameplay_packet(
         expected_response,
         packet.body()?,
     )?)
+}
+
+/// Admits a gameplay request before it can reserve an in-flight sequence or
+/// materialize a wall-clock-sensitive frame input. This keeps rate-limit
+/// waits outside the timestamp-to-send interval.
+fn prepare_admitted_outbound_gameplay_packet(
+    session: &mut VirtualPlayerSession,
+    pool: &mut AccountLeasePool,
+    packet: &PlannedPacket,
+    checkpoint: &mut impl FnMut(GameRunnerCheckpoint) -> Result<(), GameLiveError>,
+) -> Result<OutboundPacket, GameLiveError> {
+    prepare_admitted_outbound_gameplay_packet_with_clock(
+        session,
+        pool,
+        packet,
+        checkpoint,
+        current_unix_ms,
+    )
+}
+
+fn prepare_admitted_outbound_gameplay_packet_with_clock(
+    session: &mut VirtualPlayerSession,
+    pool: &mut AccountLeasePool,
+    packet: &PlannedPacket,
+    checkpoint: &mut impl FnMut(GameRunnerCheckpoint) -> Result<(), GameLiveError>,
+    current_unix_ms: impl FnOnce() -> Result<i64, GameLiveError>,
+) -> Result<OutboundPacket, GameLiveError> {
+    run_checkpoint(checkpoint, GameRunnerCheckpoint::GameplayOutboundMessage)?;
+    prepare_outbound_gameplay_packet_with_clock(session, pool, packet, current_unix_ms)
+}
+
+/// Keeps profile packet generation deterministic while filling the one field
+/// that the server validates against wall-clock time immediately before send.
+fn materialize_live_gameplay_packet(
+    packet: &PlannedPacket,
+    unix_ms: i64,
+) -> Result<PlannedPacket, GameLiveError> {
+    if packet.step.request_type != MessageType::PlayerInputReq {
+        return Ok(packet.clone());
+    }
+    if unix_ms <= 0 {
+        return Err(GameLiveError::Clock);
+    }
+    let header = packet.packet_header()?;
+    if header.msg_type != MessageType::PlayerInputReq as u16 {
+        return Err(GameLiveError::Transport(
+            "planned player input packet has an unexpected message type",
+        ));
+    }
+    let mut input =
+        PlayerInputReq::decode(packet.body()?).map_err(|_| GameplayError::InvalidBody)?;
+    input.client_timestamp_ms = unix_ms;
+    Ok(PlannedPacket {
+        step: packet.step.clone(),
+        packet: game_protocol::encode_packet(
+            MessageType::PlayerInputReq,
+            header.seq,
+            &game_protocol::encode_body(&input),
+        ),
+        sequence: packet.sequence,
+    })
+}
+
+fn current_unix_ms() -> Result<i64, GameLiveError> {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| GameLiveError::Clock)?
+        .as_millis()
+        .try_into()
+        .map_err(|_| GameLiveError::Clock)
 }
 
 fn planned_packet_with_live_sequence(
@@ -1447,15 +1534,6 @@ fn reconnect_profile_packet(cursor: u64) -> Result<PlannedPacket, GameLiveError>
     };
     packet.packet_header()?;
     Ok(packet)
-}
-
-fn room_reconnect_packet(
-    session: &mut VirtualPlayerSession,
-    pool: &mut AccountLeasePool,
-    cursor: u64,
-) -> Result<OutboundPacket, GameLiveError> {
-    let profile_packet = reconnect_profile_packet(cursor)?;
-    prepare_outbound_gameplay_packet(session, pool, &profile_packet)
 }
 
 async fn receive_gameplay_response(
@@ -1497,9 +1575,14 @@ async fn receive_gameplay_response(
         };
         if let Some(approved_room_id) = approved_room_id {
             if let Err(error) = ensure_approved_room_packet(&packet, approved_room_id) {
+                let failure_category = reportable_room_failure_category(&packet);
                 transport.close();
                 session.close(pool);
-                return Err(gameplay_failure(error, tracker));
+                return Err(gameplay_failure_with_category(
+                    error,
+                    tracker,
+                    failure_category,
+                ));
             }
         }
         match session.handle_packet(pool, packet.clone()) {
@@ -1552,9 +1635,18 @@ async fn receive_gameplay_response(
 }
 
 fn gameplay_failure(message: impl Display, tracker: &RoomFlowTracker) -> GameLiveError {
+    gameplay_failure_with_category(message, tracker, None)
+}
+
+fn gameplay_failure_with_category(
+    message: impl Display,
+    tracker: &RoomFlowTracker,
+    failure_category: Option<&'static str>,
+) -> GameLiveError {
     GameLiveError::GameplayFailed {
         message: message.to_string(),
         metrics: tracker.telemetry(),
+        failure_category,
     }
 }
 
@@ -1688,6 +1780,18 @@ fn ensure_approved_room_packet(
         return Err(GameplayError::RoomMismatch);
     }
     Ok(())
+}
+
+fn reportable_room_failure_category(packet: &Packet) -> Option<&'static str> {
+    if packet.message_type()? != MessageType::PlayerInputRes {
+        return None;
+    }
+    let response = PlayerInputRes::decode(packet.body.as_slice()).ok()?;
+    if !response.ok && response.error_code == "INPUT_TIMESTAMP_SKEW" {
+        Some("gameplay_input_timestamp_skew")
+    } else {
+        None
+    }
 }
 
 async fn reconnect_live_transport(
@@ -2054,13 +2158,17 @@ mod tests {
     }
 
     fn input_response(sequence: u32, ok: bool) -> Packet {
+        input_response_with_error(sequence, ok, "")
+    }
+
+    fn input_response_with_error(sequence: u32, ok: bool, error_code: &str) -> Packet {
         response(
             MessageType::PlayerInputRes,
             sequence,
             &PlayerInputRes {
                 ok,
                 room_id: "approved-room".into(),
-                error_code: String::new(),
+                error_code: error_code.into(),
             },
         )
     }
@@ -2366,6 +2474,151 @@ mod tests {
     }
 
     #[test]
+    fn only_timestamp_skew_is_a_reportable_room_failure_category() {
+        assert_eq!(
+            reportable_room_failure_category(&input_response_with_error(
+                3,
+                false,
+                "INPUT_TIMESTAMP_SKEW",
+            )),
+            Some("gameplay_input_timestamp_skew")
+        );
+        assert_eq!(
+            reportable_room_failure_category(&input_response_with_error(3, false, "UNEXPECTED")),
+            None
+        );
+        assert_eq!(
+            reportable_room_failure_category(&input_response(3, true)),
+            None
+        );
+    }
+
+    #[test]
+    fn live_packet_materialization_only_replaces_input_timestamp() {
+        let profile = GameplayProfilePlan::from_lockstep_scenario_json(
+            crate::gameplay::PlayerProfile::Normal,
+            include_str!("../../lockstep-client/scenarios/move_stop.json"),
+        )
+        .unwrap();
+        let plan = profile
+            .packet_plan_with_input_limit("approved-room", "approved-policy", 1)
+            .unwrap();
+        let input = &plan[1];
+        let materialized = materialize_live_gameplay_packet(input, 1_700_000_000_000).unwrap();
+
+        assert_eq!(materialized.step, input.step);
+        assert_eq!(materialized.sequence, input.sequence);
+        assert_eq!(
+            materialized.packet_header().unwrap().msg_type,
+            MessageType::PlayerInputReq as u16
+        );
+        assert_eq!(
+            materialized.packet_header().unwrap().seq,
+            input.packet_header().unwrap().seq
+        );
+        assert_eq!(
+            PlayerInputReq::decode(materialized.body().unwrap())
+                .unwrap()
+                .client_timestamp_ms,
+            1_700_000_000_000
+        );
+        assert_eq!(
+            PlayerInputReq::decode(input.body().unwrap())
+                .unwrap()
+                .client_timestamp_ms,
+            1
+        );
+        assert_eq!(
+            materialize_live_gameplay_packet(&plan[0], 1_700_000_000_000).unwrap(),
+            plan[0]
+        );
+    }
+
+    #[test]
+    fn gameplay_admission_precedes_input_timestamp_materialization() {
+        let profile = GameplayProfilePlan::from_lockstep_scenario_json(
+            crate::gameplay::PlayerProfile::Normal,
+            include_str!("../../lockstep-client/scenarios/move_stop.json"),
+        )
+        .unwrap();
+        let input = profile
+            .packet_plan_with_input_limit("approved-room", "approved-policy", 1)
+            .unwrap()
+            .remove(1);
+        let mut pool = AccountLeasePool::default();
+        let mut session = active_session(&mut pool);
+        let order = std::cell::RefCell::new(Vec::new());
+        let outbound = prepare_admitted_outbound_gameplay_packet_with_clock(
+            &mut session,
+            &mut pool,
+            &input,
+            &mut |checkpoint| {
+                assert_eq!(checkpoint, GameRunnerCheckpoint::GameplayOutboundMessage);
+                order.borrow_mut().push("admit");
+                Ok(())
+            },
+            || {
+                assert_eq!(order.borrow().as_slice(), ["admit"]);
+                order.borrow_mut().push("clock");
+                Ok(1_700_000_000_000)
+            },
+        )
+        .unwrap();
+
+        assert_eq!(order.into_inner(), vec!["admit", "clock"]);
+        assert_eq!(
+            PlayerInputReq::decode(outbound.body())
+                .unwrap()
+                .client_timestamp_ms,
+            1_700_000_000_000
+        );
+        session.close(&mut pool);
+    }
+
+    #[test]
+    fn rejected_gameplay_admission_does_not_materialize_or_reserve_input() {
+        let profile = GameplayProfilePlan::from_lockstep_scenario_json(
+            crate::gameplay::PlayerProfile::Normal,
+            include_str!("../../lockstep-client/scenarios/move_stop.json"),
+        )
+        .unwrap();
+        let input = profile
+            .packet_plan_with_input_limit("approved-room", "approved-policy", 1)
+            .unwrap()
+            .remove(1);
+        let mut pool = AccountLeasePool::default();
+        let mut session = active_session(&mut pool);
+        let clock_called = std::cell::Cell::new(false);
+        let error = prepare_admitted_outbound_gameplay_packet_with_clock(
+            &mut session,
+            &mut pool,
+            &input,
+            &mut |_| Err(GameLiveError::Transport("test admission rejection")),
+            || {
+                clock_called.set(true);
+                Ok(1_700_000_000_000)
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "game transport failed: test admission rejection"
+        );
+        assert!(!clock_called.get());
+        let retry =
+            prepare_outbound_gameplay_packet_with_clock(&mut session, &mut pool, &input, || {
+                Ok(1_700_000_000_000)
+            })
+            .unwrap();
+        session
+            .handle_outbound_write_failure(&mut pool, &retry, 0)
+            .unwrap();
+        session.close(&mut pool);
+        assert!(pool.acquire("account-a", "replacement", 1, 1_000).is_ok());
+    }
+
+    #[test]
     fn two_player_preparation_and_room_echo_cover_ready_and_start() {
         let mut multiplayer = gameplay();
         multiplayer.policy_id = "default_match".into();
@@ -2663,7 +2916,7 @@ mod tests {
             Ok(room_join_response(3, true)),
             Ok(room_ready_response(4, true)),
             Ok(room_start_response(5, true)),
-            Ok(input_response(6, false)),
+            Ok(input_response_with_error(6, false, "INPUT_TIMESTAMP_SKEW")),
         ]);
         let mut second = ScriptedTwoPlayerTransport::scripted([
             Ok(authenticated_response(1)),
@@ -2671,17 +2924,19 @@ mod tests {
             Ok(room_join_response(3, true)),
             Ok(room_ready_response(4, true)),
         ]);
-        assert!(
-            runner()
-                .run_guarded_two_player_default_match(
-                    gate(),
-                    [&mut first, &mut second],
-                    &mut pool,
-                    leases,
-                    ["private-ticket-a", "private-ticket-b"],
-                    &two_player_gameplay(),
-                )
-                .is_err()
+        let error = runner()
+            .run_guarded_two_player_default_match(
+                gate(),
+                [&mut first, &mut second],
+                &mut pool,
+                leases,
+                ["private-ticket-a", "private-ticket-b"],
+                &two_player_gameplay(),
+            )
+            .unwrap_err();
+        assert_eq!(
+            error.reportable_failure_category(),
+            Some("gameplay_input_timestamp_skew")
         );
         assert_eq!(first.active_connections(), 0);
         assert_eq!(second.active_connections(), 0);

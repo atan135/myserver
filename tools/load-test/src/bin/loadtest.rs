@@ -532,6 +532,12 @@ fn record_completed_game_session_metrics(core_metrics: &mut Metrics) {
     core_metrics.increment("game_heartbeat_requests", 1);
 }
 
+fn two_player_game_failure_category(error: &GameLiveError) -> &'static str {
+    error
+        .reportable_failure_category()
+        .unwrap_or("game_session_failed")
+}
+
 fn finish_game_action_after_cleanup<C, R>(
     completed_game_session: bool,
     cleanup: C,
@@ -1003,7 +1009,7 @@ fn run_live(cli: &Cli) -> Result<(), String> {
                                     core_metrics.merge_snapshot(metrics);
                                 }
                                 errors.push(
-                                    "game_session_failed",
+                                    two_player_game_failure_category(&error),
                                     "two-player KCP game session did not complete",
                                     Default::default(),
                                 );
@@ -1681,6 +1687,23 @@ mod tests {
     use super::*;
     use loadtest_core::abort::AbortReason;
     use loadtest_core::auth_http::{AuthHttpStatusCategory, AuthOutcomeCategory};
+
+    #[test]
+    fn two_player_game_failure_category_keeps_server_codes_bounded() {
+        let categorized = GameLiveError::GameplayFailed {
+            message: "ignored".into(),
+            metrics: Default::default(),
+            failure_category: Some("gameplay_input_timestamp_skew"),
+        };
+        assert_eq!(
+            two_player_game_failure_category(&categorized),
+            "gameplay_input_timestamp_skew"
+        );
+        assert_eq!(
+            two_player_game_failure_category(&GameLiveError::Transport("ignored")),
+            "game_session_failed"
+        );
+    }
 
     #[test]
     fn dry_run_reconnect_burst_writes_offline_plan_metrics_without_transport() {
