@@ -7,7 +7,7 @@
 use serde::Serialize;
 
 use crate::abort::{AbortController, AbortReason};
-use crate::config::{AuthOperation, HardBudget, LoadModel, Scenario};
+use crate::config::{AuthOperation, HardBudget, LiveGameplayCoordination, LoadModel, Scenario};
 
 const REGISTER_POTENTIAL_WRITES: u64 = 4;
 const LOGIN_POTENTIAL_WRITES: u64 = 3;
@@ -67,6 +67,9 @@ pub struct GameRunBudgetEstimate {
     pub kcp_connections_per_flow: u64,
     pub game_messages_per_flow: u64,
     pub gameplay_potential_writes_per_flow: u64,
+    /// Number of auth flows represented by one coordinated game flow. Legacy
+    /// mode remains one; `default_match` reserves a complete pair.
+    pub auth_flows_per_game_flow: u64,
 }
 
 pub fn estimate_game_run(scenario: &Scenario) -> Result<GameRunBudgetEstimate, String> {
@@ -75,8 +78,19 @@ pub fn estimate_game_run(scenario: &Scenario) -> Result<GameRunBudgetEstimate, S
             kcp_connections_per_flow: MIN_GAME_CONNECTIONS_PER_FLOW,
             game_messages_per_flow: MIN_GAME_MESSAGES_PER_FLOW,
             gameplay_potential_writes_per_flow: 0,
+            auth_flows_per_game_flow: 1,
         });
     };
+    if gameplay.coordination == LiveGameplayCoordination::TwoPlayerDefaultMatch {
+        // Two KCP sessions each send AuthReq+PingReq. The mutable room plan is
+        // join x2, ready x2, start x1, one input per player, leave x2.
+        return Ok(GameRunBudgetEstimate {
+            kcp_connections_per_flow: 2,
+            game_messages_per_flow: 13,
+            gameplay_potential_writes_per_flow: 36,
+            auth_flows_per_game_flow: 2,
+        });
+    }
     let business_messages = u64::from(gameplay.max_frame_inputs)
         .checked_add(2)
         .ok_or("live gameplay message estimate overflowed")?;
@@ -98,6 +112,7 @@ pub fn estimate_game_run(scenario: &Scenario) -> Result<GameRunBudgetEstimate, S
         kcp_connections_per_flow: MIN_GAME_CONNECTIONS_PER_FLOW + extra_connections,
         game_messages_per_flow,
         gameplay_potential_writes_per_flow,
+        auth_flows_per_game_flow: 1,
     })
 }
 
@@ -112,6 +127,7 @@ pub fn validate_game_run_budget(
             kcp_connections_per_flow: MIN_GAME_CONNECTIONS_PER_FLOW,
             game_messages_per_flow: MIN_GAME_MESSAGES_PER_FLOW,
             gameplay_potential_writes_per_flow: 0,
+            auth_flows_per_game_flow: 1,
         },
     )
 }
@@ -129,8 +145,11 @@ fn validate_game_run_budget_with_estimate(
     budget: &HardBudget,
     game: GameRunBudgetEstimate,
 ) -> Result<(), String> {
-    let kcp_connections = auth
-        .scheduled_flows
+    if auth.scheduled_flows % game.auth_flows_per_game_flow != 0 {
+        return Err("game coordination does not divide the scheduled auth flows".into());
+    }
+    let game_flows = auth.scheduled_flows / game.auth_flows_per_game_flow;
+    let kcp_connections = game_flows
         .checked_mul(game.kcp_connections_per_flow)
         .ok_or("game connection budget estimate overflowed")?;
     let operations = auth
@@ -138,7 +157,7 @@ fn validate_game_run_budget_with_estimate(
         .checked_add(
             kcp_connections
                 .checked_add(
-                    auth.scheduled_flows
+                    game_flows
                         .checked_mul(game.game_messages_per_flow)
                         .ok_or("game operation budget estimate overflowed")?,
                 )
@@ -154,7 +173,7 @@ fn validate_game_run_budget_with_estimate(
     let potential_data_writes = auth
         .potential_data_writes
         .checked_add(
-            auth.scheduled_flows
+            game_flows
                 .checked_mul(game.gameplay_potential_writes_per_flow)
                 .ok_or("game write budget estimate overflowed")?,
         )
@@ -166,13 +185,17 @@ fn validate_game_run_budget_with_estimate(
         ));
     }
     let available_duration_ms = auth.scenario_duration_secs.saturating_mul(1_000);
+    // Auth HTTP uses `Connection: close`, so every possible HTTP attempt and
+    // every KCP connect consume the same runtime new-connection limiter.
+    let total_new_connections = auth
+        .http_operations
+        .checked_add(kcp_connections)
+        .ok_or("game connection budget estimate overflowed")?;
     let connection_admission_ms =
-        minimum_admission_ms(kcp_connections, budget.max_new_connections_per_second)?;
+        minimum_admission_ms(total_new_connections, budget.max_new_connections_per_second)?;
     let message_admission_ms = minimum_admission_ms(
-        auth.http_operations.saturating_add(
-            auth.scheduled_flows
-                .saturating_mul(game.game_messages_per_flow),
-        ),
+        auth.http_operations
+            .saturating_add(game_flows.saturating_mul(game.game_messages_per_flow)),
         budget
             .max_business_messages_per_second
             .min(budget.max_messages_per_connection_per_second),
@@ -180,7 +203,7 @@ fn validate_game_run_budget_with_estimate(
     if connection_admission_ms >= available_duration_ms
         || message_admission_ms >= available_duration_ms
     {
-        return Err("auth+game scenario cannot admit its KCP connection and player messages within the duration budget".into());
+        return Err("auth+game scenario cannot admit its HTTP+KCP connections and player messages within the duration budget".into());
     }
     Ok(())
 }
@@ -734,7 +757,7 @@ mod tests {
     }
 
     #[test]
-    fn game_connection_rate_counts_only_kcp_connections() {
+    fn game_connection_rate_combines_http_and_kcp_when_the_window_allows_both() {
         let scenario = auth_scenario(LoadModel::FixedConcurrency {
             virtual_players: 1,
             duration_secs: 10,
@@ -746,9 +769,41 @@ mod tests {
         constrained.max_business_messages_per_second = 1.0;
         constrained.max_messages_per_connection_per_second = 1.0;
 
-        // The existing auth estimate accounts for its HTTP connection. The
-        // game extension must reserve only the additional KCP connection.
+        // The auth HTTP attempt and the additional KCP connect share this
+        // limit, but two admissions at 0.2/s still fit within ten seconds.
         assert!(validate_game_run_budget(&estimate, &constrained).is_ok());
+    }
+
+    #[test]
+    fn game_connection_rate_combines_http_and_kcp_connections_within_one_window() {
+        let scenario = auth_scenario(LoadModel::FixedConcurrency {
+            virtual_players: 1,
+            duration_secs: 2,
+        });
+        let mut constrained = HardBudget {
+            max_virtual_players: 1,
+            max_login_qps: 1.0,
+            max_new_connections_per_second: 0.5,
+            max_business_messages_per_second: 10.0,
+            max_messages_per_connection_per_second: 10.0,
+            max_duration_secs: 2,
+            max_total_operations: 4,
+            max_error_rate: 0.1,
+            max_connection_failure_rate: 0.1,
+            max_p99_ms: 1_000,
+            max_data_writes: 3,
+        };
+        let estimate = estimate_auth_run(&scenario, &constrained).unwrap();
+        // One HTTP attempt and one KCP connection each need no spacing on
+        // their own. Together the shared 0.5 conn/s limiter needs 2 seconds,
+        // which is not allowed to consume the full bounded window.
+        assert_eq!(estimate.minimum_connection_admission_ms, 0);
+        let error =
+            validate_game_run_budget_for_scenario(&estimate, &scenario, &constrained).unwrap_err();
+        assert!(error.contains("HTTP+KCP connections"));
+
+        constrained.max_new_connections_per_second = 1.0;
+        assert!(validate_game_run_budget_for_scenario(&estimate, &scenario, &constrained).is_ok());
     }
 
     #[test]
@@ -765,6 +820,7 @@ mod tests {
             lockstep_scenario_json: include_str!("../../lockstep-client/scenarios/move_stop.json")
                 .into(),
             max_frame_inputs: 1,
+            coordination: LiveGameplayCoordination::SinglePlayer,
             reconnect: Some(LiveGameplayReconnect {
                 last_character_push_sequence: 0,
                 reconnect_policy: crate::config::ReconnectPolicyConfig {
@@ -785,6 +841,52 @@ mod tests {
         constrained.max_total_operations = estimate.http_operations + 8;
         constrained.max_data_writes = estimate.potential_data_writes + 19;
         assert!(validate_game_run_budget_for_scenario(&estimate, &scenario, &constrained).is_err());
+    }
+
+    #[test]
+    fn two_player_default_match_reserves_a_complete_pair_and_ready_start_writes() {
+        let mut scenario = auth_scenario(LoadModel::Staged {
+            stages: vec![LoadStage {
+                name: "pair".into(),
+                virtual_players: 2,
+                duration_secs: 31,
+            }],
+        });
+        scenario.auth.as_mut().unwrap().operations = vec![
+            AuthOperation::Login,
+            AuthOperation::ListCharacters,
+            AuthOperation::SelectCharacter,
+            AuthOperation::IssueTicket,
+            AuthOperation::Logout,
+        ];
+        scenario.writes_data = true;
+        scenario.live_gameplay = Some(LiveGameplayScenario {
+            room_id: "approved-room".into(),
+            policy_id: "default_match".into(),
+            profile: crate::gameplay::PlayerProfile::Normal,
+            lockstep_scenario_json: include_str!("../../lockstep-client/scenarios/move_stop.json")
+                .into(),
+            max_frame_inputs: 1,
+            coordination: LiveGameplayCoordination::TwoPlayerDefaultMatch,
+            reconnect: None,
+        });
+        let estimate = estimate_auth_run(&scenario, &budget()).unwrap();
+        let game = estimate_game_run(&scenario).unwrap();
+        assert_eq!(game.auth_flows_per_game_flow, 2);
+        assert_eq!(game.kcp_connections_per_flow, 2);
+        assert_eq!(game.game_messages_per_flow, 13);
+        assert_eq!(game.gameplay_potential_writes_per_flow, 36);
+        let mut constrained = budget();
+        constrained.max_virtual_players = 2;
+        // `list_characters` retains its existing two retry reservations, so
+        // the hard estimate is 14 HTTP attempts + 2 KCP connects + 13 KCP
+        // messages, even though a no-retry happy path executes 25 operations.
+        constrained.max_total_operations = 28;
+        constrained.max_data_writes = 51;
+        assert!(validate_game_run_budget_for_scenario(&estimate, &scenario, &constrained).is_err());
+        constrained.max_total_operations = 29;
+        constrained.max_data_writes = 52;
+        assert!(validate_game_run_budget_for_scenario(&estimate, &scenario, &constrained).is_ok());
     }
 
     #[test]

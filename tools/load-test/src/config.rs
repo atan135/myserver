@@ -145,6 +145,18 @@ pub struct Scenario {
 pub const MAX_LIVE_GAMEPLAY_FRAME_INPUTS: u32 = 8;
 pub const MAX_LIVE_GAMEPLAY_SCENARIO_BYTES: usize = 64 * 1024;
 
+/// Live gameplay normally retains the established one-account flow. The
+/// two-player mode is deliberately opt-in because it holds two independent
+/// account leases and drives a room lifecycle that cannot be expressed as two
+/// unrelated player sessions.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LiveGameplayCoordination {
+    #[default]
+    SinglePlayer,
+    TwoPlayerDefaultMatch,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct LiveGameplayScenario {
@@ -156,6 +168,10 @@ pub struct LiveGameplayScenario {
     pub profile: PlayerProfile,
     pub lockstep_scenario_json: String,
     pub max_frame_inputs: u32,
+    /// Defaults to the legacy one-account path. Multiplayer is enabled only
+    /// by an explicit two-player default-match profile.
+    #[serde(default)]
+    pub coordination: LiveGameplayCoordination,
     /// One deliberate KCP reconnect plus ticket-bound room reconnect.
     #[serde(default)]
     pub reconnect: Option<LiveGameplayReconnect>,
@@ -693,6 +709,48 @@ impl LoadTestConfig {
                     .validate()
                     .map_err(|error| ConfigError::Rejected(error.to_string()))?;
             }
+            if gameplay.coordination == LiveGameplayCoordination::TwoPlayerDefaultMatch {
+                if gameplay.policy_id != "default_match" {
+                    return Err(ConfigError::Rejected(
+                        "two-player live gameplay requires policy_id=default_match".into(),
+                    ));
+                }
+                if gameplay.reconnect.is_some() {
+                    return Err(ConfigError::Rejected(
+                        "two-player live gameplay does not permit reconnect".into(),
+                    ));
+                }
+                if gameplay.max_frame_inputs != 1 {
+                    return Err(ConfigError::Rejected(
+                        "two-player live gameplay requires max_frame_inputs=1 per player".into(),
+                    ));
+                }
+                let auth = self.scenario.auth.as_ref().ok_or_else(|| {
+                    ConfigError::Rejected(
+                        "two-player live gameplay requires an explicit auth scenario".into(),
+                    )
+                })?;
+                if auth.allow_same_account_concurrency {
+                    return Err(ConfigError::Rejected(
+                        "two-player live gameplay forbids same-account concurrency".into(),
+                    ));
+                }
+                match &self.scenario.load {
+                    LoadModel::Staged { stages }
+                        if stages.len() == 1 && stages[0].virtual_players == 2 => {}
+                    _ => {
+                        return Err(ConfigError::Rejected(
+                            "two-player live gameplay requires one staged wave with virtual_players=2".into(),
+                        ));
+                    }
+                }
+                if self.account_prepare.account_count.unwrap_or(0) < 2 {
+                    return Err(ConfigError::Rejected(
+                        "two-player live gameplay requires account_prepare.account_count >= 2"
+                            .into(),
+                    ));
+                }
+            }
         }
         Ok(())
     }
@@ -990,6 +1048,7 @@ mod tests {
             lockstep_scenario_json: include_str!("../../lockstep-client/scenarios/move_stop.json")
                 .into(),
             max_frame_inputs: 1,
+            coordination: LiveGameplayCoordination::SinglePlayer,
             reconnect: None,
         });
         enabled.validate_structural().unwrap();
@@ -1016,6 +1075,124 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("room_id")
+        );
+    }
+
+    #[test]
+    fn two_player_default_match_is_explicit_and_fail_closed() {
+        let mut value = config();
+        value.scenario.writes_data = true;
+        value.budget.max_virtual_players = 2;
+        value.budget.max_data_writes = 64;
+        value.account_prepare.account_count = Some(2);
+        value.scenario.auth = Some(AuthScenario {
+            operations: vec![
+                AuthOperation::Login,
+                AuthOperation::SelectCharacter,
+                AuthOperation::IssueTicket,
+                AuthOperation::Logout,
+            ],
+            allow_same_account_concurrency: false,
+            same_account_session_effect: None,
+        });
+        value.scenario.load = LoadModel::Staged {
+            stages: vec![LoadStage {
+                name: "pair".into(),
+                virtual_players: 2,
+                duration_secs: 31,
+            }],
+        };
+        value.scenario.live_gameplay = Some(LiveGameplayScenario {
+            room_id: "approved-room".into(),
+            policy_id: "default_match".into(),
+            profile: PlayerProfile::Normal,
+            lockstep_scenario_json: include_str!("../../lockstep-client/scenarios/move_stop.json")
+                .into(),
+            max_frame_inputs: 1,
+            coordination: LiveGameplayCoordination::TwoPlayerDefaultMatch,
+            reconnect: None,
+        });
+        value.validate_structural().unwrap();
+
+        value.scenario.live_gameplay.as_mut().unwrap().policy_id = "movement_demo".into();
+        assert!(
+            value
+                .validate_structural()
+                .unwrap_err()
+                .to_string()
+                .contains("default_match")
+        );
+        value.scenario.live_gameplay.as_mut().unwrap().policy_id = "default_match".into();
+        value
+            .scenario
+            .auth
+            .as_mut()
+            .unwrap()
+            .allow_same_account_concurrency = true;
+        value
+            .scenario
+            .auth
+            .as_mut()
+            .unwrap()
+            .same_account_session_effect = Some(SessionEffect::SessionKick);
+        assert!(
+            value
+                .validate_structural()
+                .unwrap_err()
+                .to_string()
+                .contains("same-account")
+        );
+        value
+            .scenario
+            .auth
+            .as_mut()
+            .unwrap()
+            .allow_same_account_concurrency = false;
+        value
+            .scenario
+            .auth
+            .as_mut()
+            .unwrap()
+            .same_account_session_effect = None;
+        value.scenario.live_gameplay.as_mut().unwrap().reconnect = Some(LiveGameplayReconnect {
+            last_character_push_sequence: 0,
+            reconnect_policy: ReconnectPolicyConfig {
+                max_attempts: 1,
+                base_delay_ms: 1,
+                max_delay_ms: 1,
+                max_jitter_ms: 0,
+            },
+        });
+        assert!(
+            value
+                .validate_structural()
+                .unwrap_err()
+                .to_string()
+                .contains("reconnect")
+        );
+        value.scenario.live_gameplay.as_mut().unwrap().reconnect = None;
+        value.account_prepare.account_count = Some(1);
+        assert!(
+            value
+                .validate_structural()
+                .unwrap_err()
+                .to_string()
+                .contains("account_count")
+        );
+        value.account_prepare.account_count = Some(2);
+        value.scenario.load = LoadModel::Staged {
+            stages: vec![LoadStage {
+                name: "single".into(),
+                virtual_players: 1,
+                duration_secs: 31,
+            }],
+        };
+        assert!(
+            value
+                .validate_structural()
+                .unwrap_err()
+                .to_string()
+                .contains("virtual_players=2")
         );
     }
 

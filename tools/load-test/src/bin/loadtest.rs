@@ -24,7 +24,8 @@ use loadtest_core::calibration::{
     progressive_levels, run_local_workload,
 };
 use loadtest_core::config::{
-    BudgetOverride, LoadModel, LoadTestConfig, RunAccess, load_config, load_private_config,
+    BudgetOverride, LiveGameplayCoordination, LoadModel, LoadTestConfig, RunAccess, load_config,
+    load_private_config,
 };
 use loadtest_core::contracts::{RunPlan, single_process_assignment};
 use loadtest_core::game_kcp::{GameProxyEndpoint, ReconnectPolicy};
@@ -567,7 +568,15 @@ fn run_live(cli: &Cli) -> Result<(), String> {
         .as_ref()
         .ok_or("--execute-auth requires scenario.auth operations")?;
     if game_mode {
-        validate_live_game_load_model(&config.scenario.load)?;
+        validate_live_game_load_model(
+            &config.scenario.load,
+            config
+                .scenario
+                .live_gameplay
+                .as_ref()
+                .map(|gameplay| gameplay.coordination)
+                .unwrap_or_default(),
+        )?;
     } else {
         validate_live_auth_load_model(&config.scenario.load)?;
     }
@@ -602,6 +611,14 @@ fn run_live(cli: &Cli) -> Result<(), String> {
     } else {
         (auth.operations.clone(), false)
     };
+    let two_player_default_match = game_mode
+        && config
+            .scenario
+            .live_gameplay
+            .as_ref()
+            .is_some_and(|gameplay| {
+                gameplay.coordination == LiveGameplayCoordination::TwoPlayerDefaultMatch
+            });
     if game_mode
         && !game_auth_operations.iter().any(|operation| {
             matches!(
@@ -734,6 +751,318 @@ fn run_live(cli: &Cli) -> Result<(), String> {
             }
             if revalidate_or_abort(&protection, &mut abort).is_some() {
                 break;
+            }
+            if two_player_default_match {
+                // The structural gate permits exactly one staged wave with two
+                // players. Consume it as a single owned room lifecycle rather
+                // than silently turning it into two independent game flows.
+                if index != 0 {
+                    continue;
+                }
+                let Some(second_action) = tick.actions.get(1) else {
+                    errors.push(
+                        "two_player_match_wave_invalid",
+                        "two-player default_match wave did not contain both players",
+                        Default::default(),
+                    );
+                    failed = true;
+                    break;
+                };
+                let action_deadline = [action, second_action]
+                    .iter()
+                    .filter_map(|action| {
+                        action.window_end_ms.map(|window_end_ms| {
+                            monotonic_started + Duration::from_millis(window_end_ms)
+                        })
+                    })
+                    .fold(monotonic_deadline, |deadline, stage_deadline| {
+                        deadline.min(stage_deadline)
+                    });
+                let mut executions = Vec::with_capacity(2);
+                let mut pre_game_auth_completed = Vec::with_capacity(2);
+                for lease in leases.iter().take(2) {
+                    let password = match secret_provider.password_for(&lease.logical_account_id) {
+                        Ok(password) => password,
+                        Err(_) => {
+                            errors.push(
+                                "auth_secret_unavailable",
+                                "secret provider could not resolve a required credential",
+                                Default::default(),
+                            );
+                            failed = true;
+                            break;
+                        }
+                    };
+                    let execution = execute_auth_operations(
+                        &mut transport,
+                        &game_auth_operations,
+                        &format!("{}_auth", config.account_prepare.character_name_prefix),
+                        &lease.logical_account_id,
+                        &password,
+                        |_, request| {
+                            dispatch_admission
+                                .admit(request, action_deadline, || {
+                                    abort.check_ctrl_c(&ctrl_c);
+                                    abort.check_stop_file(
+                                        config.stop_file.as_deref().map(Path::new),
+                                    );
+                                    abort.check_deadline(unix_ms(), deadline_unix_ms);
+                                    if abort.should_stop_new_sessions()
+                                        || revalidate_or_abort(&protection, &mut abort).is_some()
+                                    {
+                                        return Err(
+                                            "auth admission stopped before request dispatch".into(),
+                                        );
+                                    }
+                                    Ok(())
+                                })
+                                .map_err(|error| map_auth_admission_to_string(&mut abort, error))
+                        },
+                    );
+                    let completed = execution.error.is_none();
+                    if !completed {
+                        errors.push(
+                            "auth_operation_failed",
+                            "an auth operation failed; report categories contain no identity or secret",
+                            Default::default(),
+                        );
+                        failed = true;
+                    }
+                    pre_game_auth_completed.push(completed);
+                    executions.push(execution);
+                    if !completed {
+                        break;
+                    }
+                }
+
+                let mut completed_game_sessions = 0_u64;
+                if executions.len() == 2
+                    && pre_game_auth_completed.iter().all(|completed| *completed)
+                {
+                    let mut tickets = Vec::with_capacity(2);
+                    for execution in &mut executions {
+                        match execution.take_game_credentials() {
+                            Some((ticket, _)) => tickets.push(ticket),
+                            None => {
+                                errors.push(
+                                    "game_ticket_missing",
+                                    "auth completed without a transferable game ticket",
+                                    Default::default(),
+                                );
+                                failed = true;
+                            }
+                        }
+                    }
+                    for _ in 0..2 {
+                        if failed {
+                            break;
+                        }
+                        if let Err(error) =
+                            dispatch_admission.admit_game_connection(action_deadline, || {
+                                abort.check_ctrl_c(&ctrl_c);
+                                abort.check_stop_file(config.stop_file.as_deref().map(Path::new));
+                                abort.check_deadline(unix_ms(), deadline_unix_ms);
+                                if abort.should_stop_new_sessions()
+                                    || revalidate_or_abort(&protection, &mut abort).is_some()
+                                {
+                                    return Err("game connection admission stopped".into());
+                                }
+                                Ok(())
+                            })
+                        {
+                            let _ = map_auth_admission_to_game_error(&mut abort, error);
+                            errors.push(
+                                "game_connection_admission_failed",
+                                "game connection was rejected before KCP setup",
+                                Default::default(),
+                            );
+                            failed = true;
+                        }
+                    }
+                    if !failed && tickets.len() == 2 {
+                        let remaining = action_deadline.saturating_duration_since(Instant::now());
+                        let game_result = match (
+                            LiveKcpTransport::new(
+                                Instant::now() + remaining,
+                                game_runner.max_body_len,
+                            ),
+                            LiveKcpTransport::new(
+                                Instant::now() + remaining,
+                                game_runner.max_body_len,
+                            ),
+                            tokio::runtime::Builder::new_current_thread()
+                                .enable_io()
+                                .enable_time()
+                                .build(),
+                        ) {
+                            (Ok(mut first), Ok(mut second), Ok(runtime)) => {
+                                runtime.block_on(game_runner.run_live_two_player_default_match_kcp(
+                                    GameExecutionGate {
+                                        execute_game: cli.execute_game,
+                                        confirm_game: cli.confirm_game.as_deref(),
+                                        environment: &config.environment.name,
+                                        account_manifest_supplied: cli.account_manifest.is_some(),
+                                        private_config_supplied: cli.private_config.is_some(),
+                                    },
+                                    [&mut first, &mut second],
+                                    &config,
+                                    RunAccess {
+                                        allow_remote: cli.allow_remote,
+                                        confirmation: cli.confirmation.as_deref(),
+                                    },
+                                    endpoint.as_ref().expect("game mode creates endpoint"),
+                                    &mut account_pool,
+                                    [leases[0].clone(), leases[1].clone()],
+                                    [&tickets[0], &tickets[1]],
+                                    |checkpoint| {
+                                        let mut control = || -> Result<(), String> {
+                                            abort.check_ctrl_c(&ctrl_c);
+                                            abort.check_stop_file(
+                                                config.stop_file.as_deref().map(Path::new),
+                                            );
+                                            abort.check_deadline(unix_ms(), deadline_unix_ms);
+                                            if abort.should_stop_new_sessions()
+                                                || revalidate_or_abort(&protection, &mut abort)
+                                                    .is_some()
+                                            {
+                                                return Err(
+                                                    "game execution checkpoint stopped".into()
+                                                );
+                                            }
+                                            Ok(())
+                                        };
+                                        control().map_err(|_| {
+                                            GameLiveError::Transport(
+                                                "game execution checkpoint stopped",
+                                            )
+                                        })?;
+                                        match checkpoint {
+                                            GameRunnerCheckpoint::OutboundMessage => {
+                                                dispatch_admission
+                                                    .admit_game_message(action_deadline, control)
+                                                    .map_err(|error| {
+                                                        map_auth_admission_to_game_error(
+                                                            &mut abort, error,
+                                                        )
+                                                    })?;
+                                            }
+                                            GameRunnerCheckpoint::GameplayOutboundMessage => {
+                                                dispatch_admission
+                                                    .admit_gameplay_message(
+                                                        LIVE_GAMEPLAY_POTENTIAL_WRITES_PER_MESSAGE,
+                                                        action_deadline,
+                                                        control,
+                                                    )
+                                                    .map_err(|error| {
+                                                        map_auth_admission_to_game_error(
+                                                            &mut abort, error,
+                                                        )
+                                                    })?;
+                                            }
+                                            GameRunnerCheckpoint::ReconnectConnection => {
+                                                dispatch_admission
+                                                    .admit_game_connection(action_deadline, control)
+                                                    .map_err(|error| {
+                                                        map_auth_admission_to_game_error(
+                                                            &mut abort, error,
+                                                        )
+                                                    })?;
+                                            }
+                                            GameRunnerCheckpoint::Control => {}
+                                        }
+                                        Ok(())
+                                    },
+                                ))
+                            }
+                            _ => Err(GameLiveError::Transport(
+                                "could not create guarded two-player KCP transport or runtime",
+                            )),
+                        };
+                        match game_result {
+                            Ok(result) if result.players.iter().all(|player| {
+                                player.terminal_state
+                                    == loadtest_core::virtual_player::VirtualPlayerSessionState::Closed
+                            }) => {
+                                for player in result.players {
+                                    if let Some(metrics) = player.gameplay_metrics.as_ref() {
+                                        core_metrics.merge_snapshot(metrics);
+                                    }
+                                    completed_game_sessions += 1;
+                                }
+                            }
+                            Ok(_) => {
+                                errors.push(
+                                    "game_session_failed",
+                                    "two-player KCP game session did not complete",
+                                    Default::default(),
+                                );
+                                failed = true;
+                            }
+                            Err(error) => {
+                                if let Some(metrics) = error.gameplay_metrics() {
+                                    core_metrics.merge_snapshot(metrics);
+                                }
+                                errors.push(
+                                    "game_session_failed",
+                                    "two-player KCP game session did not complete",
+                                    Default::default(),
+                                );
+                                failed = true;
+                            }
+                        }
+                    }
+                }
+                for (execution, pre_game_auth_completed) in
+                    executions.iter_mut().zip(pre_game_auth_completed)
+                {
+                    if deferred_logout && pre_game_auth_completed {
+                        if !can_attempt_deferred_logout(
+                            deferred_logout,
+                            pre_game_auth_completed,
+                            &abort,
+                        ) {
+                            errors.push(
+                                "deferred_logout_not_dispatched",
+                                deferred_logout_skip_message(&abort),
+                                Default::default(),
+                            );
+                            failed = true;
+                        } else if execute_deferred_logout(&mut transport, execution, |request| {
+                            dispatch_admission
+                                .admit(request, action_deadline, || {
+                                    abort.check_ctrl_c(&ctrl_c);
+                                    abort.check_stop_file(
+                                        config.stop_file.as_deref().map(Path::new),
+                                    );
+                                    abort.check_deadline(unix_ms(), deadline_unix_ms);
+                                    if abort.should_stop_new_sessions()
+                                        || revalidate_or_abort(&protection, &mut abort).is_some()
+                                    {
+                                        return Err("deferred logout stopped".into());
+                                    }
+                                    Ok(())
+                                })
+                                .map_err(|error| map_auth_admission_to_string(&mut abort, error))
+                        })
+                        .is_err()
+                        {
+                            errors.push(
+                                "deferred_logout_failed",
+                                "post-game logout failed",
+                                Default::default(),
+                            );
+                            failed = true;
+                        }
+                    }
+                    finish_live_action(&mut auth_metrics, &execution.metrics, &mut abort, &budget);
+                }
+                for _ in 0..completed_game_sessions {
+                    record_completed_game_session_metrics(&mut core_metrics);
+                }
+                if failed {
+                    break;
+                }
+                continue;
             }
             let lease = &leases[index % leases.len()];
             let action_deadline = action
@@ -1104,13 +1433,23 @@ fn validate_live_auth_load_model(model: &LoadModel) -> Result<(), String> {
     }
 }
 
-fn validate_live_game_load_model(model: &LoadModel) -> Result<(), String> {
-    match model {
-        LoadModel::FixedConcurrency {
+fn validate_live_game_load_model(
+    model: &LoadModel,
+    coordination: LiveGameplayCoordination,
+) -> Result<(), String> {
+    match (coordination, model) {
+        (
+            LiveGameplayCoordination::TwoPlayerDefaultMatch,
+            LoadModel::Staged { stages },
+        ) if stages.len() == 1 && stages[0].virtual_players == 2 => Ok(()),
+        (LiveGameplayCoordination::TwoPlayerDefaultMatch, _) => Err(
+            "two-player live game runner requires one staged wave with virtual_players=2".into(),
+        ),
+        (_, LoadModel::FixedConcurrency {
             virtual_players: 1,
             ..
-        } => Ok(()),
-        LoadModel::Staged { stages }
+        }) => Ok(()),
+        (_, LoadModel::Staged { stages })
             if stages.len() == 1 && stages[0].virtual_players == 1 =>
         {
             Ok(())

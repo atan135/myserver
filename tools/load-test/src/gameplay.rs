@@ -17,7 +17,7 @@ use thiserror::Error;
 use crate::metrics::{Metrics, MetricsSnapshot};
 use crate::pb::{
     FrameBundlePush, GetInventoryReq, ItemEquipReq, ItemUseReq, MoveInputReq, MoveInputType,
-    PlayerInputReq, RoomJoinReq, RoomLeaveReq,
+    PlayerInputReq, RoomJoinReq, RoomLeaveReq, RoomReadyReq, RoomStartReq,
 };
 use crate::step::{ExpectedResponse, Idempotency, RetryPolicy, ScenarioStep};
 
@@ -32,6 +32,16 @@ pub enum PlayerProfile {
     Idle,
     Normal,
     HighFrequency,
+}
+
+/// A globally ordered packet for the narrowly scoped two-account
+/// `default_match` smoke. The packet body is still generated from the shared
+/// protobuf type; `player_index` only selects the already-authenticated
+/// session that sends it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoordinatedGameplayPacket {
+    pub player_index: usize,
+    pub packet: PlannedPacket,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -231,6 +241,95 @@ impl GameplayProfilePlan {
         ));
         Ok(packets)
     }
+
+    /// Builds the only supported multiplayer smoke order. Inputs are bounded
+    /// per player by the caller; the controlled smoke consumes exactly one
+    /// generated input for each participant.
+    pub fn two_player_default_match_packet_plan(
+        &self,
+        room_id: &str,
+        policy_id: &str,
+        max_frame_inputs: u32,
+    ) -> Result<Vec<CoordinatedGameplayPacket>, GameplayError> {
+        if room_id.trim().is_empty() || policy_id != "default_match" {
+            return Err(GameplayError::InvalidRoomPlan);
+        }
+        if max_frame_inputs == 0 || self.lockstep_inputs.is_empty() {
+            return Err(GameplayError::MissingFrameInput);
+        }
+        let input = self
+            .lockstep_inputs
+            .first()
+            .expect("non-empty lockstep input was checked");
+        let rate = self.max_messages_per_connection_per_second;
+        let mut sequence = 1;
+        let mut planned = Vec::with_capacity(9);
+        let mut push = |player_index: usize, step: GameplayStep, body: Vec<u8>| {
+            planned.push(CoordinatedGameplayPacket {
+                player_index,
+                packet: PlannedPacket {
+                    packet: game_protocol::encode_packet(step.request_type, sequence, &body),
+                    step,
+                    sequence,
+                },
+            });
+            sequence += 1;
+        };
+        push(
+            0,
+            room_join_step(rate),
+            game_protocol::encode_body(&RoomJoinReq {
+                room_id: room_id.to_owned(),
+                policy_id: policy_id.to_owned(),
+            }),
+        );
+        push(
+            1,
+            room_join_step(rate),
+            game_protocol::encode_body(&RoomJoinReq {
+                room_id: room_id.to_owned(),
+                policy_id: policy_id.to_owned(),
+            }),
+        );
+        push(
+            0,
+            room_ready_step(rate),
+            game_protocol::encode_body(&RoomReadyReq { ready: true }),
+        );
+        push(
+            1,
+            room_ready_step(rate),
+            game_protocol::encode_body(&RoomReadyReq { ready: true }),
+        );
+        push(
+            0,
+            room_start_step(rate),
+            game_protocol::encode_body(&RoomStartReq {}),
+        );
+        for player_index in 0..=1 {
+            push(
+                player_index,
+                player_input_step(rate),
+                game_protocol::encode_body(&PlayerInputReq {
+                    frame_id: input.frame_id,
+                    action: input.action.clone(),
+                    payload_json: input.payload_json.clone(),
+                    client_timestamp_ms: 1,
+                }),
+            );
+        }
+        push(
+            0,
+            room_leave_step(rate),
+            game_protocol::encode_body(&RoomLeaveReq {}),
+        );
+        push(
+            1,
+            room_leave_step(rate),
+            game_protocol::encode_body(&RoomLeaveReq {}),
+        );
+        Ok(planned)
+    }
 }
 
 /// Enforces the declared legal per-connection send rate in the live runner.
@@ -378,6 +477,26 @@ pub fn room_leave_step(max_rate: u32) -> GameplayStep {
         "room_leave",
         MessageType::RoomLeaveReq,
         Some(MessageType::RoomLeaveRes),
+        Idempotency::IdempotentWrite,
+        max_rate,
+    )
+}
+
+pub fn room_ready_step(max_rate: u32) -> GameplayStep {
+    step(
+        "room_ready",
+        MessageType::RoomReadyReq,
+        Some(MessageType::RoomReadyRes),
+        Idempotency::IdempotentWrite,
+        max_rate,
+    )
+}
+
+pub fn room_start_step(max_rate: u32) -> GameplayStep {
+    step(
+        "room_start",
+        MessageType::RoomStartReq,
+        Some(MessageType::RoomStartRes),
         Idempotency::IdempotentWrite,
         max_rate,
     )
@@ -624,6 +743,9 @@ impl RoomFlowTracker {
                 self.begin_reconnect(packet.sequence, started_ms, packet.packet.len());
                 Ok(())
             }
+            MessageType::RoomReadyReq | MessageType::RoomStartReq => {
+                self.begin_action(packet, started_ms)
+            }
             MessageType::PlayerInputReq => {
                 let input = PlayerInputReq::decode(packet.body()?)
                     .map_err(|_| GameplayError::InvalidBody)?;
@@ -690,6 +812,32 @@ impl RoomFlowTracker {
                     return Err(GameplayError::BusinessRejected(message_type));
                 }
                 self.room_id = Some(response.room_id);
+            }
+            MessageType::RoomReadyRes => {
+                let response = decode_response::<crate::pb::RoomReadyRes>(&packet)?;
+                self.complete_response(
+                    message_type,
+                    packet.header.seq,
+                    now_ms,
+                    "gameplay_step_ms",
+                )?;
+                if !response.ok || !response.ready {
+                    self.telemetry.increment("gameplay_business_errors", 1);
+                    return Err(GameplayError::BusinessRejected(message_type));
+                }
+            }
+            MessageType::RoomStartRes => {
+                let response = decode_response::<crate::pb::RoomStartRes>(&packet)?;
+                self.complete_response(
+                    message_type,
+                    packet.header.seq,
+                    now_ms,
+                    "gameplay_step_ms",
+                )?;
+                if !response.ok {
+                    self.telemetry.increment("gameplay_business_errors", 1);
+                    return Err(GameplayError::BusinessRejected(message_type));
+                }
             }
             MessageType::PlayerInputRes => {
                 let response = decode_response::<crate::pb::PlayerInputRes>(&packet)?;
@@ -1025,10 +1173,45 @@ mod tests {
     }
 
     #[test]
+    fn two_player_default_match_plan_has_the_exact_global_order() {
+        let profile =
+            GameplayProfilePlan::from_lockstep_scenario_json(PlayerProfile::Normal, MOVE_SCENARIO)
+                .unwrap();
+        let plan = profile
+            .two_player_default_match_packet_plan("approved-room", "default_match", 1)
+            .unwrap();
+        assert_eq!(plan.len(), 9);
+        assert_eq!(
+            plan.iter()
+                .map(|packet| (packet.player_index, packet.packet.step.request_type))
+                .collect::<Vec<_>>(),
+            vec![
+                (0, MessageType::RoomJoinReq),
+                (1, MessageType::RoomJoinReq),
+                (0, MessageType::RoomReadyReq),
+                (1, MessageType::RoomReadyReq),
+                (0, MessageType::RoomStartReq),
+                (0, MessageType::PlayerInputReq),
+                (1, MessageType::PlayerInputReq),
+                (0, MessageType::RoomLeaveReq),
+                (1, MessageType::RoomLeaveReq),
+            ]
+        );
+        assert!(
+            RoomReadyReq::decode(plan[2].packet.body().unwrap())
+                .unwrap()
+                .ready
+        );
+        RoomStartReq::decode(plan[4].packet.body().unwrap()).unwrap();
+    }
+
+    #[test]
     fn all_gameplay_steps_are_bounded_and_non_retrying_for_writes() {
         for step in [
             room_join_step(20),
             room_leave_step(20),
+            room_ready_step(20),
+            room_start_step(20),
             room_reconnect_step(20),
             player_input_step(20),
             move_input_step(20),

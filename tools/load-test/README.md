@@ -137,6 +137,78 @@ Because auth dispatch uses `Connection: close`, the planner also includes its
 login and ticket HTTP attempts in the new-connection budget, in addition to
 KCP proxy connects.
 
+### Two-account `default_match` smoke
+
+The legacy live gameplay path remains single-player unless the gameplay block
+explicitly sets `"coordination": "two_player_default_match"`. This mode is a
+controlled smoke for the current `default_match` policy, not a general
+multiplayer load generator. It requires all of the following before a live
+transport is created:
+
+- `policy_id: "default_match"`, an explicitly pre-provisioned unique room ID,
+  `writes_data: true`, and a non-idle generated-input profile;
+- `max_frame_inputs: 1` (one bounded input from each player), no gameplay
+  reconnect, and an auth scenario with same-account concurrency disabled;
+- exactly one staged wave with two virtual players, plus
+  `account_prepare.account_count >= 2` and two verified manifest accounts.
+
+The coordinator holds both distinct leases, authenticates and heartbeats both
+KCP sessions, then sends this deterministic room sequence:
+
+`RoomJoin(player 1) -> RoomJoin(player 2) -> RoomReady(true, player 1) ->
+RoomReady(true, player 2) -> RoomStart(player 1) -> PlayerInput(player 1) ->
+PlayerInput(player 2) -> FrameBundle(each player) -> RoomLeave(player 1) ->
+RoomLeave(player 2)`.
+
+`RoomReadyRes` and `RoomStartRes` use the same exact message-type/sequence
+correlation as the existing gameplay responses and must echo the approved room
+ID. Any rejection, mismatch, timeout, abort, or KCP error closes both sessions
+and releases both leases before deferred logout is considered for either auth
+session. A successful run dispatches each eligible final logout only after the
+two KCP sessions have closed.
+
+With the normal five auth operations per account
+(`login/list/select/ticket/logout`), this one-pair smoke emits 10 HTTP
+operations on a no-retry happy path, 2 KCP connections, 4 auth/heartbeat player
+messages, and 9 mutable gameplay messages: 25 operations and 52 potential
+writes (16 auth plus 36 room messages). The existing hard estimator also
+reserves the two permitted `list_characters` retries for each account, so an
+executable profile must set `max_total_operations >= 29`; `max_data_writes: 56`
+provides deliberate write headroom. At a staged 31-second window,
+`Connection: close` means the conservative plan can admit 16 possible HTTP/KCP
+connections, including those retry reservations. Use new-connection QPS above
+`0.5` (for example `0.6`), login QPS `0.2`, and game
+business/per-connection message rates of at least `2.0`.
+
+Credential-free shape (the room is pre-provisioned separately; this tool never
+creates or discovers it):
+
+```json
+{
+  "account_prepare": { "account_count": 2 },
+  "scenario": {
+    "load": { "type": "staged", "stages": [{ "name": "pair", "virtual_players": 2, "duration_secs": 31 }] },
+    "writes_data": true,
+    "auth": {
+      "allow_same_account_concurrency": false,
+      "operations": ["login", "list_characters", "select_character", "issue_ticket", "logout"]
+    },
+    "live_gameplay": {
+      "room_id": "<unique-approved-default-match-room>",
+      "policy_id": "default_match",
+      "coordination": "two_player_default_match",
+      "profile": "normal",
+      "lockstep_scenario_json": "<bounded scenario JSON>",
+      "max_frame_inputs": 1
+    }
+  }
+}
+```
+
+This remains subject to the normal `--execute-auth`, `--execute-game`, exact
+environment confirmations, manifest, private-config, target-protection, and
+hard-budget gates. Offline tests do not provision a room or send HTTP/KCP.
+
 Compatibility tests consume `packages/game-protocol`, generated
 `packages/proto/game.proto` messages, and the shared protocol-version policy.
 They assert the 14-byte header, message numbers, stream/no-delay KCP profile,
