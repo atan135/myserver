@@ -209,6 +209,8 @@ struct PreparedTwoPlayerGameplay {
 }
 
 const DEFAULT_MATCH_INPUT_DELAY_FRAMES: u32 = 2;
+const DEFAULT_MATCH_MAX_FRAME_DRAIN_PACKETS: usize = 64;
+const DEFAULT_MATCH_FRAME_DRAIN_IDLE_MS: u64 = 1;
 
 #[derive(Debug, Clone, Copy)]
 pub struct GameSessionRunner {
@@ -1240,12 +1242,11 @@ impl GameSessionRunner {
                     }
                 }
                 for player_index in 0..2 {
-                    let error = receive_frame_bundle(
+                    let error = drain_default_match_frame_bundles(
                         transports[player_index],
                         &mut sessions[player_index],
                         pool,
                         &mut trackers[player_index],
-                        crate::gameplay::DEFAULT_STEP_TIMEOUT_MS,
                         &mut checkpoint,
                     )
                     .await;
@@ -1937,6 +1938,104 @@ async fn receive_frame_bundle(
     }
 }
 
+/// Drains the bounded backlog of frame pushes immediately after the two
+/// default-match input admissions. An input target derived from just the
+/// first queued frame can already be expired by the time it reaches a strict
+/// room, so this ends only once the connection has been idle briefly.
+async fn drain_default_match_frame_bundles(
+    transport: &mut LiveKcpTransport,
+    session: &mut VirtualPlayerSession,
+    pool: &mut AccountLeasePool,
+    tracker: &mut RoomFlowTracker,
+    checkpoint: &mut impl FnMut(GameRunnerCheckpoint) -> Result<(), GameLiveError>,
+) -> Result<(), GameLiveError> {
+    let mut drained_packets = 0;
+    loop {
+        if let Err(error) = run_checkpoint(checkpoint, GameRunnerCheckpoint::Control) {
+            transport.close();
+            session.close(pool);
+            return Err(gameplay_failure(error, tracker));
+        }
+        if drained_packets == DEFAULT_MATCH_MAX_FRAME_DRAIN_PACKETS {
+            transport.close();
+            session.close(pool);
+            return Err(gameplay_failure(
+                "two-player default_match frame backlog exceeded the drain limit",
+                tracker,
+            ));
+        }
+        let packet_deadline =
+            Instant::now() + Duration::from_millis(DEFAULT_MATCH_FRAME_DRAIN_IDLE_MS);
+        let packet = match transport.receive_until_or_idle(packet_deadline).await {
+            Ok(Some(packet)) => packet,
+            Ok(None) => break,
+            Err(error) => {
+                transport.close();
+                session.close(pool);
+                return Err(gameplay_failure(error, tracker));
+            }
+        };
+        drained_packets += 1;
+        if packet.message_type().is_none() {
+            transport.close();
+            session.close(pool);
+            return Err(gameplay_failure(
+                "KCP default_match frame message type is invalid",
+                tracker,
+            ));
+        }
+        match session.handle_packet(pool, packet.clone()) {
+            Ok(VirtualPlayerEvent::Push {
+                message_type: MessageType::FrameBundlePush,
+                ..
+            }) => {
+                if let Err(error) = tracker.ingest(packet, monotonic_ms()) {
+                    transport.close();
+                    session.close(pool);
+                    return Err(gameplay_failure(error, tracker));
+                }
+            }
+            Ok(VirtualPlayerEvent::Push { .. }) => {
+                if let Err(error) = tracker.ingest(packet, monotonic_ms()) {
+                    transport.close();
+                    session.close(pool);
+                    return Err(gameplay_failure(error, tracker));
+                }
+            }
+            Ok(VirtualPlayerEvent::Failed) => {
+                transport.close();
+                session.close(pool);
+                return Err(gameplay_failure(
+                    "KCP default_match frame session failed",
+                    tracker,
+                ));
+            }
+            Ok(_) => {
+                transport.close();
+                session.close(pool);
+                return Err(gameplay_failure(
+                    GameLiveError::UnexpectedLifecycleEvent,
+                    tracker,
+                ));
+            }
+            Err(error) => {
+                transport.close();
+                session.close(pool);
+                return Err(gameplay_failure(error, tracker));
+            }
+        }
+    }
+    if tracker.latest_frame_id().is_none() {
+        transport.close();
+        session.close(pool);
+        return Err(gameplay_failure(
+            "two-player default_match did not receive a frame before input",
+            tracker,
+        ));
+    }
+    Ok(())
+}
+
 fn ensure_approved_room_packet(
     packet: &Packet,
     approved_room_id: &str,
@@ -2127,6 +2226,23 @@ impl LiveKcpTransport {
             .map_err(|_| GameLiveError::Transport("KCP read deadline elapsed"))?
             .map_err(|_| GameLiveError::Transport("KCP read failed"))?
             .ok_or(GameLiveError::Transport("KCP peer disconnected"))
+    }
+
+    async fn receive_until_or_idle(
+        &mut self,
+        deadline: Instant,
+    ) -> Result<Option<Packet>, GameLiveError> {
+        let remaining = self.remaining_until(deadline)?;
+        let stream = self
+            .stream
+            .as_mut()
+            .ok_or(GameLiveError::Transport("KCP transport is not connected"))?;
+        match timeout(remaining, read_packet(stream, self.max_body_len)).await {
+            Ok(Ok(Some(packet))) => Ok(Some(packet)),
+            Ok(Ok(None)) => Err(GameLiveError::Transport("KCP peer disconnected")),
+            Ok(Err(_)) => Err(GameLiveError::Transport("KCP read failed")),
+            Err(_) => Ok(None),
+        }
     }
 
     pub fn close(&mut self) {
@@ -2815,6 +2931,57 @@ mod tests {
         assert_eq!(
             default_match_shared_input_frame_id(&[first, second]).unwrap(),
             7
+        );
+    }
+
+    #[test]
+    fn default_match_frame_target_advances_when_backlog_contains_newer_frames() {
+        let mut first = RoomFlowTracker::default();
+        let mut second = RoomFlowTracker::default();
+        for tracker in [&mut first, &mut second] {
+            tracker.begin_join(1, 1, 1);
+            tracker
+                .ingest(
+                    response(
+                        MessageType::RoomJoinRes,
+                        1,
+                        &RoomJoinRes {
+                            ok: true,
+                            room_id: "approved-room".into(),
+                            error_code: String::new(),
+                        },
+                    ),
+                    2,
+                )
+                .unwrap();
+        }
+        for (tracker, frame_ids) in [(&mut first, &[70, 97][..]), (&mut second, &[71, 99][..])] {
+            for &frame_id in frame_ids {
+                tracker
+                    .ingest(
+                        response(
+                            MessageType::FrameBundlePush,
+                            0,
+                            &FrameBundlePush {
+                                room_id: "approved-room".into(),
+                                frame_id,
+                                fps: 5,
+                                inputs: Vec::new(),
+                                is_silent_frame: true,
+                                snapshot: None,
+                            },
+                        ),
+                        3,
+                    )
+                    .unwrap();
+            }
+        }
+
+        assert_eq!(first.latest_frame_id(), Some(97));
+        assert_eq!(second.latest_frame_id(), Some(99));
+        assert_eq!(
+            default_match_shared_input_frame_id(&[first, second]).unwrap(),
+            101
         );
     }
 
