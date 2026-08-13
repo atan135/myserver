@@ -251,9 +251,9 @@ struct PreparedTwoPlayerGameplay {
     packets: Vec<CoordinatedGameplayPacket>,
 }
 
-const DEFAULT_MATCH_INPUT_DELAY_FRAMES: u32 = 2;
-const DEFAULT_MATCH_MAX_FRAME_DRAIN_PACKETS: usize = 64;
-const DEFAULT_MATCH_FRAME_DRAIN_IDLE_MS: u64 = 1;
+const LIVE_INPUT_DELAY_FRAMES: u32 = 2;
+const LIVE_FRAME_DRAIN_MAX_PACKETS: usize = 64;
+const LIVE_FRAME_DRAIN_IDLE_MS: u64 = 1;
 
 #[derive(Debug, Clone, Copy)]
 pub struct GameSessionRunner {
@@ -766,21 +766,78 @@ impl GameSessionRunner {
         }
         let gameplay_metrics = if let Some(gameplay) = gameplay.as_ref() {
             let mut tracker = RoomFlowTracker::default();
+            let mut frame_bundles_after_room_start = None;
             for packet in &gameplay.before_reconnect {
                 let step = packet.step.clone();
                 let step_timeout_ms = step.timeout_ms;
-                let frame_bundles_before = tracker.metrics().frame_bundles_received;
-                let packet = match prepare_admitted_outbound_gameplay_packet(
-                    &mut session,
-                    pool,
-                    packet,
-                    &mut checkpoint,
-                ) {
-                    Ok(packet) => packet,
-                    Err(error) => {
+                let is_frame_input = packet.step.request_type == MessageType::PlayerInputReq;
+                let frame_bundles_before = if is_frame_input {
+                    // Reserve the sole outbound input before observing the
+                    // room frame, because admission itself can wait behind a
+                    // global limiter. The selected frame stays current until
+                    // its timestamp is materialized immediately before send.
+                    if let Err(error) = run_checkpoint(
+                        &mut checkpoint,
+                        GameRunnerCheckpoint::GameplayOutboundMessage,
+                    ) {
                         transport.close();
                         session.close(pool);
+                        return Err(gameplay_failure(error, &tracker));
+                    }
+                    if let Err(error) = drain_live_frame_bundles(
+                        transport,
+                        &mut session,
+                        pool,
+                        &mut tracker,
+                        frame_bundles_after_room_start,
+                        &mut checkpoint,
+                    )
+                    .await
+                    {
+                        transport.close();
                         return Err(error);
+                    }
+                    steps.push(GameRunnerStep::FrameBundleReceived);
+                    tracker.metrics().frame_bundles_received
+                } else {
+                    tracker.metrics().frame_bundles_received
+                };
+                let packet = if is_frame_input {
+                    let input_frame_id = match single_player_input_frame_id(&tracker) {
+                        Ok(frame_id) => frame_id,
+                        Err(error) => {
+                            transport.close();
+                            session.close(pool);
+                            return Err(gameplay_failure(error, &tracker));
+                        }
+                    };
+                    match prepare_outbound_gameplay_packet_with_clock_and_frame(
+                        &mut session,
+                        pool,
+                        packet,
+                        Some(input_frame_id),
+                        current_unix_ms,
+                    ) {
+                        Ok(packet) => packet,
+                        Err(error) => {
+                            transport.close();
+                            session.close(pool);
+                            return Err(gameplay_failure(error, &tracker));
+                        }
+                    }
+                } else {
+                    match prepare_admitted_outbound_gameplay_packet(
+                        &mut session,
+                        pool,
+                        packet,
+                        &mut checkpoint,
+                    ) {
+                        Ok(packet) => packet,
+                        Err(error) => {
+                            transport.close();
+                            session.close(pool);
+                            return Err(error);
+                        }
                     }
                 };
                 if let Err(error) = transport.send(&packet).await {
@@ -825,7 +882,11 @@ impl GameSessionRunner {
                         steps.push(GameRunnerStep::RoomJoined);
                     }
                     MessageType::RoomReadyRes => steps.push(GameRunnerStep::RoomReady),
-                    MessageType::RoomStartRes => steps.push(GameRunnerStep::RoomStarted),
+                    MessageType::RoomStartRes => {
+                        steps.push(GameRunnerStep::RoomStarted);
+                        frame_bundles_after_room_start =
+                            Some(tracker.metrics().frame_bundles_received);
+                    }
                     MessageType::PlayerInputRes => {
                         steps.push(GameRunnerStep::FrameInputAcknowledged);
                         if tracker.metrics().frame_bundles_received == frame_bundles_before {
@@ -1346,11 +1407,12 @@ impl GameSessionRunner {
                     }
                 }
                 for player_index in 0..2 {
-                    let error = drain_default_match_frame_bundles(
+                    let error = drain_live_frame_bundles(
                         transports[player_index],
                         &mut sessions[player_index],
                         pool,
                         &mut trackers[player_index],
+                        None,
                         &mut checkpoint,
                     )
                     .await;
@@ -1737,11 +1799,20 @@ fn default_match_shared_input_frame_id(
         .ok_or(GameLiveError::Transport(
             "two-player default_match has no shared frame observation",
         ))?;
-    shared_frame_id
-        .checked_add(DEFAULT_MATCH_INPUT_DELAY_FRAMES)
-        .ok_or(GameLiveError::Transport(
-            "two-player default_match shared frame overflowed",
-        ))
+    live_input_frame_id(shared_frame_id, "two-player default_match shared frame")
+}
+
+fn single_player_input_frame_id(tracker: &RoomFlowTracker) -> Result<u32, GameLiveError> {
+    let frame_id = tracker.latest_frame_id().ok_or(GameLiveError::Transport(
+        "single-player live gameplay did not receive a frame before input",
+    ))?;
+    live_input_frame_id(frame_id, "single-player live frame")
+}
+
+fn live_input_frame_id(frame_id: u32, context: &'static str) -> Result<u32, GameLiveError> {
+    frame_id
+        .checked_add(LIVE_INPUT_DELAY_FRAMES)
+        .ok_or(GameLiveError::Transport(context))
 }
 
 fn received_frame_after_input(tracker: &RoomFlowTracker, frame_bundles_before_input: u64) -> bool {
@@ -2042,15 +2113,15 @@ async fn receive_frame_bundle(
     }
 }
 
-/// Drains the bounded backlog of frame pushes immediately after the two
-/// default-match input admissions. An input target derived from just the
-/// first queued frame can already be expired by the time it reaches a strict
-/// room, so this ends only once the connection has been idle briefly.
-async fn drain_default_match_frame_bundles(
+/// Drains bounded frame pushes after input admission. An input target derived
+/// from the first queued frame can expire before it reaches a strict room, so
+/// the drain finishes only after the connection has briefly been idle.
+async fn drain_live_frame_bundles(
     transport: &mut LiveKcpTransport,
     session: &mut VirtualPlayerSession,
     pool: &mut AccountLeasePool,
     tracker: &mut RoomFlowTracker,
+    require_frame_after: Option<u64>,
     checkpoint: &mut impl FnMut(GameRunnerCheckpoint) -> Result<(), GameLiveError>,
 ) -> Result<(), GameLiveError> {
     let mut drained_packets = 0;
@@ -2060,16 +2131,15 @@ async fn drain_default_match_frame_bundles(
             session.close(pool);
             return Err(gameplay_failure(error, tracker));
         }
-        if drained_packets == DEFAULT_MATCH_MAX_FRAME_DRAIN_PACKETS {
+        if drained_packets == LIVE_FRAME_DRAIN_MAX_PACKETS {
             transport.close();
             session.close(pool);
             return Err(gameplay_failure(
-                "two-player default_match frame backlog exceeded the drain limit",
+                "live gameplay frame backlog exceeded the drain limit",
                 tracker,
             ));
         }
-        let packet_deadline =
-            Instant::now() + Duration::from_millis(DEFAULT_MATCH_FRAME_DRAIN_IDLE_MS);
+        let packet_deadline = Instant::now() + Duration::from_millis(LIVE_FRAME_DRAIN_IDLE_MS);
         let packet = match transport.receive_until_or_idle(packet_deadline).await {
             Ok(Some(packet)) => packet,
             Ok(None) => break,
@@ -2084,7 +2154,7 @@ async fn drain_default_match_frame_bundles(
             transport.close();
             session.close(pool);
             return Err(gameplay_failure(
-                "KCP default_match frame message type is invalid",
+                "KCP live gameplay frame message type is invalid",
                 tracker,
             ));
         }
@@ -2110,7 +2180,7 @@ async fn drain_default_match_frame_bundles(
                 transport.close();
                 session.close(pool);
                 return Err(gameplay_failure(
-                    "KCP default_match frame session failed",
+                    "KCP live gameplay frame session failed",
                     tracker,
                 ));
             }
@@ -2129,12 +2199,27 @@ async fn drain_default_match_frame_bundles(
             }
         }
     }
-    if tracker.latest_frame_id().is_none() {
+    if let Err(error) = ensure_live_frame_observation(tracker, require_frame_after) {
         transport.close();
         session.close(pool);
-        return Err(gameplay_failure(
-            "two-player default_match did not receive a frame before input",
-            tracker,
+        return Err(gameplay_failure(error, tracker));
+    }
+    Ok(())
+}
+
+fn ensure_live_frame_observation(
+    tracker: &RoomFlowTracker,
+    require_frame_after: Option<u64>,
+) -> Result<(), GameLiveError> {
+    if tracker.latest_frame_id().is_none() {
+        return Err(GameLiveError::Transport(
+            "live gameplay did not receive a frame before input",
+        ));
+    }
+    if require_frame_after.is_some_and(|before| tracker.metrics().frame_bundles_received <= before)
+    {
+        return Err(GameLiveError::Transport(
+            "live gameplay did not receive a post-start frame before input",
         ));
     }
     Ok(())
@@ -3106,6 +3191,123 @@ mod tests {
             default_match_shared_input_frame_id(&[first, second]).unwrap(),
             101
         );
+    }
+
+    #[test]
+    fn single_player_input_uses_the_latest_observed_frame_plus_delay() {
+        let mut tracker = RoomFlowTracker::default();
+        tracker.begin_join(1, 1, 1);
+        tracker.ingest(room_join_response(1, true), 2).unwrap();
+        for frame_id in [70, 97, 99] {
+            tracker
+                .ingest(
+                    response(
+                        MessageType::FrameBundlePush,
+                        0,
+                        &FrameBundlePush {
+                            room_id: "approved-room".into(),
+                            frame_id,
+                            fps: 20,
+                            inputs: Vec::new(),
+                            is_silent_frame: true,
+                            snapshot: None,
+                        },
+                    ),
+                    3,
+                )
+                .unwrap();
+        }
+
+        assert_eq!(single_player_input_frame_id(&tracker).unwrap(), 101);
+        let profile = GameplayProfilePlan::from_lockstep_scenario_json(
+            crate::gameplay::PlayerProfile::Normal,
+            include_str!("../../lockstep-client/scenarios/move_stop.json"),
+        )
+        .unwrap();
+        let input = &profile
+            .packet_plan_with_input_limit("approved-room", "approved-policy", 1)
+            .unwrap()[3];
+        let materialized =
+            materialize_live_gameplay_packet(input, 1_700_000_000_000, Some(101)).unwrap();
+        assert_eq!(
+            PlayerInputReq::decode(materialized.body().unwrap())
+                .unwrap()
+                .frame_id,
+            101
+        );
+    }
+
+    #[test]
+    fn single_player_frame_target_requires_observation_and_rejects_overflow() {
+        assert!(matches!(
+            single_player_input_frame_id(&RoomFlowTracker::default()),
+            Err(GameLiveError::Transport(
+                "single-player live gameplay did not receive a frame before input"
+            ))
+        ));
+        assert!(matches!(
+            live_input_frame_id(u32::MAX, "single-player live frame"),
+            Err(GameLiveError::Transport("single-player live frame"))
+        ));
+        assert_eq!(
+            reportable_room_failure_category(&input_response_with_error(
+                3,
+                false,
+                "INPUT_FRAME_EXPIRED",
+            )),
+            Some("gameplay_input_frame_expired")
+        );
+    }
+
+    #[test]
+    fn single_player_frame_target_requires_a_post_start_observation() {
+        let mut tracker = RoomFlowTracker::default();
+        tracker.begin_join(1, 1, 1);
+        tracker.ingest(room_join_response(1, true), 2).unwrap();
+        tracker
+            .ingest(
+                response(
+                    MessageType::FrameBundlePush,
+                    0,
+                    &FrameBundlePush {
+                        room_id: "approved-room".into(),
+                        frame_id: 20,
+                        fps: 20,
+                        inputs: Vec::new(),
+                        is_silent_frame: true,
+                        snapshot: None,
+                    },
+                ),
+                3,
+            )
+            .unwrap();
+        let before_start = tracker.metrics().frame_bundles_received;
+        assert!(matches!(
+            ensure_live_frame_observation(&tracker, Some(before_start)),
+            Err(GameLiveError::Transport(
+                "live gameplay did not receive a post-start frame before input"
+            ))
+        ));
+
+        tracker
+            .ingest(
+                response(
+                    MessageType::FrameBundlePush,
+                    0,
+                    &FrameBundlePush {
+                        room_id: "approved-room".into(),
+                        frame_id: 21,
+                        fps: 20,
+                        inputs: Vec::new(),
+                        is_silent_frame: true,
+                        snapshot: None,
+                    },
+                ),
+                4,
+            )
+            .unwrap();
+        ensure_live_frame_observation(&tracker, Some(before_start)).unwrap();
+        assert_eq!(single_player_input_frame_id(&tracker).unwrap(), 23);
     }
 
     #[test]
