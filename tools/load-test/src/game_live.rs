@@ -99,6 +99,40 @@ pub enum GameLiveError {
     },
     #[error("game transport returned an unexpected lifecycle event")]
     UnexpectedLifecycleEvent,
+    #[error("live game runner failed during {phase:?}")]
+    RunnerFailed {
+        phase: GameRunnerFailurePhase,
+        #[source]
+        source: Box<GameLiveError>,
+    },
+}
+
+/// Closed runner failure phases suitable for low-cardinality reports. The
+/// source stays internal so endpoint, packet, identity, and ticket details
+/// cannot become report dimensions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GameRunnerFailurePhase {
+    ReconnectConnectionAdmission,
+    ReconnectDeadline,
+    ReconnectKcpConnect,
+    ReconnectAuth,
+    RoomReconnect,
+    RoomLeave,
+    RunnerTransportOrContract,
+}
+
+impl GameRunnerFailurePhase {
+    pub const fn report_category(self) -> &'static str {
+        match self {
+            Self::ReconnectConnectionAdmission => "game_reconnect_connection_admission_failed",
+            Self::ReconnectDeadline => "game_reconnect_deadline_failed",
+            Self::ReconnectKcpConnect => "game_reconnect_kcp_connect_failed",
+            Self::ReconnectAuth => "game_reconnect_auth_failed",
+            Self::RoomReconnect => "game_room_reconnect_failed",
+            Self::RoomLeave => "game_room_leave_failed",
+            Self::RunnerTransportOrContract => "game_runner_transport_or_contract_failed",
+        }
+    }
 }
 
 impl From<VirtualPlayerError> for GameLiveError {
@@ -113,6 +147,7 @@ impl GameLiveError {
     pub fn gameplay_metrics(&self) -> Option<&crate::metrics::MetricsSnapshot> {
         match self {
             Self::GameplayFailed { metrics, .. } => Some(metrics),
+            Self::RunnerFailed { source, .. } => source.gameplay_metrics(),
             _ => None,
         }
     }
@@ -124,8 +159,16 @@ impl GameLiveError {
             Self::GameplayFailed {
                 failure_category, ..
             } => *failure_category,
-            _ => None,
+            Self::RunnerFailed { phase, .. } => Some(phase.report_category()),
+            _ => Some(GameRunnerFailurePhase::RunnerTransportOrContract.report_category()),
         }
+    }
+}
+
+fn runner_failure(phase: GameRunnerFailurePhase, source: GameLiveError) -> GameLiveError {
+    GameLiveError::RunnerFailed {
+        phase,
+        source: Box::new(source),
     }
 }
 
@@ -812,23 +855,35 @@ impl GameSessionRunner {
                     }
                     Ok(_) => {
                         session.close(pool);
-                        return Err(GameLiveError::UnexpectedLifecycleEvent);
+                        return Err(runner_failure(
+                            GameRunnerFailurePhase::ReconnectConnectionAdmission,
+                            GameLiveError::UnexpectedLifecycleEvent,
+                        ));
                     }
                     Err(error) => {
                         session.close(pool);
-                        return Err(error.into());
+                        return Err(runner_failure(
+                            GameRunnerFailurePhase::ReconnectConnectionAdmission,
+                            error.into(),
+                        ));
                     }
                 };
                 if let Err(error) = run_checkpoint(&mut checkpoint, GameRunnerCheckpoint::Control) {
                     session.close(pool);
-                    return Err(gameplay_failure(error, &tracker));
+                    return Err(runner_failure(
+                        GameRunnerFailurePhase::ReconnectConnectionAdmission,
+                        gameplay_failure(error, &tracker),
+                    ));
                 }
                 let remaining = match transport.remaining() {
                     Ok(remaining) => remaining,
                     Err(error) => {
                         transport.close();
                         session.close(pool);
-                        return Err(gameplay_failure(error, &tracker));
+                        return Err(runner_failure(
+                            GameRunnerFailurePhase::ReconnectDeadline,
+                            gameplay_failure(error, &tracker),
+                        ));
                     }
                 };
                 if timeout(remaining, sleep(Duration::from_millis(delay_ms)))
@@ -837,15 +892,21 @@ impl GameSessionRunner {
                 {
                     transport.close();
                     session.close(pool);
-                    return Err(gameplay_failure(
-                        "KCP reconnect backoff exceeded action deadline",
-                        &tracker,
+                    return Err(runner_failure(
+                        GameRunnerFailurePhase::ReconnectDeadline,
+                        gameplay_failure(
+                            "KCP reconnect backoff exceeded action deadline",
+                            &tracker,
+                        ),
                     ));
                 }
                 if let Err(error) = run_checkpoint(&mut checkpoint, GameRunnerCheckpoint::Control) {
                     transport.close();
                     session.close(pool);
-                    return Err(gameplay_failure(error, &tracker));
+                    return Err(runner_failure(
+                        GameRunnerFailurePhase::ReconnectDeadline,
+                        gameplay_failure(error, &tracker),
+                    ));
                 }
                 let connection = match reconnect_live_transport(
                     transport,
@@ -867,7 +928,10 @@ impl GameSessionRunner {
                     Err(error) => {
                         transport.close();
                         session.close(pool);
-                        return Err(error.into());
+                        return Err(runner_failure(
+                            GameRunnerFailurePhase::ReconnectAuth,
+                            error.into(),
+                        ));
                     }
                 };
                 if let Err(error) =
@@ -875,19 +939,19 @@ impl GameSessionRunner {
                 {
                     self.close_after_write_failure(&mut session, pool, &auth);
                     transport.close();
-                    return Err(error);
+                    return Err(runner_failure(GameRunnerFailurePhase::ReconnectAuth, error));
                 }
                 if let Err(error) = transport.send(&auth).await {
                     self.close_after_write_failure(&mut session, pool, &auth);
                     transport.close();
-                    return Err(error);
+                    return Err(runner_failure(GameRunnerFailurePhase::ReconnectAuth, error));
                 }
                 let auth_packet = match transport.receive().await {
                     Ok(packet) => packet,
                     Err(error) => {
                         self.close_after_timeout(&mut session, pool, &auth);
                         transport.close();
-                        return Err(error);
+                        return Err(runner_failure(GameRunnerFailurePhase::ReconnectAuth, error));
                     }
                 };
                 match session.handle_packet(pool, auth_packet) {
@@ -897,30 +961,42 @@ impl GameSessionRunner {
                     Ok(VirtualPlayerEvent::Failed) => {
                         steps.push(GameRunnerStep::Failed);
                         transport.close();
-                        return Ok(result(session, steps, Some(tracker.telemetry())));
+                        return Err(runner_failure(
+                            GameRunnerFailurePhase::ReconnectAuth,
+                            gameplay_failure("reconnect KCP authentication was rejected", &tracker),
+                        ));
                     }
                     Ok(_) => {
                         transport.close();
                         session.close(pool);
-                        return Err(GameLiveError::UnexpectedLifecycleEvent);
+                        return Err(runner_failure(
+                            GameRunnerFailurePhase::ReconnectAuth,
+                            GameLiveError::UnexpectedLifecycleEvent,
+                        ));
                     }
                     Err(error) => {
                         transport.close();
                         session.close(pool);
-                        return Err(error.into());
+                        return Err(runner_failure(
+                            GameRunnerFailurePhase::ReconnectAuth,
+                            error.into(),
+                        ));
                     }
                 }
                 if let Err(error) = session.activate(pool) {
                     transport.close();
                     session.close(pool);
-                    return Err(error.into());
+                    return Err(runner_failure(
+                        GameRunnerFailurePhase::ReconnectAuth,
+                        error.into(),
+                    ));
                 }
                 let reconnect_profile = match reconnect_profile_packet(cursor) {
                     Ok(packet) => packet,
                     Err(error) => {
                         transport.close();
                         session.close(pool);
-                        return Err(error);
+                        return Err(runner_failure(GameRunnerFailurePhase::RoomReconnect, error));
                     }
                 };
                 let reconnect = match prepare_admitted_outbound_gameplay_packet(
@@ -933,20 +1009,23 @@ impl GameSessionRunner {
                     Err(error) => {
                         transport.close();
                         session.close(pool);
-                        return Err(error);
+                        return Err(runner_failure(GameRunnerFailurePhase::RoomReconnect, error));
                     }
                 };
                 if let Err(error) = transport.send(&reconnect).await {
                     self.close_after_write_failure(&mut session, pool, &reconnect);
                     transport.close();
-                    return Err(error);
+                    return Err(runner_failure(GameRunnerFailurePhase::RoomReconnect, error));
                 }
                 let reconnect_step = match reconnect_profile_packet(cursor) {
                     Ok(packet) => packet.step,
                     Err(error) => {
                         transport.close();
                         session.close(pool);
-                        return Err(gameplay_failure(error, &tracker));
+                        return Err(runner_failure(
+                            GameRunnerFailurePhase::RoomReconnect,
+                            gameplay_failure(error, &tracker),
+                        ));
                     }
                 };
                 let reconnect_planned =
@@ -955,14 +1034,20 @@ impl GameSessionRunner {
                         Err(error) => {
                             transport.close();
                             session.close(pool);
-                            return Err(gameplay_failure(error, &tracker));
+                            return Err(runner_failure(
+                                GameRunnerFailurePhase::RoomReconnect,
+                                gameplay_failure(error, &tracker),
+                            ));
                         }
                     };
                 if let Err(error) = tracker.begin_planned_action(&reconnect_planned, monotonic_ms())
                 {
                     self.close_after_timeout(&mut session, pool, &reconnect);
                     transport.close();
-                    return Err(error.into());
+                    return Err(runner_failure(
+                        GameRunnerFailurePhase::RoomReconnect,
+                        error.into(),
+                    ));
                 }
                 let response = receive_gameplay_response(
                     transport,
@@ -974,11 +1059,15 @@ impl GameSessionRunner {
                     Some(&gameplay.approved_room_id),
                     &mut checkpoint,
                 )
-                .await?;
+                .await
+                .map_err(|error| runner_failure(GameRunnerFailurePhase::RoomReconnect, error))?;
                 if response != MessageType::RoomReconnectRes {
                     transport.close();
                     session.close(pool);
-                    return Err(GameLiveError::UnexpectedLifecycleEvent);
+                    return Err(runner_failure(
+                        GameRunnerFailurePhase::RoomReconnect,
+                        GameLiveError::UnexpectedLifecycleEvent,
+                    ));
                 }
                 steps.push(GameRunnerStep::RoomReconnected);
             }
@@ -992,13 +1081,16 @@ impl GameSessionRunner {
                 Err(error) => {
                     transport.close();
                     session.close(pool);
-                    return Err(gameplay_failure(error, &tracker));
+                    return Err(runner_failure(
+                        GameRunnerFailurePhase::RoomLeave,
+                        gameplay_failure(error, &tracker),
+                    ));
                 }
             };
             if let Err(error) = transport.send(&leave).await {
                 self.close_after_write_failure(&mut session, pool, &leave);
                 transport.close();
-                return Err(error);
+                return Err(runner_failure(GameRunnerFailurePhase::RoomLeave, error));
             }
             let leave_planned =
                 match planned_packet_with_live_sequence(&leave, gameplay.leave.step.clone()) {
@@ -1006,13 +1098,19 @@ impl GameSessionRunner {
                     Err(error) => {
                         transport.close();
                         session.close(pool);
-                        return Err(gameplay_failure(error, &tracker));
+                        return Err(runner_failure(
+                            GameRunnerFailurePhase::RoomLeave,
+                            gameplay_failure(error, &tracker),
+                        ));
                     }
                 };
             if let Err(error) = tracker.begin_planned_action(&leave_planned, monotonic_ms()) {
                 transport.close();
                 session.close(pool);
-                return Err(gameplay_failure(error, &tracker));
+                return Err(runner_failure(
+                    GameRunnerFailurePhase::RoomLeave,
+                    gameplay_failure(error, &tracker),
+                ));
             }
             let response = receive_gameplay_response(
                 transport,
@@ -1024,11 +1122,15 @@ impl GameSessionRunner {
                 Some(&gameplay.approved_room_id),
                 &mut checkpoint,
             )
-            .await?;
+            .await
+            .map_err(|error| runner_failure(GameRunnerFailurePhase::RoomLeave, error))?;
             if response != MessageType::RoomLeaveRes {
                 transport.close();
                 session.close(pool);
-                return Err(GameLiveError::UnexpectedLifecycleEvent);
+                return Err(runner_failure(
+                    GameRunnerFailurePhase::RoomLeave,
+                    GameLiveError::UnexpectedLifecycleEvent,
+                ));
             }
             steps.push(GameRunnerStep::RoomLeft);
             Some(tracker.telemetry())
@@ -2120,8 +2222,13 @@ async fn reconnect_live_transport(
     endpoint: &GameProxyEndpoint,
     checkpoint: &mut impl FnMut(GameRunnerCheckpoint) -> Result<(), GameLiveError>,
 ) -> Result<LiveKcpConnection, GameLiveError> {
-    run_checkpoint(checkpoint, GameRunnerCheckpoint::ReconnectConnection)?;
-    transport.connect(config, access, endpoint).await
+    run_checkpoint(checkpoint, GameRunnerCheckpoint::ReconnectConnection).map_err(|error| {
+        runner_failure(GameRunnerFailurePhase::ReconnectConnectionAdmission, error)
+    })?;
+    transport
+        .connect(config, access, endpoint)
+        .await
+        .map_err(|error| runner_failure(GameRunnerFailurePhase::ReconnectKcpConnect, error))
 }
 
 fn monotonic_ms() -> u64 {
