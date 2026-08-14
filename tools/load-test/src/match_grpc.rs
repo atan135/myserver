@@ -25,10 +25,15 @@ pub enum MatchGrpcOutcome {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MatchGrpcMetrics {
     pub queued_ms: u64,
+    pub match_attempts: u64,
     pub match_successes: u64,
     pub event_stream_connections: u64,
     pub grpc_statuses: u64,
     pub room_create_closed_ms: u64,
+    /// Direct match-service gRPC does not expose the game-server room-create
+    /// callback timestamp. Keep this explicit so reports cannot infer it from
+    /// client-side match latency.
+    pub room_create_closed_observed: bool,
     pub cancellations: u64,
     pub timeouts: u64,
     pub stream_disconnects: u64,
@@ -111,6 +116,7 @@ impl MatchGrpcMetrics {
     pub fn merge_into_metrics(&self, metrics: &mut crate::metrics::Metrics) {
         for (key, value) in [
             ("match_grpc_queued_ms", self.queued_ms),
+            ("match_grpc_attempts", self.match_attempts),
             ("match_grpc_successes", self.match_successes),
             (
                 "match_grpc_event_stream_connections",
@@ -124,8 +130,18 @@ impl MatchGrpcMetrics {
             ("match_grpc_cancellations", self.cancellations),
             ("match_grpc_timeouts", self.timeouts),
             ("match_grpc_stream_disconnects", self.stream_disconnects),
+            (
+                "match_grpc_room_create_closed_unobserved",
+                u64::from(!self.room_create_closed_observed),
+            ),
         ] {
             metrics.increment(key, value);
+        }
+        if self.queued_ms > 0 {
+            metrics.observe_latency("match_grpc_queue_ms", self.queued_ms);
+        }
+        if self.room_create_closed_observed && self.room_create_closed_ms > 0 {
+            metrics.observe_latency("match_grpc_room_create_ms", self.room_create_closed_ms);
         }
     }
 }
@@ -192,9 +208,18 @@ pub async fn execute_live_match_steps(
     let mut metrics = MatchGrpcMetrics::default();
     let mut match_id = String::new();
     for step in steps {
+        if step.think_time_ms > 0 {
+            tokio::time::timeout(
+                Duration::from_millis(timeout_ms.max(1)),
+                tokio::time::sleep(Duration::from_millis(step.think_time_ms)),
+            )
+            .await
+            .map_err(|_| MatchGrpcError::Timeout)?;
+        }
         admit(false)?;
         match step.operation {
             SideServiceOperation::MatchStart => {
+                metrics.match_attempts = metrics.match_attempts.saturating_add(1);
                 let response = bounded(
                     timeout_ms,
                     client.match_start(MatchStartReq {
@@ -590,8 +615,10 @@ mod tests {
     #[test]
     fn match_metrics_projection_keeps_fixed_low_cardinality_keys() {
         let metrics = MatchGrpcMetrics {
+            match_attempts: 1,
             match_successes: 1,
             event_stream_connections: 1,
+            queued_ms: 23,
             cancellations: 1,
             timeouts: 1,
             stream_disconnects: 1,
@@ -601,10 +628,16 @@ mod tests {
         metrics.merge_into_metrics(&mut projected);
         let snapshot = projected.snapshot();
         assert_eq!(snapshot.counters["match_grpc_successes"], 1);
+        assert_eq!(snapshot.counters["match_grpc_attempts"], 1);
         assert_eq!(snapshot.counters["match_grpc_event_stream_connections"], 1);
         assert_eq!(snapshot.counters["match_grpc_cancellations"], 1);
         assert_eq!(snapshot.counters["match_grpc_timeouts"], 1);
         assert_eq!(snapshot.counters["match_grpc_stream_disconnects"], 1);
+        assert_eq!(
+            snapshot.counters["match_grpc_room_create_closed_unobserved"],
+            1
+        );
+        assert_eq!(snapshot.histograms["match_grpc_queue_ms"].count(), 1);
     }
 
     #[test]

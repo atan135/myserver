@@ -779,6 +779,7 @@ pub enum GameKcpError {
 
 #[cfg(test)]
 mod tests {
+    use game_protocol::MessageType;
     use game_protocol::encode_packet;
     use prost::Message;
     use tokio::io::{AsyncWriteExt, duplex};
@@ -1095,6 +1096,95 @@ mod tests {
             GameLifecycleEvent::Response {
                 message_type: game_protocol::MessageType::RoomJoinRes,
                 seq: 2,
+            }
+        );
+        assert_eq!(lifecycle.pending_requests(), 0);
+    }
+
+    #[test]
+    fn authenticated_match_requests_cover_start_status_event_stream_and_cancel() {
+        let mut lifecycle = GameConnectionLifecycle::new(1_024, policy(1)).unwrap();
+        lifecycle.begin_connect().unwrap();
+        lifecycle.begin_auth("private-ticket").unwrap();
+        lifecycle.handle_packet(auth_response(1, true, "")).unwrap();
+
+        let start = lifecycle.begin_match_start("default_match").unwrap();
+        let start_body = crate::pb::MatchStartReq::decode(start.body()).unwrap();
+        assert_eq!(start.message_type(), MessageType::MatchStartReq);
+        assert_eq!(start_body.mode, "default_match");
+        assert_eq!(
+            lifecycle
+                .handle_packet(game_protocol::Packet::new(
+                    game_protocol::PacketHeader {
+                        msg_type: MessageType::MatchStartRes as u16,
+                        seq: start.seq(),
+                        body_len: 0,
+                    },
+                    Vec::new(),
+                ))
+                .unwrap(),
+            GameLifecycleEvent::Response {
+                message_type: MessageType::MatchStartRes,
+                seq: start.seq(),
+            }
+        );
+
+        let status = lifecycle.begin_match_status().unwrap();
+        assert_eq!(status.message_type(), MessageType::MatchStatusReq);
+        assert_eq!(
+            lifecycle
+                .handle_packet(game_protocol::Packet::new(
+                    game_protocol::PacketHeader {
+                        msg_type: MessageType::MatchStatusRes as u16,
+                        seq: status.seq(),
+                        body_len: 0,
+                    },
+                    Vec::new(),
+                ))
+                .unwrap(),
+            GameLifecycleEvent::Response {
+                message_type: MessageType::MatchStatusRes,
+                seq: status.seq(),
+            }
+        );
+
+        let stream = lifecycle.begin_match_event_stream().unwrap();
+        assert_eq!(stream.message_type(), MessageType::MatchEventStreamReq);
+        assert_eq!(
+            lifecycle
+                .handle_packet(game_protocol::Packet::new(
+                    game_protocol::PacketHeader {
+                        msg_type: MessageType::MatchEventStreamRes as u16,
+                        seq: stream.seq(),
+                        body_len: 0,
+                    },
+                    Vec::new(),
+                ))
+                .unwrap(),
+            GameLifecycleEvent::Response {
+                message_type: MessageType::MatchEventStreamRes,
+                seq: stream.seq(),
+            }
+        );
+
+        let cancel = lifecycle.begin_match_cancel("match-1").unwrap();
+        let cancel_body = crate::pb::MatchCancelReq::decode(cancel.body()).unwrap();
+        assert_eq!(cancel_body.match_id, "match-1");
+        assert_eq!(cancel.message_type(), MessageType::MatchCancelReq);
+        assert_eq!(
+            lifecycle
+                .handle_packet(game_protocol::Packet::new(
+                    game_protocol::PacketHeader {
+                        msg_type: MessageType::MatchCancelRes as u16,
+                        seq: cancel.seq(),
+                        body_len: 0,
+                    },
+                    Vec::new(),
+                ))
+                .unwrap(),
+            GameLifecycleEvent::Response {
+                message_type: MessageType::MatchCancelRes,
+                seq: cancel.seq(),
             }
         );
         assert_eq!(lifecycle.pending_requests(), 0);

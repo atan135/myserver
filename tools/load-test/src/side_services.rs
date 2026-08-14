@@ -8,6 +8,7 @@ use crate::config::{EnvironmentKind, HardBudget};
 const MAX_SIDE_STEPS: usize = 32;
 const MAX_SIDE_WEIGHT: u32 = 100;
 const MAX_DESCRIPTOR_HOST: usize = 253;
+const ANNOUNCE_BURST_READ_OPERATIONS: u64 = 8;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
@@ -349,6 +350,11 @@ pub struct CompositePlayerProfile {
     pub weights: BTreeMap<SideServiceKind, u32>,
     #[serde(default)]
     pub max_operations_per_player: u32,
+    /// Optional per-service operation ceilings for one virtual player. A
+    /// configured service entry must not exceed this cap after its operation
+    /// and composition weights are expanded.
+    #[serde(default)]
+    pub max_operations_per_service_per_player: BTreeMap<SideServiceKind, u32>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -400,6 +406,14 @@ impl SideServicesScenario {
         }
         if self.composition.max_operations_per_player > 10_000 {
             return Err("side-service composition operation cap is too large".into());
+        }
+        if self
+            .composition
+            .max_operations_per_service_per_player
+            .values()
+            .any(|cap| *cap == 0 || *cap > 10_000)
+        {
+            return Err("side-service per-service operation cap must be within 1..=10000".into());
         }
         for weight in self.composition.weights.values() {
             if *weight == 0 || *weight > MAX_SIDE_WEIGHT {
@@ -499,6 +513,7 @@ impl SideServicesScenario {
     pub fn executable_plan(&self, budget: &HardBudget) -> Result<SideServicePlan, String> {
         self.validate()?;
         let mut steps = Vec::new();
+        let mut per_service = BTreeMap::new();
         let per_player_cap = if self.composition.max_operations_per_player == 0 {
             MAX_SIDE_STEPS as u32
         } else {
@@ -517,15 +532,34 @@ impl SideServicesScenario {
             if let Some(config) = config {
                 let service_weight = self.composition.weights.get(&kind).copied().unwrap_or(1);
                 for step in &config.steps {
-                    let repetitions = step.weight.saturating_mul(service_weight);
+                    let repetitions = step
+                        .weight
+                        .checked_mul(service_weight)
+                        .ok_or_else(|| "side-service step weight overflowed".to_string())?;
                     for _ in 0..repetitions {
+                        let operation_cost = side_operation_cost(&step.operation);
+                        let service_count = per_service.entry(kind).or_insert(0_u64);
+                        *service_count = service_count
+                            .checked_add(operation_cost)
+                            .ok_or_else(|| "side-service operation count overflowed".to_string())?;
+                        if self
+                            .composition
+                            .max_operations_per_service_per_player
+                            .get(&kind)
+                            .is_some_and(|cap| *service_count > u64::from(*cap))
+                        {
+                            return Err(format!(
+                                "side-service {kind:?} plan exceeds per-service/player operation budget"
+                            ));
+                        }
                         steps.push(PlannedSideServiceStep {
                             service: kind,
                             operation: step.operation.clone(),
                             weight: step.weight,
                             think_time_ms: step.think_time_ms,
                         });
-                        if steps.len() as u32 > global_cap {
+                        let planned_operations: u64 = per_service.values().sum();
+                        if planned_operations > u64::from(global_cap) {
                             return Err(
                                 "side-service plan exceeds global/player operation budget".into()
                             );
@@ -534,21 +568,34 @@ impl SideServicesScenario {
                 }
             }
         }
-        if steps.len() as u64 > budget.max_total_operations
-            || steps.len() as f64
-                > budget.max_business_messages_per_second * budget.max_duration_secs as f64
+        let virtual_players = u64::from(budget.max_virtual_players);
+        let per_player_operations: u64 = per_service.values().sum();
+        let total_operations = per_player_operations
+            .checked_mul(virtual_players)
+            .ok_or_else(|| "side-service total operation count overflowed".to_string())?;
+        let global_rate_capacity =
+            budget.max_business_messages_per_second * budget.max_duration_secs as f64;
+        let connection_rate_capacity =
+            budget.max_messages_per_connection_per_second * budget.max_duration_secs as f64;
+        if total_operations > budget.max_total_operations
+            || total_operations as f64 > global_rate_capacity
+            || per_player_operations as f64 > connection_rate_capacity
         {
             return Err("side-service plan exceeds total operation budget".into());
-        }
-        let mut per_service = BTreeMap::new();
-        for step in &steps {
-            *per_service.entry(step.service).or_insert(0_u64) += 1;
         }
         Ok(SideServicePlan {
             steps,
             per_player_cap,
             per_service,
+            total_operations,
         })
+    }
+}
+
+fn side_operation_cost(operation: &SideServiceOperation) -> u64 {
+    match operation {
+        SideServiceOperation::AnnounceBurstRead => ANNOUNCE_BURST_READ_OPERATIONS,
+        _ => 1,
     }
 }
 
@@ -565,6 +612,7 @@ pub struct SideServicePlan {
     pub steps: Vec<PlannedSideServiceStep>,
     pub per_player_cap: u32,
     pub per_service: BTreeMap<SideServiceKind, u64>,
+    pub total_operations: u64,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
@@ -990,6 +1038,7 @@ mod tests {
             composition: CompositePlayerProfile {
                 weights: BTreeMap::from([(SideServiceKind::Chat, 2)]),
                 max_operations_per_player: 5,
+                ..Default::default()
             },
             ..Default::default()
         };
@@ -1010,6 +1059,77 @@ mod tests {
                 })
                 .is_err()
         );
+    }
+
+    #[test]
+    fn composite_plan_applies_per_service_and_virtual_player_budgets() {
+        let scenario = SideServicesScenario {
+            chat: Some(SideServiceConfig {
+                descriptor: Some(descriptor(SideTransportKind::Wss)),
+                steps: vec![SideServiceStep {
+                    operation: SideServiceOperation::ChatHistory,
+                    weight: 2,
+                    think_time_ms: 25,
+                }],
+                ..Default::default()
+            }),
+            composition: CompositePlayerProfile {
+                weights: BTreeMap::from([(SideServiceKind::Chat, 1)]),
+                max_operations_per_player: 4,
+                max_operations_per_service_per_player: BTreeMap::from([(SideServiceKind::Chat, 3)]),
+            },
+            ..Default::default()
+        };
+        let plan = scenario
+            .executable_plan(&HardBudget {
+                max_virtual_players: 2,
+                max_total_operations: 4,
+                max_business_messages_per_second: 1.0,
+                max_messages_per_connection_per_second: 1.0,
+                max_duration_secs: 4,
+                ..budget()
+            })
+            .unwrap();
+        assert_eq!(plan.steps.len(), 2);
+        assert_eq!(plan.total_operations, 4);
+        assert_eq!(plan.per_service[&SideServiceKind::Chat], 2);
+
+        let rejected = SideServicesScenario {
+            composition: CompositePlayerProfile {
+                max_operations_per_service_per_player: BTreeMap::from([(SideServiceKind::Chat, 1)]),
+                ..scenario.composition.clone()
+            },
+            ..scenario.clone()
+        };
+        assert!(rejected.executable_plan(&budget()).is_err());
+    }
+
+    #[test]
+    fn announce_burst_reserves_all_repeated_reads_in_operation_budget() {
+        let scenario = SideServicesScenario {
+            announce: Some(SideServiceConfig {
+                descriptor: Some(descriptor(SideTransportKind::Https)),
+                steps: vec![SideServiceStep {
+                    operation: SideServiceOperation::AnnounceBurstRead,
+                    weight: 1,
+                    think_time_ms: 0,
+                }],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let plan = scenario
+            .executable_plan(&HardBudget {
+                max_virtual_players: 1,
+                max_total_operations: 8,
+                max_business_messages_per_second: 8.0,
+                max_messages_per_connection_per_second: 8.0,
+                ..budget()
+            })
+            .unwrap();
+        assert_eq!(plan.steps.len(), 1);
+        assert_eq!(plan.per_service[&SideServiceKind::Announce], 8);
+        assert_eq!(plan.total_operations, 8);
     }
 
     #[test]

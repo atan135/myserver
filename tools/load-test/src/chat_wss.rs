@@ -69,6 +69,7 @@ pub enum ChatWssError {
     SequenceMismatch,
     AuthenticationRejected,
     SlowConsumer,
+    Timeout,
     Transport(String),
 }
 
@@ -404,6 +405,14 @@ pub async fn execute_live_chat_steps(
     drive_chat_request(&mut session, &mut transport, auth, timeout_ms).await?;
 
     for step in steps {
+        if step.think_time_ms > 0 {
+            tokio::time::timeout(
+                Duration::from_millis(timeout_ms.max(1)),
+                tokio::time::sleep(Duration::from_millis(step.think_time_ms)),
+            )
+            .await
+            .map_err(|_| ChatWssError::Timeout)?;
+        }
         let mut request = match step.operation {
             SideServiceOperation::ChatAuth => continue,
             SideServiceOperation::ChatPrivate => session.queue_private(

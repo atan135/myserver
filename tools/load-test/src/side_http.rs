@@ -295,6 +295,12 @@ pub fn execute_live_mail_announce_steps(
             .descriptor
             .as_ref()
             .ok_or(SideHttpError::DescriptorRejected)?;
+        if step.think_time_ms > 0 {
+            if step.think_time_ms > timeout_ms.max(1) {
+                return Err(SideHttpError::Timeout);
+            }
+            std::thread::sleep(Duration::from_millis(step.think_time_ms));
+        }
         let index = transports
             .iter()
             .position(|(service, _)| *service == step.service);
@@ -390,6 +396,12 @@ pub fn execute_live_mail_announce_steps(
         }
         if step.operation == SideServiceOperation::AnnounceBurstRead {
             for _ in 1..MAX_BURST_READS {
+                if step.think_time_ms > 0 {
+                    if step.think_time_ms > timeout_ms.max(1) {
+                        return Err(SideHttpError::Timeout);
+                    }
+                    std::thread::sleep(Duration::from_millis(step.think_time_ms));
+                }
                 admit(SideHttpAdmission::Message { writes: false })?;
                 let started = Instant::now();
                 match transport.send(
