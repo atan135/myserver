@@ -1009,6 +1009,121 @@ mod tests {
     }
 
     #[test]
+    fn production_profile_requires_every_hard_budget_limit_and_cli_can_only_tighten() {
+        let mut production = config();
+        production.environment.kind = EnvironmentKind::Production;
+        production.environment.name = "prod".into();
+        production.environment.approval_reference = Some("approved-window".into());
+        production
+            .environment
+            .allowed_hosts
+            .insert("127.0.0.1".into());
+        production
+            .environment
+            .allowed_ips
+            .insert("127.0.0.1".parse().unwrap());
+        production.validate_structural().unwrap();
+
+        let serialized = serde_json::to_value(&production).unwrap();
+        for field in [
+            "max_virtual_players",
+            "max_login_qps",
+            "max_new_connections_per_second",
+            "max_business_messages_per_second",
+            "max_messages_per_connection_per_second",
+            "max_duration_secs",
+            "max_total_operations",
+            "max_error_rate",
+            "max_connection_failure_rate",
+            "max_p99_ms",
+            "max_data_writes",
+        ] {
+            let mut missing = serialized.clone();
+            missing["budget"].as_object_mut().unwrap().remove(field);
+            assert!(
+                serde_json::from_value::<LoadTestConfig>(missing).is_err(),
+                "production budget field {field} must be explicit"
+            );
+        }
+
+        for override_budget in [
+            BudgetOverride {
+                max_virtual_players: Some(production.budget.max_virtual_players + 1),
+                ..Default::default()
+            },
+            BudgetOverride {
+                max_login_qps: Some(production.budget.max_login_qps + 1.0),
+                ..Default::default()
+            },
+            BudgetOverride {
+                max_new_connections_per_second: Some(
+                    production.budget.max_new_connections_per_second + 1.0,
+                ),
+                ..Default::default()
+            },
+            BudgetOverride {
+                max_business_messages_per_second: Some(
+                    production.budget.max_business_messages_per_second + 1.0,
+                ),
+                ..Default::default()
+            },
+            BudgetOverride {
+                max_messages_per_connection_per_second: Some(
+                    production.budget.max_messages_per_connection_per_second + 1.0,
+                ),
+                ..Default::default()
+            },
+            BudgetOverride {
+                max_duration_secs: Some(production.budget.max_duration_secs + 1),
+                ..Default::default()
+            },
+            BudgetOverride {
+                max_total_operations: Some(production.budget.max_total_operations + 1),
+                ..Default::default()
+            },
+            BudgetOverride {
+                max_error_rate: Some(production.budget.max_error_rate + 0.01),
+                ..Default::default()
+            },
+            BudgetOverride {
+                max_connection_failure_rate: Some(
+                    production.budget.max_connection_failure_rate + 0.01,
+                ),
+                ..Default::default()
+            },
+            BudgetOverride {
+                max_p99_ms: Some(production.budget.max_p99_ms + 1),
+                ..Default::default()
+            },
+            BudgetOverride {
+                max_data_writes: Some(production.budget.max_data_writes + 1),
+                ..Default::default()
+            },
+        ] {
+            assert!(production.effective_budget(&override_budget).is_err());
+        }
+        assert_eq!(
+            production
+                .effective_budget(&BudgetOverride {
+                    max_virtual_players: Some(1),
+                    max_login_qps: Some(1.0),
+                    max_new_connections_per_second: Some(1.0),
+                    max_business_messages_per_second: Some(1.0),
+                    max_messages_per_connection_per_second: Some(1.0),
+                    max_duration_secs: Some(1),
+                    max_total_operations: Some(1),
+                    max_error_rate: Some(0.0),
+                    max_connection_failure_rate: Some(0.0),
+                    max_p99_ms: Some(1),
+                    max_data_writes: Some(0),
+                })
+                .unwrap()
+                .max_virtual_players,
+            1
+        );
+    }
+
+    #[test]
     fn rejects_unbounded_models_duplicate_stages_and_write_retries() {
         let mut value = config();
         value.scenario.load = LoadModel::ArrivalRate {

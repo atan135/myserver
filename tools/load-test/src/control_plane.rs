@@ -184,17 +184,31 @@ mod tests {
             concurrent_requests: 1,
         };
         validate_read_request(&request, &budget, EnvironmentKind::Production).unwrap();
-        assert!(
-            validate_read_request(
-                &ControlPlaneRequest {
-                    operation: ControlPlaneOperation::Kick,
-                    ..request.clone()
-                },
-                &budget,
-                EnvironmentKind::Production
-            )
-            .is_err()
-        );
+        for operation in [
+            ControlPlaneOperation::GmCommand,
+            ControlPlaneOperation::Breakglass,
+            ControlPlaneOperation::Ban,
+            ControlPlaneOperation::Kick,
+            ControlPlaneOperation::GrantReward,
+            ControlPlaneOperation::ModifyCharacter,
+            ControlPlaneOperation::Migrate,
+            ControlPlaneOperation::Drain,
+            ControlPlaneOperation::Shutdown,
+            ControlPlaneOperation::Archive,
+        ] {
+            assert!(
+                validate_read_request(
+                    &ControlPlaneRequest {
+                        operation,
+                        ..request.clone()
+                    },
+                    &budget,
+                    EnvironmentKind::Production
+                )
+                .is_err(),
+                "production must reject control-plane operation {operation:?}"
+            );
+        }
         assert!(
             validate_read_request(
                 &ControlPlaneRequest {

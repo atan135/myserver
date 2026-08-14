@@ -29,6 +29,49 @@ pub enum ShutdownPhase {
     Completed,
 }
 
+/// Tracks threshold violations across controller windows. A transient sample
+/// must not abort a run by itself; the same violation has to be observed for
+/// the configured number of consecutive windows. Any healthy window resets
+/// the streak and a different violation starts a new streak.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThresholdWindow {
+    required_consecutive_windows: u32,
+    consecutive_windows: u32,
+    last_reason: Option<AbortReason>,
+}
+
+impl ThresholdWindow {
+    pub fn new(required_consecutive_windows: u32) -> Result<Self, String> {
+        if required_consecutive_windows == 0 {
+            return Err("threshold window must require at least one sample".into());
+        }
+        Ok(Self {
+            required_consecutive_windows,
+            consecutive_windows: 0,
+            last_reason: None,
+        })
+    }
+
+    pub fn consecutive_windows(&self) -> u32 {
+        self.consecutive_windows
+    }
+
+    pub fn observe(&mut self, reason: Option<AbortReason>) -> Option<AbortReason> {
+        let Some(reason) = reason else {
+            self.consecutive_windows = 0;
+            self.last_reason = None;
+            return None;
+        };
+        if self.last_reason.as_ref() == Some(&reason) {
+            self.consecutive_windows = self.consecutive_windows.saturating_add(1);
+        } else {
+            self.consecutive_windows = 1;
+            self.last_reason = Some(reason.clone());
+        }
+        (self.consecutive_windows >= self.required_consecutive_windows).then_some(reason)
+    }
+}
+
 /// Drives the shutdown contract independently of a transport implementation.
 ///
 /// A future HTTP/KCP worker calls `advance` from its controller loop and maps
@@ -142,6 +185,36 @@ impl AbortController {
             self.request(AbortReason::P99Latency);
         }
     }
+
+    /// Applies the same threshold precedence as `check_thresholds`, but only
+    /// requests an abort after a violation remains present for consecutive
+    /// controller windows.
+    pub fn check_thresholds_in_window(
+        &mut self,
+        window: &mut ThresholdWindow,
+        error_rate: f64,
+        connection_failure_rate: f64,
+        p99_ms: u64,
+        max_error_rate: f64,
+        max_connection_failure_rate: f64,
+        max_p99_ms: u64,
+        generator_healthy: bool,
+    ) {
+        let reason = if !generator_healthy {
+            Some(AbortReason::GeneratorResource)
+        } else if error_rate > max_error_rate {
+            Some(AbortReason::ErrorRate)
+        } else if connection_failure_rate > max_connection_failure_rate {
+            Some(AbortReason::ConnectionFailureRate)
+        } else if p99_ms > max_p99_ms {
+            Some(AbortReason::P99Latency)
+        } else {
+            None
+        };
+        if let Some(reason) = window.observe(reason) {
+            self.request(reason);
+        }
+    }
 }
 
 pub fn install_ctrl_c_flag() -> Result<Arc<AtomicBool>, ctrlc::Error> {
@@ -202,5 +275,40 @@ mod tests {
         assert_eq!(shutdown.phase(), ShutdownPhase::FlushMetrics);
         shutdown.advance(110, 0);
         assert_eq!(shutdown.phase(), ShutdownPhase::Completed);
+    }
+
+    #[test]
+    fn threshold_window_requires_consecutive_same_violation_and_resets_on_health() {
+        let mut window = ThresholdWindow::new(3).unwrap();
+        let mut controller = AbortController::default();
+        let check = |controller: &mut AbortController, window: &mut ThresholdWindow, error| {
+            controller.check_thresholds_in_window(window, error, 0.0, 0, 0.1, 0.1, 10, true);
+        };
+        check(&mut controller, &mut window, 0.2);
+        check(&mut controller, &mut window, 0.2);
+        assert_eq!(window.consecutive_windows(), 2);
+        assert_eq!(controller.reason(), None);
+        check(&mut controller, &mut window, 0.0);
+        assert_eq!(window.consecutive_windows(), 0);
+        check(&mut controller, &mut window, 0.2);
+        check(&mut controller, &mut window, 0.2);
+        assert_eq!(controller.reason(), None);
+        check(&mut controller, &mut window, 0.2);
+        assert_eq!(controller.reason(), Some(&AbortReason::ErrorRate));
+    }
+
+    #[test]
+    fn threshold_window_does_not_mix_failure_categories() {
+        let mut window = ThresholdWindow::new(2).unwrap();
+        assert_eq!(window.observe(Some(AbortReason::ErrorRate)), None);
+        assert_eq!(
+            window.observe(Some(AbortReason::ConnectionFailureRate)),
+            None
+        );
+        assert_eq!(window.consecutive_windows(), 1);
+        assert_eq!(
+            window.observe(Some(AbortReason::ConnectionFailureRate)),
+            Some(AbortReason::ConnectionFailureRate)
+        );
     }
 }

@@ -1,5 +1,7 @@
 use crate::abort::AbortController;
 use crate::config::LoadTestConfig;
+use std::collections::BTreeSet;
+use std::net::IpAddr;
 
 /// Runtime target identity checks that must succeed before a controller may
 /// continue ramping load. Transport-backed implementations are responsible for
@@ -15,6 +17,68 @@ pub trait RuntimeProtection {
         self.verify_certificate()?;
         self.verify_descriptor()?;
         self.verify_environment_identity()
+    }
+}
+
+/// Transport adapters can feed this identity snapshot to a baseline before
+/// the first request and on every controller tick. Keeping the comparison in
+/// the core makes DNS rebinding, certificate rotation and descriptor drift
+/// fail closed even when the concrete HTTP/KCP client is unavailable offline.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TargetProtectionSnapshot {
+    pub dns_ips: BTreeSet<IpAddr>,
+    pub certificate_fingerprint: String,
+    pub descriptor_digest: String,
+    pub environment: String,
+}
+
+impl TargetProtectionSnapshot {
+    fn validate(&self) -> Result<(), String> {
+        if self.dns_ips.is_empty() {
+            return Err("target protection snapshot has no resolved DNS addresses".into());
+        }
+        if self.certificate_fingerprint.trim().is_empty() {
+            return Err("target protection snapshot is missing certificate identity".into());
+        }
+        if self.descriptor_digest.trim().is_empty() {
+            return Err("target protection snapshot is missing descriptor identity".into());
+        }
+        if self.environment.trim().is_empty() {
+            return Err("target protection snapshot is missing environment identity".into());
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct TargetProtectionBaseline {
+    expected: Option<TargetProtectionSnapshot>,
+}
+
+impl TargetProtectionBaseline {
+    pub fn observe(&mut self, snapshot: TargetProtectionSnapshot) -> Result<(), String> {
+        snapshot.validate()?;
+        let Some(expected) = &self.expected else {
+            self.expected = Some(snapshot);
+            return Ok(());
+        };
+        if expected.dns_ips != snapshot.dns_ips {
+            return Err("target DNS identity changed (possible rebinding)".into());
+        }
+        if expected.certificate_fingerprint != snapshot.certificate_fingerprint {
+            return Err("target certificate identity changed".into());
+        }
+        if expected.descriptor_digest != snapshot.descriptor_digest {
+            return Err("target protocol descriptor identity changed".into());
+        }
+        if expected.environment != snapshot.environment {
+            return Err("target environment identity changed".into());
+        }
+        Ok(())
+    }
+
+    pub fn expected(&self) -> Option<&TargetProtectionSnapshot> {
+        self.expected.as_ref()
     }
 }
 
@@ -208,6 +272,62 @@ mod tests {
         assert_eq!(
             abort.reason(),
             Some(&crate::abort::AbortReason::ProtectionUnknown)
+        );
+    }
+
+    fn protection_snapshot() -> TargetProtectionSnapshot {
+        TargetProtectionSnapshot {
+            dns_ips: ["192.0.2.10".parse().unwrap()].into(),
+            certificate_fingerprint: "sha256:cert-a".into(),
+            descriptor_digest: "sha256:descriptor-a".into(),
+            environment: "staging".into(),
+        }
+    }
+
+    #[test]
+    fn protection_baseline_rejects_dns_rebinding_descriptor_and_certificate_changes() {
+        let mut baseline = TargetProtectionBaseline::default();
+        baseline.observe(protection_snapshot()).unwrap();
+        assert!(baseline.expected().is_some());
+
+        let mut changed = protection_snapshot();
+        changed.dns_ips = ["192.0.2.11".parse().unwrap()].into();
+        assert!(baseline.observe(changed).unwrap_err().contains("DNS"));
+
+        let mut changed = protection_snapshot();
+        changed.certificate_fingerprint = "sha256:cert-b".into();
+        assert!(
+            baseline
+                .observe(changed)
+                .unwrap_err()
+                .contains("certificate")
+        );
+
+        let mut changed = protection_snapshot();
+        changed.descriptor_digest = "sha256:descriptor-b".into();
+        assert!(
+            baseline
+                .observe(changed)
+                .unwrap_err()
+                .contains("descriptor")
+        );
+    }
+
+    #[test]
+    fn protection_baseline_rejects_empty_identity_and_environment_changes() {
+        let mut baseline = TargetProtectionBaseline::default();
+        let mut invalid = protection_snapshot();
+        invalid.dns_ips.clear();
+        assert!(baseline.observe(invalid).is_err());
+
+        baseline.observe(protection_snapshot()).unwrap();
+        let mut changed = protection_snapshot();
+        changed.environment = "production".into();
+        assert!(
+            baseline
+                .observe(changed)
+                .unwrap_err()
+                .contains("environment")
         );
     }
 }
