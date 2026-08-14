@@ -7,6 +7,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for proto in ["game.proto", "chat.proto", "match.proto"] {
         println!("cargo:rerun-if-changed=../../packages/proto/{proto}");
     }
+    println!("cargo:rerun-if-changed=proto/loadtest_control.proto");
     let protoc = protoc_bin_vendored::protoc_bin_path()?;
     unsafe { env::set_var("PROTOC", &protoc) };
     tonic_build::configure()
@@ -19,6 +20,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ],
             &[PathBuf::from("../../packages/proto")],
         )?;
+    tonic_build::configure().build_server(true).compile_protos(
+        &[PathBuf::from("proto/loadtest_control.proto")],
+        &[PathBuf::from("proto")],
+    )?;
     emit_git_commit();
     let _ = env::var_os("OUT_DIR");
     Ok(())

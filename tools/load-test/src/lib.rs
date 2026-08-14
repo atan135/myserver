@@ -15,6 +15,7 @@ pub mod chat_wss;
 pub mod compatibility;
 pub mod config;
 pub mod contracts;
+pub mod control_mtls;
 pub mod control_plane;
 pub mod distributed;
 pub mod fake;
@@ -53,6 +54,12 @@ pub mod chat_pb {
 
 pub mod match_pb {
     include!(concat!(env!("OUT_DIR"), "/myserver.matchservice.rs"));
+}
+
+/// Private controller/worker protocol. This is intentionally generated from
+/// `tools/load-test/proto`, not the player-facing shared protocol package.
+pub mod control_pb {
+    include!(concat!(env!("OUT_DIR"), "/myserver.loadtest.control.rs"));
 }
 
 pub use config::{LoadTestConfig, RunAccess, load_config};

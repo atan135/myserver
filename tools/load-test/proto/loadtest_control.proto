@@ -1,0 +1,59 @@
+syntax = "proto3";
+
+package myserver.loadtest.control;
+
+// This protocol carries only controller/worker identity, strict sequencing,
+// and JSON envelopes for the existing load-test contracts. It must never be
+// used for player traffic, target credentials, tickets, or account pools.
+service LoadtestControl {
+  rpc RegisterWorker(RegisterWorkerRequest) returns (RegisterWorkerResponse);
+  rpc GetAssignment(SessionRequest) returns (AssignmentResponse);
+  rpc SubmitMetricBatch(MetricBatchRequest) returns (OperationAck);
+  rpc SubmitHeartbeat(HeartbeatRequest) returns (OperationAck);
+  rpc GetAbort(SessionRequest) returns (AbortResponse);
+}
+
+message RegisterWorkerRequest {
+  uint32 protocol_version = 1;
+  string run_id = 2;
+  string worker_id = 3;
+  string credential_id = 4;
+  bytes registration_nonce = 5;
+}
+
+message RegisterWorkerResponse {
+  string session_id = 1;
+  uint64 credential_expires_unix_ms = 2;
+  bytes assignment_json = 3;
+}
+
+message SessionRequest {
+  uint32 protocol_version = 1;
+  string run_id = 2;
+  string worker_id = 3;
+  string session_id = 4;
+  uint64 sequence = 5;
+}
+
+message AssignmentResponse {
+  bytes assignment_json = 1;
+}
+
+message MetricBatchRequest {
+  SessionRequest session = 1;
+  bytes metric_batch_json = 2;
+}
+
+message HeartbeatRequest {
+  SessionRequest session = 1;
+  bytes heartbeat_json = 2;
+}
+
+message OperationAck {
+  bool accepted = 1;
+}
+
+message AbortResponse {
+  bool present = 1;
+  bytes abort_signal_json = 2;
+}
