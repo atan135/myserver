@@ -44,6 +44,7 @@ use loadtest_core::reconnect_burst::{
 use loadtest_core::report::{ErrorBuffer, ReportInput, write_report};
 use loadtest_core::resource::ResourceSampler;
 use loadtest_core::scheduler::MonotonicScheduler;
+use loadtest_core::side_http::{SideHttpAdmission, execute_live_mail_announce_steps};
 use loadtest_core::side_services::SideServiceKind;
 use loadtest_core::side_services::execute_side_services_dry;
 
@@ -586,9 +587,16 @@ fn run_live(cli: &Cli) -> Result<(), String> {
         .as_ref()
         .and_then(|side| side.r#match.as_ref())
         .is_some_and(|matcher| matcher.live_grpc);
-    if (live_chat || live_match) && game_mode {
+    let live_http = config.scenario.side_services.as_ref().is_some_and(|side| {
+        side.mail.as_ref().is_some_and(|mail| mail.live_http)
+            || side
+                .announce
+                .as_ref()
+                .is_some_and(|announce| announce.live_http)
+    });
+    if (live_chat || live_match || live_http) && game_mode {
         return Err(
-            "live chat WebSocket cannot be combined with --execute-game until a ticket-sharing flow is explicitly configured".into(),
+            "live side-service HTTP/WSS/gRPC diagnostics cannot be combined with --execute-game until a ticket-sharing flow is explicitly configured".into(),
         );
     }
     if game_mode {
@@ -642,12 +650,12 @@ fn run_live(cli: &Cli) -> Result<(), String> {
         split_game_auth_operations(&auth.operations)?
     } else {
         (
-            if live_chat || live_match {
+            if live_chat || live_match || live_http {
                 loadtest_core::auth_http::split_game_auth_operations(&auth.operations)?.0
             } else {
                 auth.operations.clone()
             },
-            if live_chat || live_match {
+            if live_chat || live_match || live_http {
                 auth.operations.last().is_some_and(|operation| {
                     matches!(operation, loadtest_core::config::AuthOperation::Logout)
                 })
@@ -1152,6 +1160,12 @@ fn run_live(cli: &Cli) -> Result<(), String> {
             );
             let mut execution_failed = execution.error.is_some();
             let pre_game_auth_completed = !execution_failed;
+            let mut side_credentials =
+                if !execution_failed && !game_mode && (live_chat || live_http) {
+                    execution.take_game_credentials()
+                } else {
+                    None
+                };
             if execution_failed {
                 errors.push(
                     "auth_operation_failed",
@@ -1422,7 +1436,7 @@ fn run_live(cli: &Cli) -> Result<(), String> {
                     .expect("live chat configuration exists")
                     .executable_plan(&budget)
                     .map_err(|error| format!("live chat plan rejected: {error}"))?;
-                let Some((ticket, _)) = execution.take_game_credentials() else {
+                let Some((ticket, _)) = side_credentials.clone() else {
                     errors.push(
                         "chat_ticket_missing",
                         "auth completed without a transferable chat ticket",
@@ -1599,7 +1613,105 @@ fn run_live(cli: &Cli) -> Result<(), String> {
                     }
                 }
             }
-            if (live_chat || live_match) && deferred_logout && pre_game_auth_completed {
+            if !execution_failed && live_http {
+                let side =
+                    config.scenario.side_services.as_ref().ok_or(
+                        "live HTTP side-service configuration disappeared after validation",
+                    )?;
+                let plan = side
+                    .executable_plan(&budget)
+                    .map_err(|error| format!("live HTTP side-service plan rejected: {error}"))?;
+                let http_steps = plan
+                    .steps
+                    .iter()
+                    .filter(|step| {
+                        matches!(
+                            step.service,
+                            SideServiceKind::Mail | SideServiceKind::Announce
+                        )
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
+                let Some((ticket, _)) = side_credentials.as_ref() else {
+                    errors.push(
+                        "side_http_ticket_missing",
+                        "auth completed without a transferable side-service ticket",
+                        Default::default(),
+                    );
+                    failed = true;
+                    execution_failed = true;
+                    finish_live_action(&mut auth_metrics, &execution.metrics, &mut abort, &budget);
+                    continue;
+                };
+                match execute_live_mail_announce_steps(
+                    side,
+                    config.environment.kind,
+                    &config.account_prepare.batch,
+                    ticket,
+                    &http_steps,
+                    action_deadline
+                        .saturating_duration_since(Instant::now())
+                        .as_millis() as u64,
+                    |admission| match admission {
+                        SideHttpAdmission::Connection => dispatch_admission
+                            .admit_side_connection(action_deadline, || {
+                                abort.check_ctrl_c(&ctrl_c);
+                                abort.check_stop_file(config.stop_file.as_deref().map(Path::new));
+                                abort.check_deadline(unix_ms(), deadline_unix_ms);
+                                if abort.should_stop_new_sessions()
+                                    || revalidate_or_abort(&protection, &mut abort).is_some()
+                                {
+                                    return Err("side HTTP connection admission stopped".into());
+                                }
+                                Ok(())
+                            })
+                            .map(|_| ())
+                            .map_err(|error| {
+                                loadtest_core::side_http::SideHttpError::Admission(
+                                    error.to_string(),
+                                )
+                            }),
+                        SideHttpAdmission::Message { writes } => dispatch_admission
+                            .admit_side_message_with_writes(
+                                u64::from(writes),
+                                action_deadline,
+                                || {
+                                    abort.check_ctrl_c(&ctrl_c);
+                                    abort.check_stop_file(
+                                        config.stop_file.as_deref().map(Path::new),
+                                    );
+                                    abort.check_deadline(unix_ms(), deadline_unix_ms);
+                                    if abort.should_stop_new_sessions()
+                                        || revalidate_or_abort(&protection, &mut abort).is_some()
+                                    {
+                                        return Err("side HTTP admission stopped".into());
+                                    }
+                                    Ok(())
+                                },
+                            )
+                            .map(|_| ())
+                            .map_err(|error| {
+                                loadtest_core::side_http::SideHttpError::Admission(
+                                    error.to_string(),
+                                )
+                            }),
+                    },
+                ) {
+                    Ok(http_metrics) => http_metrics.merge_into_metrics(&mut core_metrics),
+                    Err(error) => {
+                        errors.push(
+                            "side_http_execution_failed",
+                            format!("mail/announce HTTP execution failed: {error:?}"),
+                            Default::default(),
+                        );
+                        failed = true;
+                        execution_failed = true;
+                    }
+                }
+                side_credentials = None;
+            }
+            if (live_chat || live_match || live_http) && deferred_logout && pre_game_auth_completed
+            {
                 if !can_attempt_deferred_logout(deferred_logout, pre_game_auth_completed, &abort) {
                     errors.push(
                         "deferred_logout_not_dispatched",

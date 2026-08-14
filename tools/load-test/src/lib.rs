@@ -29,6 +29,7 @@ pub mod reconnect_burst;
 pub mod report;
 pub mod resource;
 pub mod scheduler;
+pub mod side_http;
 pub mod side_services;
 pub mod step;
 pub mod virtual_player;

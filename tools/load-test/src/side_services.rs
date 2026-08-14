@@ -322,6 +322,12 @@ pub struct SideServiceConfig {
     pub live_websocket: bool,
     #[serde(default)]
     pub live_grpc: bool,
+    /// Explicit local/test gate for bounded live HTTP diagnostics.
+    #[serde(default)]
+    pub live_http: bool,
+    /// Required batch identity for any live HTTP write operation.
+    #[serde(default)]
+    pub write_batch: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -438,6 +444,30 @@ impl SideServicesScenario {
             if matcher.live_grpc && !matches!(kind, EnvironmentKind::Local | EnvironmentKind::Test)
             {
                 return Err("live match gRPC is restricted to local/test diagnostics".into());
+            }
+        }
+        for (service, config) in [
+            (SideServiceKind::Mail, self.mail.as_ref()),
+            (SideServiceKind::Announce, self.announce.as_ref()),
+        ] {
+            let Some(config) = config else { continue };
+            if config.live_http && config.descriptor.is_none() {
+                return Err(format!(
+                    "live {service:?} HTTP requires an explicit descriptor"
+                ));
+            }
+            if config.live_http && !matches!(kind, EnvironmentKind::Local | EnvironmentKind::Test) {
+                return Err(format!(
+                    "live {service:?} HTTP is restricted to local/test diagnostics"
+                ));
+            }
+            if config.writes && kind == EnvironmentKind::Production {
+                return Err(format!(
+                    "{service:?} writes are forbidden in production profiles"
+                ));
+            }
+            if config.writes && config.live_http && config.write_batch.is_none() {
+                return Err(format!("live {service:?} writes require a dedicated batch"));
             }
         }
         Ok(())
@@ -890,6 +920,8 @@ mod tests {
                 writes: false,
                 live_websocket: false,
                 live_grpc: false,
+                live_http: false,
+                write_batch: None,
             }),
             ..Default::default()
         };
@@ -992,6 +1024,8 @@ mod tests {
                 writes: true,
                 live_websocket: false,
                 live_grpc: false,
+                live_http: false,
+                write_batch: None,
             }),
             ..Default::default()
         };
@@ -1013,6 +1047,8 @@ mod tests {
             writes: true,
             live_websocket: false,
             live_grpc: false,
+            live_http: false,
+            write_batch: None,
         });
         assert!(
             match_scenario
@@ -1047,6 +1083,38 @@ mod tests {
         assert!(
             scenario
                 .validate_for_environment(EnvironmentKind::Test)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn live_http_requires_local_test_and_dedicated_write_batch() {
+        let mut scenario = SideServicesScenario {
+            mail: Some(SideServiceConfig {
+                descriptor: Some(descriptor(SideTransportKind::Http)),
+                steps: vec![SideServiceStep {
+                    operation: SideServiceOperation::MailRead,
+                    weight: 1,
+                    think_time_ms: 0,
+                }],
+                writes: true,
+                live_http: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(
+            scenario
+                .validate_for_environment(EnvironmentKind::Local)
+                .is_err()
+        );
+        scenario.mail.as_mut().unwrap().write_batch = Some("loadtest-local".into());
+        scenario
+            .validate_for_environment(EnvironmentKind::Local)
+            .unwrap();
+        assert!(
+            scenario
+                .validate_for_environment(EnvironmentKind::Production)
                 .is_err()
         );
     }
