@@ -1,4 +1,5 @@
 import { existsSync, readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import path from "node:path";
 
@@ -216,16 +217,6 @@ function compareSubset(label, expected, actual) {
     }
   }
   return errors;
-}
-
-function firstExistingPath(baseDir, relativePaths) {
-  for (const relativePath of relativePaths) {
-    const candidate = path.join(baseDir, relativePath);
-    if (existsSync(candidate)) {
-      return candidate;
-    }
-  }
-  return null;
 }
 
 function addFieldUsage(usages, messageName, fieldNumber, category) {
@@ -469,7 +460,38 @@ function checkMockClientMessageFields(protoMessages, enumNames) {
   return errors;
 }
 
-function validateMybevyBuildScript(buildSource, buildPath) {
+const RETIRED_ITEM_ADD_NAMES = new Set([
+  "DEPRECATED_ITEM_ADD_REQ",
+  "DEPRECATED_ITEM_ADD_RES",
+  "ITEM_ADD_REQ",
+  "ITEM_ADD_RES"
+]);
+
+function isMessageTypeSource(source) {
+  return /pub\s+enum\s+MessageType\s*\{/.test(stripComments(source));
+}
+
+function hasMybevyProtocolCrateManifest(source) {
+  return /\[package\][\s\S]*?\bname\s*=\s*"myserver-protocol"/m.test(source);
+}
+
+function hashFile(filePath) {
+  return createHash("sha256").update(readFileSync(filePath)).digest("hex");
+}
+
+function compareProtoSnapshot(canonicalPath, vendoredPath, label) {
+  if (!existsSync(vendoredPath)) {
+    return [`mybevy vendored ${label} is missing: ${vendoredPath}`];
+  }
+  if (!readFileSync(canonicalPath).equals(readFileSync(vendoredPath))) {
+    return [
+      `mybevy vendored ${label} does not match packages/proto/${label} (canonical_sha256=${hashFile(canonicalPath)}, vendored_sha256=${hashFile(vendoredPath)})`
+    ];
+  }
+  return [];
+}
+
+function validateLegacyMybevyBuildScript(buildSource, buildPath) {
   const errors = [];
   if (!/compile_protos\s*\(/.test(buildSource)) {
     errors.push(`${buildPath} does not call prost_build::Config::compile_protos`);
@@ -483,55 +505,108 @@ function validateMybevyBuildScript(buildSource, buildPath) {
   return errors;
 }
 
-function checkMybevyClientProtocol(expectedMessageTypes) {
-  const rawClientRoot = process.env.MYSERVER_CLIENT_ROOT?.trim();
-  if (!rawClientRoot) {
-    return {
-      checkedFiles: [],
-      errors: [],
-      skipped: "MYSERVER_CLIENT_ROOT is not set"
-    };
+function validateCrateMybevyBuildScript(buildSource, buildPath) {
+  const errors = [];
+  if (!/compile_protos\s*\(/.test(buildSource)) {
+    errors.push(`${buildPath} does not call prost_build::Config::compile_protos`);
+  }
+  if (!/join\("vendor"\)\s*\.join\("myserver"\)\s*\.join\("proto"\)/m.test(buildSource)) {
+    errors.push(`${buildPath} does not resolve project/vendor/myserver/proto`);
+  }
+  if (!/game\.proto/.test(buildSource) || !/chat\.proto/.test(buildSource)) {
+    errors.push(`${buildPath} must reference vendored game.proto and chat.proto`);
+  }
+  if (!/compile_protos\s*\(\s*&\[\s*game_proto\s*,\s*chat_proto\s*\]\s*,\s*&\[\s*proto_dir\s*\]/m.test(buildSource)) {
+    errors.push(`${buildPath} must compile the vendored game.proto and chat.proto inputs`);
+  }
+  return errors;
+}
+
+function selectMybevyProtocolLayout(clientRoot) {
+  const errors = [];
+  const candidates = [];
+  const crateRoot = path.join(clientRoot, "project", "crates", "myserver-protocol");
+  const crateProtocolPath = path.join(crateRoot, "src", "lib.rs");
+  const crateBuildPath = path.join(crateRoot, "build.rs");
+  const crateManifestPath = path.join(crateRoot, "Cargo.toml");
+
+  if (existsSync(crateProtocolPath) && isMessageTypeSource(readFile(crateProtocolPath))) {
+    if (!existsSync(crateBuildPath) || !existsSync(crateManifestPath)) {
+      errors.push("mybevy myserver-protocol crate layout is incomplete");
+    } else if (!hasMybevyProtocolCrateManifest(readFile(crateManifestPath))) {
+      errors.push(`${crateManifestPath} does not declare package myserver-protocol`);
+    } else {
+      candidates.push({
+        name: "crate",
+        protocolPath: crateProtocolPath,
+        buildPath: crateBuildPath,
+        manifestPath: crateManifestPath,
+        vendoredProtoDirectory: path.join(clientRoot, "project", "vendor", "myserver", "proto")
+      });
+    }
   }
 
-  const clientRoot = path.resolve(rawClientRoot);
-  if (!existsSync(clientRoot)) {
-    return {
-      checkedFiles: [],
-      errors: [`mybevy root does not exist: ${clientRoot}`],
-      skipped: null
-    };
+  for (const legacyLayout of [
+    {
+      name: "legacy-project",
+      protocolPaths: [
+        "project/src/game/myserver/protocol.rs",
+        "project/src/myserver/protocol.rs"
+      ],
+      buildPath: "project/build.rs"
+    },
+    {
+      name: "legacy-root",
+      protocolPaths: ["src/game/myserver/protocol.rs", "src/myserver/protocol.rs"],
+      buildPath: "build.rs"
+    }
+  ]) {
+    const protocolPaths = legacyLayout.protocolPaths
+      .map((relativePath) => path.join(clientRoot, relativePath))
+      .filter((candidatePath) => existsSync(candidatePath) && isMessageTypeSource(readFile(candidatePath)));
+    if (protocolPaths.length > 1) {
+      errors.push(`mybevy ${legacyLayout.name} layout has multiple MessageType sources`);
+      continue;
+    }
+    if (protocolPaths.length === 0) {
+      continue;
+    }
+    const buildPath = path.join(clientRoot, legacyLayout.buildPath);
+    if (!existsSync(buildPath)) {
+      errors.push(`mybevy ${legacyLayout.name} build.rs is missing: ${buildPath}`);
+      continue;
+    }
+    candidates.push({
+      name: legacyLayout.name,
+      protocolPath: protocolPaths[0],
+      buildPath
+    });
   }
 
-  const protocolPath = firstExistingPath(clientRoot, [
-    "project/src/game/myserver/protocol.rs",
-    "project/src/myserver/protocol.rs",
-    "src/game/myserver/protocol.rs",
-    "src/myserver/protocol.rs"
-  ]);
-  const buildPath = firstExistingPath(clientRoot, ["project/build.rs", "build.rs"]);
+  if (candidates.length === 0 && errors.length === 0) {
+    errors.push(`mybevy MessageType source not found under ${clientRoot}`);
+  }
+  if (candidates.length > 1) {
+    errors.push(`mybevy protocol layout is ambiguous: ${candidates.map((candidate) => candidate.name).join(", ")}`);
+  }
+  return { errors, layout: candidates.length === 1 ? candidates[0] : null };
+}
+
+function checkMybevyMessageTypes(expectedMessageTypes, protocolPath) {
   const errors = [];
   const checkedFiles = [];
-
-  if (!protocolPath) {
-    errors.push(`mybevy protocol.rs not found under ${clientRoot}`);
-  } else {
-    checkedFiles.push(protocolPath);
+  checkedFiles.push(protocolPath);
+  try {
     const mybevyProtocolSource = readFile(protocolPath);
     const mybevyMessageTypes = parseRustMessageTypes(mybevyProtocolSource);
     // 1407/1408 are permanently reserved retired ItemAdd numbers. External clients can retain
     // their historical enum names during a rolling upgrade, but this repository no longer
     // requires or validates their payload implementation.
-    const retiredItemAddNames = new Set([
-      "DEPRECATED_ITEM_ADD_REQ",
-      "DEPRECATED_ITEM_ADD_RES",
-      "ITEM_ADD_REQ",
-      "ITEM_ADD_RES"
-    ]);
     const activeExpectedMessageTypes = Object.fromEntries(
-      Object.entries(expectedMessageTypes).filter(([name]) => !retiredItemAddNames.has(name))
+      Object.entries(expectedMessageTypes).filter(([name]) => !RETIRED_ITEM_ADD_NAMES.has(name))
     );
     const activeMybevyMessageTypes = Object.fromEntries(
-      Object.entries(mybevyMessageTypes).filter(([name]) => !retiredItemAddNames.has(name))
+      Object.entries(mybevyMessageTypes).filter(([name]) => !RETIRED_ITEM_ADD_NAMES.has(name))
     );
     errors.push(...compareSubset("mybevy MessageType", activeExpectedMessageTypes, activeMybevyMessageTypes));
     errors.push(
@@ -540,25 +615,87 @@ function checkMybevyClientProtocol(expectedMessageTypes) {
         activeMybevyMessageTypes,
         Object.fromEntries(
           Object.entries(parseRustMessageTypeFromU16(mybevyProtocolSource)).filter(
-            ([name]) => !retiredItemAddNames.has(name)
+            ([name]) => !RETIRED_ITEM_ADD_NAMES.has(name)
           )
         )
       )
     );
+  } catch (error) {
+    errors.push(`could not parse mybevy MessageType at ${protocolPath}: ${error.message}`);
+  }
+  return { checkedFiles, errors };
+}
+
+export function checkMybevyClientProtocolAtRoot(
+  expectedMessageTypes,
+  {
+    clientRoot,
+    canonicalProtoDirectory = path.join(rootDir, "packages", "proto")
+  } = {}
+) {
+  if (!clientRoot || !existsSync(clientRoot)) {
+    return {
+      checkedFiles: [],
+      errors: [`mybevy root does not exist: ${clientRoot ?? ""}`],
+      layout: null,
+      skipped: null
+    };
   }
 
-  if (!buildPath) {
-    errors.push(`mybevy build.rs not found under ${clientRoot}`);
+  const resolvedClientRoot = path.resolve(clientRoot);
+  const selected = selectMybevyProtocolLayout(resolvedClientRoot);
+  if (!selected.layout) {
+    return {
+      checkedFiles: [],
+      errors: selected.errors,
+      layout: null,
+      skipped: null
+    };
+  }
+
+  const { layout } = selected;
+  const messageTypeResult = checkMybevyMessageTypes(expectedMessageTypes, layout.protocolPath);
+  const errors = [...selected.errors, ...messageTypeResult.errors];
+  const checkedFiles = [...messageTypeResult.checkedFiles, layout.buildPath];
+
+  if (layout.name === "crate") {
+    checkedFiles.push(layout.manifestPath);
+    errors.push(...validateCrateMybevyBuildScript(readFile(layout.buildPath), layout.buildPath));
+    for (const protoName of ["game.proto", "chat.proto"]) {
+      const canonicalPath = path.join(canonicalProtoDirectory, protoName);
+      if (!existsSync(canonicalPath)) {
+        errors.push(`packages/proto/${protoName} missing`);
+        continue;
+      }
+      const vendoredPath = path.join(layout.vendoredProtoDirectory, protoName);
+      checkedFiles.push(vendoredPath);
+      errors.push(...compareProtoSnapshot(canonicalPath, vendoredPath, protoName));
+    }
   } else {
-    checkedFiles.push(buildPath);
-    errors.push(...validateMybevyBuildScript(readFile(buildPath), buildPath));
+    errors.push(...validateLegacyMybevyBuildScript(readFile(layout.buildPath), layout.buildPath));
   }
 
   return {
-    checkedFiles: checkedFiles.map((filePath) => path.relative(clientRoot, filePath)),
+    checkedFiles: checkedFiles.map((filePath) =>
+      path.relative(resolvedClientRoot, filePath).split(path.sep).join("/")
+    ),
     errors,
+    layout: layout.name,
     skipped: null
   };
+}
+
+function checkMybevyClientProtocol(expectedMessageTypes) {
+  const rawClientRoot = process.env.MYSERVER_CLIENT_ROOT?.trim();
+  if (!rawClientRoot) {
+    return {
+      checkedFiles: [],
+      errors: [],
+      layout: null,
+      skipped: "MYSERVER_CLIENT_ROOT is not set"
+    };
+  }
+  return checkMybevyClientProtocolAtRoot(expectedMessageTypes, { clientRoot: rawClientRoot });
 }
 
 function checkChatSharedProto() {
