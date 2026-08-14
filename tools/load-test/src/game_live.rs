@@ -326,9 +326,15 @@ enum PlayerMatchEventOutcome {
     Invalid,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TwoPlayerMatchAssignmentOutcome {
+    Agreed,
+    CanonicalMatchIdMismatch,
+    RoomMismatch,
+}
+
 fn classify_player_match_event(
     event: &MatchEventPush,
-    expected_match_id: Option<&str>,
     metrics: &mut PlayerMatchMetrics,
 ) -> PlayerMatchEventOutcome {
     if event.event == "match_cancelled" {
@@ -339,14 +345,24 @@ fn classify_player_match_event(
         metrics.record_timeout();
         return PlayerMatchEventOutcome::TimedOut;
     }
-    if event.event == "matched"
-        && !event.room_id.is_empty()
-        && expected_match_id.is_none_or(|match_id| event.match_id == match_id)
-    {
+    if event.event == "matched" && !event.match_id.is_empty() && !event.room_id.is_empty() {
         return PlayerMatchEventOutcome::Matched;
     }
     metrics.business_errors = metrics.business_errors.saturating_add(1);
     PlayerMatchEventOutcome::Invalid
+}
+
+fn classify_two_player_match_assignment(
+    canonical_match_ids: [&str; 2],
+    room_ids: [&str; 2],
+) -> TwoPlayerMatchAssignmentOutcome {
+    if canonical_match_ids[0] != canonical_match_ids[1] {
+        TwoPlayerMatchAssignmentOutcome::CanonicalMatchIdMismatch
+    } else if room_ids[0] != room_ids[1] {
+        TwoPlayerMatchAssignmentOutcome::RoomMismatch
+    } else {
+        TwoPlayerMatchAssignmentOutcome::Agreed
+    }
 }
 
 fn with_player_match_metrics(
@@ -1523,7 +1539,6 @@ impl GameSessionRunner {
             )
             .await?;
         }
-        let mut match_ids = [String::new(), String::new()];
         for player_index in 0..2 {
             player_match_metrics[player_index].record_start();
             let start = sessions[player_index].begin_gameplay_request(
@@ -1564,9 +1579,9 @@ impl GameSessionRunner {
                     failure_category: Some("match_start_rejected"),
                 });
             }
-            match_ids[player_index] = body.match_id;
             steps[player_index].push(GameRunnerStep::MatchStarted);
         }
+        let mut matched_canonical_match_ids = [String::new(), String::new()];
         for player_index in 0..2 {
             let event = receive_match_event(
                 transports[player_index],
@@ -1576,13 +1591,10 @@ impl GameSessionRunner {
                 &mut player_match_metrics[player_index],
             )
             .await?;
-            match classify_player_match_event(
-                &event,
-                Some(&match_ids[player_index]),
-                &mut player_match_metrics[player_index],
-            ) {
+            match classify_player_match_event(&event, &mut player_match_metrics[player_index]) {
                 PlayerMatchEventOutcome::Matched => {
                     player_match_metrics[player_index].record_matched();
+                    matched_canonical_match_ids[player_index] = event.match_id;
                     matched_rooms[player_index] = event.room_id;
                     steps[player_index].push(GameRunnerStep::MatchMatched);
                 }
@@ -1618,20 +1630,45 @@ impl GameSessionRunner {
                 }
             }
         }
-        if matched_rooms[0] != matched_rooms[1] {
-            for metrics in &mut player_match_metrics {
-                metrics.business_errors = metrics.business_errors.saturating_add(1);
+        match classify_two_player_match_assignment(
+            [
+                matched_canonical_match_ids[0].as_str(),
+                matched_canonical_match_ids[1].as_str(),
+            ],
+            [matched_rooms[0].as_str(), matched_rooms[1].as_str()],
+        ) {
+            TwoPlayerMatchAssignmentOutcome::Agreed => {}
+            TwoPlayerMatchAssignmentOutcome::CanonicalMatchIdMismatch => {
+                for metrics in &mut player_match_metrics {
+                    metrics.business_errors = metrics.business_errors.saturating_add(1);
+                }
+                return Err(GameLiveError::GameplayFailed {
+                    message: "matched players received different canonical match assignments"
+                        .to_string(),
+                    metrics: {
+                        let mut snapshot = trackers[0].telemetry();
+                        snapshot.merge(&player_match_metrics[0].snapshot());
+                        snapshot.merge(&player_match_metrics[1].snapshot());
+                        snapshot
+                    },
+                    failure_category: Some("match_assignment_mismatch"),
+                });
             }
-            return Err(GameLiveError::GameplayFailed {
-                message: "matched players received different rooms".to_string(),
-                metrics: {
-                    let mut snapshot = trackers[0].telemetry();
-                    snapshot.merge(&player_match_metrics[0].snapshot());
-                    snapshot.merge(&player_match_metrics[1].snapshot());
-                    snapshot
-                },
-                failure_category: Some("match_room_mismatch"),
-            });
+            TwoPlayerMatchAssignmentOutcome::RoomMismatch => {
+                for metrics in &mut player_match_metrics {
+                    metrics.business_errors = metrics.business_errors.saturating_add(1);
+                }
+                return Err(GameLiveError::GameplayFailed {
+                    message: "matched players received different rooms".to_string(),
+                    metrics: {
+                        let mut snapshot = trackers[0].telemetry();
+                        snapshot.merge(&player_match_metrics[0].snapshot());
+                        snapshot.merge(&player_match_metrics[1].snapshot());
+                        snapshot
+                    },
+                    failure_category: Some("match_room_mismatch"),
+                });
+            }
         }
         // MatchEventPush contains no server-side room-create timestamp. Keep
         // this as an explicit observation hole rather than using queue time.
@@ -4075,7 +4112,7 @@ mod tests {
             error_code: String::new(),
         };
         assert_eq!(
-            classify_player_match_event(&cancelled, Some("match-a"), &mut metrics),
+            classify_player_match_event(&cancelled, &mut metrics),
             PlayerMatchEventOutcome::Cancelled
         );
         let timed_out = MatchEventPush {
@@ -4086,18 +4123,29 @@ mod tests {
             error_code: "MATCH_TIMEOUT".into(),
         };
         assert_eq!(
-            classify_player_match_event(&timed_out, Some("match-a"), &mut metrics),
+            classify_player_match_event(&timed_out, &mut metrics),
             PlayerMatchEventOutcome::TimedOut
         );
-        let invalid = MatchEventPush {
+        let matched = MatchEventPush {
             event: "matched".into(),
-            match_id: "other-match".into(),
+            match_id: "canonical-match".into(),
             room_id: "room-a".into(),
             token: String::new(),
             error_code: String::new(),
         };
         assert_eq!(
-            classify_player_match_event(&invalid, Some("match-a"), &mut metrics),
+            classify_player_match_event(&matched, &mut metrics),
+            PlayerMatchEventOutcome::Matched
+        );
+        let invalid = MatchEventPush {
+            event: "matched".into(),
+            match_id: String::new(),
+            room_id: "room-a".into(),
+            token: String::new(),
+            error_code: String::new(),
+        };
+        assert_eq!(
+            classify_player_match_event(&invalid, &mut metrics),
             PlayerMatchEventOutcome::Invalid
         );
         let snapshot = metrics.snapshot();
@@ -4107,6 +4155,64 @@ mod tests {
         assert_eq!(
             snapshot.counters["player_match_grpc_status_observation_holes"],
             1
+        );
+    }
+
+    #[test]
+    fn two_player_match_assignments_require_shared_canonical_assignment() {
+        // MatchStartRes identifies each player's independent queue request.
+        // MatchEventPush carries the canonical assignment shared by the pool.
+        let queue_match_ids = ["queue-match-a", "queue-match-b"];
+        assert_ne!(queue_match_ids[0], queue_match_ids[1]);
+
+        let mut first_metrics = PlayerMatchMetrics::default();
+        let first_event = MatchEventPush {
+            event: "matched".into(),
+            match_id: "canonical-match".into(),
+            room_id: "canonical-room".into(),
+            token: String::new(),
+            error_code: String::new(),
+        };
+        let mut second_metrics = PlayerMatchMetrics::default();
+        let second_event = MatchEventPush {
+            event: "matched".into(),
+            match_id: "canonical-match".into(),
+            room_id: "canonical-room".into(),
+            token: String::new(),
+            error_code: String::new(),
+        };
+        assert_eq!(
+            classify_player_match_event(&first_event, &mut first_metrics),
+            PlayerMatchEventOutcome::Matched
+        );
+        assert_eq!(
+            classify_player_match_event(&second_event, &mut second_metrics),
+            PlayerMatchEventOutcome::Matched
+        );
+        assert_eq!(
+            classify_two_player_match_assignment(
+                [
+                    first_event.match_id.as_str(),
+                    second_event.match_id.as_str()
+                ],
+                [first_event.room_id.as_str(), second_event.room_id.as_str()],
+            ),
+            TwoPlayerMatchAssignmentOutcome::Agreed
+        );
+
+        assert_eq!(
+            classify_two_player_match_assignment(
+                ["canonical-match-a", "canonical-match-b"],
+                ["canonical-room", "canonical-room"],
+            ),
+            TwoPlayerMatchAssignmentOutcome::CanonicalMatchIdMismatch
+        );
+        assert_eq!(
+            classify_two_player_match_assignment(
+                ["canonical-match", "canonical-match"],
+                ["canonical-room-a", "canonical-room-b"],
+            ),
+            TwoPlayerMatchAssignmentOutcome::RoomMismatch
         );
     }
 
