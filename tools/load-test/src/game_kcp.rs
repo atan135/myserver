@@ -13,7 +13,10 @@ use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio_kcp::KcpStream;
 
 use crate::config::{ConfigError, Endpoint, LoadTestConfig, RunAccess};
-use crate::pb::{AuthReq, AuthRes, PingReq, PingRes};
+use crate::pb::{
+    AuthReq, AuthRes, MatchCancelReq, MatchEventStreamReq, MatchStartReq, MatchStatusReq, PingReq,
+    PingRes,
+};
 use crate::protocol_version_policy::{
     CLIENT_PROTOCOL_VERSION_TOO_NEW, CLIENT_PROTOCOL_VERSION_TOO_OLD,
     CURRENT_CLIENT_PROTOCOL_VERSION,
@@ -456,6 +459,43 @@ impl GameConnectionLifecycle {
         ))
     }
 
+    pub fn begin_match_start(&mut self, mode: &str) -> Result<OutboundPacket, GameKcpError> {
+        self.begin_gameplay_request(
+            MessageType::MatchStartReq,
+            MessageType::MatchStartRes,
+            &game_protocol::encode_body(&MatchStartReq {
+                mode: mode.to_string(),
+                rank_tier: 0,
+            }),
+        )
+    }
+
+    pub fn begin_match_cancel(&mut self, match_id: &str) -> Result<OutboundPacket, GameKcpError> {
+        self.begin_gameplay_request(
+            MessageType::MatchCancelReq,
+            MessageType::MatchCancelRes,
+            &game_protocol::encode_body(&MatchCancelReq {
+                match_id: match_id.to_string(),
+            }),
+        )
+    }
+
+    pub fn begin_match_status(&mut self) -> Result<OutboundPacket, GameKcpError> {
+        self.begin_gameplay_request(
+            MessageType::MatchStatusReq,
+            MessageType::MatchStatusRes,
+            &game_protocol::encode_body(&MatchStatusReq {}),
+        )
+    }
+
+    pub fn begin_match_event_stream(&mut self) -> Result<OutboundPacket, GameKcpError> {
+        self.begin_gameplay_request(
+            MessageType::MatchEventStreamReq,
+            MessageType::MatchEventStreamRes,
+            &game_protocol::encode_body(&MatchEventStreamReq {}),
+        )
+    }
+
     /// Removes the response expectation created for a packet that could not
     /// be written, then handles the failed transport as a disconnect.
     pub fn handle_outbound_write_failure(
@@ -670,6 +710,7 @@ fn is_push(message_type: MessageType) -> bool {
             | MessageType::SessionKickPush
             | MessageType::AuthorityMigrationStartPush
             | MessageType::AuthorityMigrationCompletePush
+            | MessageType::MatchEventPush
             | MessageType::InventoryUpdatePush
             | MessageType::AttrChangePush
             | MessageType::VisualChangePush

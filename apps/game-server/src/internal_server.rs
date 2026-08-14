@@ -1011,8 +1011,9 @@ mod tests {
         let config = test_config();
         let config_tables = ConfigTableRuntime::load(std::path::Path::new(&config.csv_dir))
             .expect("test config tables should load");
+        let match_client = crate::match_client::create_match_client_shared();
         let room_manager = Arc::new(RoomManager::with_policy_registry_and_cleanup_interval(
-            crate::match_client::create_match_client_shared(),
+            match_client.clone(),
             Arc::new(NoopRoomLogicFactory),
             config_tables.room_policy_registry(),
             3600,
@@ -1052,6 +1053,7 @@ mod tests {
                 .await
                 .expect("disabled PostgreSQL audit store"),
             room_manager,
+            match_client,
             runtime_config: Arc::new(RwLock::new(runtime_config())),
             connection_count: Arc::new(AtomicU64::new(0)),
             config_tables,

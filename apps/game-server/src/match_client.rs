@@ -3,20 +3,23 @@
 //! GameServer 通过此客户端调用 MatchService 的内部接口
 
 use service_registry::{
-    ConvergenceAttempt, ConvergenceConfig, ConvergenceTask, HealthState, RegistryClient,
-    StartupErrorCode, record_discovery_metric, spawn_convergence,
+    record_discovery_metric, spawn_convergence, ConvergenceAttempt, ConvergenceConfig,
+    ConvergenceTask, HealthState, RegistryClient, StartupErrorCode,
 };
 use std::error::Error;
 use std::future::Future;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
 use tonic::transport::Channel;
 
 use crate::proto::myserver::matchservice::match_internal_client::MatchInternalClient;
+use crate::proto::myserver::matchservice::match_service_client::MatchServiceClient;
 use crate::proto::myserver::matchservice::{
-    CreateRoomAndJoinReq, CreateRoomAndJoinRes, MatchEndReq, MatchEndRes, PlayerJoinedReq,
-    PlayerJoinedRes, PlayerLeftReq, PlayerLeftRes,
+    CreateRoomAndJoinReq, CreateRoomAndJoinRes, MatchCancelReq, MatchCancelRes, MatchEndReq,
+    MatchEndRes, MatchEvent, MatchEventStreamReq, MatchStartReq, MatchStartRes, MatchStatusReq,
+    MatchStatusRes, PlayerJoinedReq, PlayerJoinedRes, PlayerLeftReq, PlayerLeftRes,
 };
 
 /// MatchClient 配置
@@ -125,10 +128,12 @@ pub fn rediscovery_convergence_config(interval_secs: u64) -> ConvergenceConfig {
 }
 
 /// MatchClient
+#[derive(Clone)]
 pub struct MatchClient {
     inner: MatchInternalClient<Channel>,
+    service: MatchServiceClient<Channel>,
     addr: String,
-    reconnect_required: bool,
+    reconnect_required: Arc<AtomicBool>,
 }
 
 impl MatchClient {
@@ -140,14 +145,16 @@ impl MatchClient {
             .connect()
             .await?;
 
-        let inner = MatchInternalClient::new(channel);
+        let inner = MatchInternalClient::new(channel.clone());
+        let service = MatchServiceClient::new(channel);
 
         tracing::info!(addr = %config.addr, "connected to match-service");
 
         Ok(Self {
             inner,
+            service,
             addr: config.addr,
-            reconnect_required: false,
+            reconnect_required: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -156,7 +163,85 @@ impl MatchClient {
     }
 
     pub fn reconnect_required(&self) -> bool {
-        self.reconnect_required
+        self.reconnect_required.load(Ordering::Acquire)
+    }
+
+    pub async fn match_start(
+        &self,
+        character_id: &str,
+        mode: &str,
+        rank_tier: i32,
+    ) -> Result<MatchStartRes, Box<dyn std::error::Error + Send + Sync>> {
+        let response = self
+            .service
+            .clone()
+            .match_start(MatchStartReq {
+                character_id: character_id.to_string(),
+                mode: mode.to_string(),
+                rank_tier,
+            })
+            .await
+            .map_err(|error| {
+                self.reconnect_required.store(true, Ordering::Release);
+                error
+            })?;
+        Ok(response.into_inner())
+    }
+
+    pub async fn match_cancel(
+        &self,
+        character_id: &str,
+        match_id: &str,
+    ) -> Result<MatchCancelRes, Box<dyn std::error::Error + Send + Sync>> {
+        let response = self
+            .service
+            .clone()
+            .match_cancel(MatchCancelReq {
+                character_id: character_id.to_string(),
+                match_id: match_id.to_string(),
+            })
+            .await
+            .map_err(|error| {
+                self.reconnect_required.store(true, Ordering::Release);
+                error
+            })?;
+        Ok(response.into_inner())
+    }
+
+    pub async fn match_status(
+        &self,
+        character_id: &str,
+    ) -> Result<MatchStatusRes, Box<dyn std::error::Error + Send + Sync>> {
+        let response = self
+            .service
+            .clone()
+            .match_status(MatchStatusReq {
+                character_id: character_id.to_string(),
+            })
+            .await
+            .map_err(|error| {
+                self.reconnect_required.store(true, Ordering::Release);
+                error
+            })?;
+        Ok(response.into_inner())
+    }
+
+    pub async fn match_event_stream(
+        &self,
+        character_id: &str,
+    ) -> Result<tonic::Streaming<MatchEvent>, Box<dyn std::error::Error + Send + Sync>> {
+        let response = self
+            .service
+            .clone()
+            .match_event_stream(MatchEventStreamReq {
+                character_id: character_id.to_string(),
+            })
+            .await
+            .map_err(|error| {
+                self.reconnect_required.store(true, Ordering::Release);
+                error
+            })?;
+        Ok(response.into_inner())
     }
 
     /// 通知 MatchService 房间已创建
@@ -179,7 +264,7 @@ impl MatchClient {
             .create_room_and_join(req)
             .await
             .map_err(|error| {
-                self.reconnect_required = true;
+                self.reconnect_required.store(true, Ordering::Release);
                 error
             })?;
         let res: CreateRoomAndJoinRes = resp.into_inner();
@@ -217,7 +302,7 @@ impl MatchClient {
         };
 
         let resp = self.inner.player_joined(req).await.map_err(|error| {
-            self.reconnect_required = true;
+            self.reconnect_required.store(true, Ordering::Release);
             error
         })?;
         let res: PlayerJoinedRes = resp.into_inner();
@@ -255,7 +340,7 @@ impl MatchClient {
         };
 
         let resp = self.inner.player_left(req).await.map_err(|error| {
-            self.reconnect_required = true;
+            self.reconnect_required.store(true, Ordering::Release);
             error
         })?;
         let res: PlayerLeftRes = resp.into_inner();
@@ -294,7 +379,7 @@ impl MatchClient {
         };
 
         let resp = self.inner.match_end(req).await.map_err(|error| {
-            self.reconnect_required = true;
+            self.reconnect_required.store(true, Ordering::Release);
             error
         })?;
         let res: MatchEndRes = resp.into_inner();
@@ -766,9 +851,10 @@ mod tests {
             .connect_lazy();
 
         MatchClient {
-            inner: MatchInternalClient::new(channel),
+            inner: MatchInternalClient::new(channel.clone()),
+            service: MatchServiceClient::new(channel),
             addr: addr.to_string(),
-            reconnect_required,
+            reconnect_required: Arc::new(AtomicBool::new(reconnect_required)),
         }
     }
 

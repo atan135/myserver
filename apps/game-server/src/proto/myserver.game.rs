@@ -407,6 +407,78 @@ pub struct RoomReconnectRes {
     #[prost(message, optional, tag = "10")]
     pub movement_recovery: ::core::option::Option<MovementRecoveryState>,
 }
+/// Player-facing match operations. The character is always resolved from the
+/// authenticated ticket by game-server; request messages intentionally carry
+/// no identity field.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct MatchStartReq {
+    #[prost(string, tag = "1")]
+    pub mode: ::prost::alloc::string::String,
+    #[prost(int32, tag = "2")]
+    pub rank_tier: i32,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct MatchStartRes {
+    #[prost(bool, tag = "1")]
+    pub ok: bool,
+    #[prost(string, tag = "2")]
+    pub match_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub error_code: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct MatchCancelReq {
+    #[prost(string, tag = "1")]
+    pub match_id: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct MatchCancelRes {
+    #[prost(bool, tag = "1")]
+    pub ok: bool,
+    #[prost(string, tag = "2")]
+    pub error_code: ::prost::alloc::string::String,
+}
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct MatchStatusReq {}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct MatchStatusRes {
+    #[prost(bool, tag = "1")]
+    pub ok: bool,
+    #[prost(string, tag = "2")]
+    pub status: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub match_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "4")]
+    pub room_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "5")]
+    pub token: ::prost::alloc::string::String,
+    #[prost(int64, tag = "6")]
+    pub estimated_wait_secs: i64,
+    #[prost(string, tag = "7")]
+    pub error_code: ::prost::alloc::string::String,
+}
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct MatchEventStreamReq {}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct MatchEventStreamRes {
+    #[prost(bool, tag = "1")]
+    pub ok: bool,
+    #[prost(string, tag = "2")]
+    pub error_code: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct MatchEventPush {
+    #[prost(string, tag = "1")]
+    pub event: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub match_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub room_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "4")]
+    pub token: ::prost::alloc::string::String,
+    #[prost(string, tag = "5")]
+    pub error_code: ::prost::alloc::string::String,
+}
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ServerRedirectPush {
     #[prost(string, tag = "1")]

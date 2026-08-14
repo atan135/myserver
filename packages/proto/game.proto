@@ -296,6 +296,56 @@ message RoomReconnectRes {
   MovementRecoveryState movement_recovery = 10;
 }
 
+// Player-facing match operations. The character is always resolved from the
+// authenticated ticket by game-server; request messages intentionally carry
+// no identity field.
+message MatchStartReq {
+  string mode = 1;
+  int32 rank_tier = 2;
+}
+
+message MatchStartRes {
+  bool ok = 1;
+  string match_id = 2;
+  string error_code = 3;
+}
+
+message MatchCancelReq {
+  string match_id = 1;
+}
+
+message MatchCancelRes {
+  bool ok = 1;
+  string error_code = 2;
+}
+
+message MatchStatusReq {}
+
+message MatchStatusRes {
+  bool ok = 1;
+  string status = 2;
+  string match_id = 3;
+  string room_id = 4;
+  string token = 5;
+  int64 estimated_wait_secs = 6;
+  string error_code = 7;
+}
+
+message MatchEventStreamReq {}
+
+message MatchEventStreamRes {
+  bool ok = 1;
+  string error_code = 2;
+}
+
+message MatchEventPush {
+  string event = 1;
+  string match_id = 2;
+  string room_id = 3;
+  string token = 4;
+  string error_code = 5;
+}
+
 enum RoomMigrationState {
   ROOM_MIGRATION_STATE_OWNED_BY_OLD = 0;
   ROOM_MIGRATION_STATE_DRAINING_ON_OLD = 1;

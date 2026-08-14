@@ -23,8 +23,9 @@ use crate::gameplay::{
     room_reconnect_step,
 };
 use crate::pb::{
-    PlayerInputReq, PlayerInputRes, RoomJoinRes, RoomLeaveRes, RoomReadyRes, RoomReconnectReq,
-    RoomReconnectRes, RoomStartRes,
+    MatchEventPush, MatchEventStreamReq, MatchStartReq, MatchStatusReq,
+    PlayerInputReq, PlayerInputRes, RoomJoinReq, RoomJoinRes, RoomLeaveRes, RoomReadyRes,
+    RoomReconnectReq, RoomReconnectRes, RoomStartRes,
 };
 use crate::virtual_player::{
     PlayerConnection, VirtualPlayerError, VirtualPlayerEvent, VirtualPlayerSession,
@@ -185,6 +186,11 @@ pub enum GameRunnerStep {
     Active,
     HeartbeatSent,
     HeartbeatAcknowledged,
+    MatchEventStreamSubscribed,
+    MatchStarted,
+    MatchMatched,
+    MatchCancelled,
+    MatchStatusRead,
     RoomJoined,
     RoomReady,
     RoomStarted,
@@ -1375,6 +1381,139 @@ impl GameSessionRunner {
             }
         }
 
+        // Formal player matching goes through the same authenticated KCP
+        // sessions as room traffic. No room id is accepted from the scenario
+        // for this path; it must be learned from MatchEventPush.
+        let mut matched_rooms = [String::new(), String::new()];
+        for player_index in 0..2 {
+            let stream = sessions[player_index].begin_gameplay_request(
+                pool,
+                MessageType::MatchEventStreamReq,
+                MessageType::MatchEventStreamRes,
+                game_protocol::encode_body(&MatchEventStreamReq {}).as_slice(),
+            )?;
+            run_checkpoint(&mut checkpoint, GameRunnerCheckpoint::OutboundMessage)?;
+            transports[player_index].send(&stream).await?;
+            steps[player_index].push(GameRunnerStep::MatchEventStreamSubscribed);
+            receive_match_response(
+                transports[player_index],
+                &mut sessions[player_index],
+                pool,
+                &stream,
+                MessageType::MatchEventStreamRes,
+                crate::gameplay::DEFAULT_STEP_TIMEOUT_MS,
+            )
+            .await?;
+        }
+        let mut match_ids = [String::new(), String::new()];
+        for player_index in 0..2 {
+            let start = sessions[player_index].begin_gameplay_request(
+                pool,
+                MessageType::MatchStartReq,
+                MessageType::MatchStartRes,
+                game_protocol::encode_body(&MatchStartReq {
+                    mode: "1v1".to_string(),
+                    rank_tier: 0,
+                })
+                .as_slice(),
+            )?;
+            run_checkpoint(&mut checkpoint, GameRunnerCheckpoint::OutboundMessage)?;
+            transports[player_index].send(&start).await?;
+            let response = receive_match_response(
+                transports[player_index],
+                &mut sessions[player_index],
+                pool,
+                &start,
+                MessageType::MatchStartRes,
+                crate::gameplay::DEFAULT_STEP_TIMEOUT_MS,
+            )
+            .await?;
+            let body = crate::pb::MatchStartRes::decode(response.body.as_slice())
+                .map_err(|_| GameLiveError::Transport("invalid match start response"))?;
+            if !body.ok || body.match_id.is_empty() {
+                return Err(GameLiveError::GameplayFailed {
+                    message: "match start rejected".to_string(),
+                    metrics: trackers[player_index].telemetry(),
+                    failure_category: Some("match_start_rejected"),
+                });
+            }
+            match_ids[player_index] = body.match_id;
+            steps[player_index].push(GameRunnerStep::MatchStarted);
+        }
+        for player_index in 0..2 {
+            let event = receive_match_event(
+                transports[player_index],
+                &mut sessions[player_index],
+                pool,
+                crate::gameplay::DEFAULT_STEP_TIMEOUT_MS,
+            )
+            .await?;
+            if event.event != "matched"
+                || event.room_id.is_empty()
+                || event.match_id != match_ids[player_index]
+            {
+                return Err(GameLiveError::GameplayFailed {
+                    message: "match event did not produce a room".to_string(),
+                    metrics: trackers[player_index].telemetry(),
+                    failure_category: Some("match_event_invalid"),
+                });
+            }
+            matched_rooms[player_index] = event.room_id;
+            steps[player_index].push(GameRunnerStep::MatchMatched);
+        }
+        if matched_rooms[0] != matched_rooms[1] {
+            return Err(GameLiveError::GameplayFailed {
+                message: "matched players received different rooms".to_string(),
+                metrics: trackers[0].telemetry(),
+                failure_category: Some("match_room_mismatch"),
+            });
+        }
+        for player_index in 0..2 {
+            let status = sessions[player_index].begin_gameplay_request(
+                pool,
+                MessageType::MatchStatusReq,
+                MessageType::MatchStatusRes,
+                game_protocol::encode_body(&MatchStatusReq {}).as_slice(),
+            )?;
+            run_checkpoint(&mut checkpoint, GameRunnerCheckpoint::OutboundMessage)?;
+            transports[player_index].send(&status).await?;
+            let response = receive_match_response(
+                transports[player_index],
+                &mut sessions[player_index],
+                pool,
+                &status,
+                MessageType::MatchStatusRes,
+                crate::gameplay::DEFAULT_STEP_TIMEOUT_MS,
+            )
+            .await?;
+            let body = crate::pb::MatchStatusRes::decode(response.body.as_slice())
+                .map_err(|_| GameLiveError::Transport("invalid match status response"))?;
+            if !body.ok || body.room_id != matched_rooms[player_index] {
+                return Err(GameLiveError::GameplayFailed {
+                    message: "match status did not confirm room".to_string(),
+                    metrics: trackers[player_index].telemetry(),
+                    failure_category: Some("match_status_invalid"),
+                });
+            }
+            steps[player_index].push(GameRunnerStep::MatchStatusRead);
+        }
+        let mut prepared = prepared;
+        prepared.approved_room_id = matched_rooms[0].clone();
+        for coordinated in &mut prepared.packets {
+            if coordinated.packet.step.request_type == MessageType::RoomJoinReq {
+                let header = coordinated.packet.packet_header()?;
+                let _ = RoomJoinReq::decode(coordinated.packet.body()?)
+                    .map_err(|_| GameLiveError::Transport("invalid planned room join"))?;
+                coordinated.packet.packet = game_protocol::encode_packet(
+                    MessageType::RoomJoinReq,
+                    header.seq,
+                    &game_protocol::encode_body(&RoomJoinReq {
+                        room_id: matched_rooms[0].clone(),
+                        policy_id: "default_match".to_string(),
+                    }),
+                );
+            }
+        }
         let mut packet_index = 0;
         let mut frame_bundles_before_inputs = None;
         while packet_index < prepared.packets.len() {
@@ -2021,6 +2160,73 @@ async fn receive_gameplay_response(
                 session.close(pool);
                 return Err(gameplay_failure(error, tracker));
             }
+        }
+    }
+}
+
+async fn receive_match_response(
+    transport: &mut LiveKcpTransport,
+    session: &mut VirtualPlayerSession,
+    pool: &mut AccountLeasePool,
+    outbound: &OutboundPacket,
+    expected: MessageType,
+    timeout_ms: u64,
+) -> Result<Packet, GameLiveError> {
+    let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+    loop {
+        let packet = transport.receive_until(deadline).await.map_err(|_| {
+            let _ = session.handle_request_timeout(pool, outbound, 0);
+            GameLiveError::GameplayFailed {
+                message: "match response timeout".to_string(),
+                metrics: crate::metrics::MetricsSnapshot::default(),
+                failure_category: Some("match_response_timeout"),
+            }
+        })?;
+        let Some(_message_type) = packet.message_type() else {
+            return Err(GameLiveError::Transport("invalid match message type"));
+        };
+        match session.handle_packet(pool, packet.clone())? {
+            VirtualPlayerEvent::Response {
+                message_type: actual,
+                ..
+            } if actual == expected => return Ok(packet),
+            VirtualPlayerEvent::Push { .. } => continue,
+            VirtualPlayerEvent::Response { .. } => {
+                return Err(GameLiveError::Transport("unexpected match response"));
+            }
+            _ => return Err(GameLiveError::Transport("match session failed")),
+        }
+    }
+}
+
+async fn receive_match_event(
+    transport: &mut LiveKcpTransport,
+    session: &mut VirtualPlayerSession,
+    pool: &mut AccountLeasePool,
+    timeout_ms: u64,
+) -> Result<MatchEventPush, GameLiveError> {
+    let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+    loop {
+        let packet =
+            transport
+                .receive_until(deadline)
+                .await
+                .map_err(|_| GameLiveError::GameplayFailed {
+                    message: "match event timeout".to_string(),
+                    metrics: crate::metrics::MetricsSnapshot::default(),
+                    failure_category: Some("match_event_timeout"),
+                })?;
+        match session.handle_packet(pool, packet.clone())? {
+            VirtualPlayerEvent::Push {
+                message_type: MessageType::MatchEventPush,
+                ..
+            } => {
+                return MatchEventPush::decode(packet.body.as_slice())
+                    .map_err(|_| GameLiveError::Transport("invalid match event body"));
+            }
+            VirtualPlayerEvent::Push { .. } => continue,
+            VirtualPlayerEvent::Response { .. } => continue,
+            _ => return Err(GameLiveError::Transport("match event stream failed")),
         }
     }
 }

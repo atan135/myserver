@@ -22,6 +22,7 @@ use crate::core::room::{
 };
 use crate::core::runtime::RoomManager;
 use crate::db_store::PgAuditStore;
+use crate::match_client::SharedMatchClient;
 use crate::protocol::{MessageType, encode_body};
 use crate::server::{PlayerInputAnomalyTracker, PlayerMessageRateLimiter, RuntimeConfig};
 use crate::session::{AuthenticatedSessionIdentity, Session, SessionState};
@@ -139,6 +140,7 @@ pub struct ServiceContext {
     pub config: Config,
     pub db_store: PgAuditStore,
     pub room_manager: SharedRoomManager,
+    pub match_client: SharedMatchClient,
     pub runtime_config: SharedRuntimeConfig,
     pub connection_count: Arc<AtomicU64>,
     pub config_tables: ConfigTableRuntime,

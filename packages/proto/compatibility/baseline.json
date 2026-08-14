@@ -1,5 +1,5 @@
 {
-  "digest": "sha256:24534218671a9c17fe65dc7092bdfaf43923bc334e208fb2b7979611591d10fd",
+  "digest": "sha256:69818c9c4ef677a4fe8eefd9c4d47436ddadd48e9c1ea11921735dceb893336e",
   "files": [
     {
       "enums": [],
@@ -4325,6 +4325,248 @@
             }
           ],
           "name": "LearnCharacterDisciplineRes",
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "fields": [
+            {
+              "label": "singular",
+              "name": "match_id",
+              "number": 1,
+              "oneof": "",
+              "type": "string"
+            }
+          ],
+          "name": "MatchCancelReq",
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "fields": [
+            {
+              "label": "singular",
+              "name": "ok",
+              "number": 1,
+              "oneof": "",
+              "type": "bool"
+            },
+            {
+              "label": "singular",
+              "name": "error_code",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            }
+          ],
+          "name": "MatchCancelRes",
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "fields": [
+            {
+              "label": "singular",
+              "name": "event",
+              "number": 1,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "match_id",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "room_id",
+              "number": 3,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "token",
+              "number": 4,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "error_code",
+              "number": 5,
+              "oneof": "",
+              "type": "string"
+            }
+          ],
+          "name": "MatchEventPush",
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "fields": [],
+          "name": "MatchEventStreamReq",
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "fields": [
+            {
+              "label": "singular",
+              "name": "ok",
+              "number": 1,
+              "oneof": "",
+              "type": "bool"
+            },
+            {
+              "label": "singular",
+              "name": "error_code",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            }
+          ],
+          "name": "MatchEventStreamRes",
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "fields": [
+            {
+              "label": "singular",
+              "name": "mode",
+              "number": 1,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "rank_tier",
+              "number": 2,
+              "oneof": "",
+              "type": "int32"
+            }
+          ],
+          "name": "MatchStartReq",
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "fields": [
+            {
+              "label": "singular",
+              "name": "ok",
+              "number": 1,
+              "oneof": "",
+              "type": "bool"
+            },
+            {
+              "label": "singular",
+              "name": "match_id",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "error_code",
+              "number": 3,
+              "oneof": "",
+              "type": "string"
+            }
+          ],
+          "name": "MatchStartRes",
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "fields": [],
+          "name": "MatchStatusReq",
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "fields": [
+            {
+              "label": "singular",
+              "name": "ok",
+              "number": 1,
+              "oneof": "",
+              "type": "bool"
+            },
+            {
+              "label": "singular",
+              "name": "status",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "match_id",
+              "number": 3,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "room_id",
+              "number": 4,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "token",
+              "number": 5,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "estimated_wait_secs",
+              "number": 6,
+              "oneof": "",
+              "type": "int64"
+            },
+            {
+              "label": "singular",
+              "name": "error_code",
+              "number": 7,
+              "oneof": "",
+              "type": "string"
+            }
+          ],
+          "name": "MatchStatusRes",
           "reserved": {
             "names": [],
             "numbers": [],

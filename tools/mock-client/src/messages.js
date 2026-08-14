@@ -138,6 +138,25 @@ export function encodeCreateMatchedRoomReq(matchId, roomId, characterIds, mode) 
   ]);
 }
 
+export function encodeMatchStartReq(mode, rankTier = 0) {
+  return Buffer.concat([
+    encodeStringField(1, mode),
+    encodeInt32Field(2, rankTier)
+  ]);
+}
+
+export function encodeMatchCancelReq(matchId) {
+  return encodeStringField(1, matchId);
+}
+
+export function encodeMatchStatusReq() {
+  return Buffer.alloc(0);
+}
+
+export function encodeMatchEventStreamReq() {
+  return Buffer.alloc(0);
+}
+
 // Chat
 export function encodeChatPrivateReq(targetId, content) {
   return Buffer.concat([
@@ -728,6 +747,40 @@ export function decodeByMessageType(messageType, body) {
         roomId: readString(fields, 2),
         errorCode: readString(fields, 3),
         snapshot: fields.get(4) ? decodeRoomSnapshot(fields.get(4)) : null
+      };
+    case MESSAGE_TYPE.MATCH_START_RES:
+      return {
+        ok: readBool(fields, 1),
+        matchId: readString(fields, 2),
+        errorCode: readString(fields, 3)
+      };
+    case MESSAGE_TYPE.MATCH_CANCEL_RES:
+      return {
+        ok: readBool(fields, 1),
+        errorCode: readString(fields, 2)
+      };
+    case MESSAGE_TYPE.MATCH_STATUS_RES:
+      return {
+        ok: readBool(fields, 1),
+        status: readString(fields, 2),
+        matchId: readString(fields, 3),
+        roomId: readString(fields, 4),
+        token: readString(fields, 5),
+        estimatedWaitSecs: readInt64(fields, 6),
+        errorCode: readString(fields, 7)
+      };
+    case MESSAGE_TYPE.MATCH_EVENT_STREAM_RES:
+      return {
+        ok: readBool(fields, 1),
+        errorCode: readString(fields, 2)
+      };
+    case MESSAGE_TYPE.MATCH_EVENT_PUSH:
+      return {
+        event: readString(fields, 1),
+        matchId: readString(fields, 2),
+        roomId: readString(fields, 3),
+        token: readString(fields, 4),
+        errorCode: readString(fields, 5)
       };
     case MESSAGE_TYPE.ITEM_EQUIP_RES:
       return {

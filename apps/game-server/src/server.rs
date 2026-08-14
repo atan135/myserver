@@ -42,7 +42,7 @@ use crate::core::room::{
 use crate::core::runtime::RoomManager;
 use crate::core::service::{
     character_progress_service, character_title_service, core_service, inventory_service,
-    room_service,
+    match_service, room_service,
 };
 use crate::db_store::PgAuditStore;
 use crate::gameroom::GameRoomLogicFactory;
@@ -942,7 +942,7 @@ pub async fn run(
     let (drain_shutdown, drain_shutdown_arm_rx) = DrainShutdownControl::channel();
     let shared_state = ServerSharedState {
         room_manager: Arc::new(RoomManager::with_policy_registry_and_cleanup_interval(
-            match_client,
+            match_client.clone(),
             room_logic_factory,
             config_tables.room_policy_registry(),
             config.room_cleanup_interval_secs,
@@ -1010,6 +1010,7 @@ pub async fn run(
         config: config.clone(),
         db_store: db_store.clone(),
         room_manager: shared_state.room_manager.clone(),
+        match_client,
         runtime_config: shared_state.runtime_config.clone(),
         connection_count: shared_state.connection_count.clone(),
         config_tables,
@@ -2041,6 +2042,18 @@ async fn dispatch_packet(
         }
         Some(MessageType::CreateMatchedRoomReq) => {
             room_service::handle_create_matched_room(services, connection, packet).await
+        }
+        Some(MessageType::MatchStartReq) => {
+            match_service::handle_match_start(services, connection, packet).await
+        }
+        Some(MessageType::MatchCancelReq) => {
+            match_service::handle_match_cancel(services, connection, packet).await
+        }
+        Some(MessageType::MatchStatusReq) => {
+            match_service::handle_match_status(services, connection, packet).await
+        }
+        Some(MessageType::MatchEventStreamReq) => {
+            match_service::handle_match_event_stream(services, connection, packet).await
         }
         // Inventory handlers
         Some(MessageType::ItemEquipReq) => {
