@@ -136,6 +136,10 @@ impl<'de> Deserialize<'de> for HistogramSnapshot {
 pub struct MetricsSnapshot {
     pub counters: BTreeMap<String, u64>,
     pub histograms: BTreeMap<String, HistogramSnapshot>,
+    /// Raw, boundary-stamped gauge/counter samples. Values from workers are
+    /// merged at the same monotonic boundary; percentiles are never stored.
+    #[serde(default)]
+    pub time_series: BTreeMap<u64, BTreeMap<String, u64>>,
 }
 
 impl MetricsSnapshot {
@@ -148,6 +152,12 @@ impl MetricsSnapshot {
                 .entry(key.clone())
                 .or_default()
                 .merge(histogram);
+        }
+        for (boundary_ms, samples) in &other.time_series {
+            let destination = self.time_series.entry(*boundary_ms).or_default();
+            for (key, value) in samples {
+                *destination.entry(key.clone()).or_default() += value;
+            }
         }
     }
 }
@@ -186,6 +196,23 @@ impl Metrics {
             .entry(key.to_string())
             .or_default()
             .merge(histogram);
+    }
+
+    /// Record a raw time-series sample. The timestamp is a worker monotonic
+    /// boundary supplied by the controller; aggregation sums samples that
+    /// share that boundary across workers.
+    pub fn record_time_series(&mut self, boundary_ms: u64, key: &str, value: u64) {
+        assert!(
+            is_low_cardinality_key(key),
+            "time-series dimensions must be fixed low-cardinality categories"
+        );
+        *self
+            .snapshot
+            .time_series
+            .entry(boundary_ms)
+            .or_default()
+            .entry(key.to_string())
+            .or_default() += value;
     }
     pub fn snapshot(&self) -> MetricsSnapshot {
         self.snapshot.clone()
@@ -276,10 +303,12 @@ pub fn is_low_cardinality_key(key: &str) -> bool {
             | "chat_wss_reconnects"
             | "chat_wss_reconnect_backoff_ms"
             | "match_grpc_queued_ms"
+            | "match_grpc_attempts"
             | "match_grpc_successes"
             | "match_grpc_event_stream_connections"
             | "match_grpc_statuses"
             | "match_grpc_room_create_closed_ms"
+            | "match_grpc_room_create_closed_unobserved"
             | "match_grpc_cancellations"
             | "match_grpc_timeouts"
             | "match_grpc_stream_disconnects"
@@ -359,6 +388,8 @@ fn is_latency_key(key: &str) -> bool {
             | "side_announce_ms"
             | "side_match_ms"
             | "match_internal_ms"
+            | "match_grpc_queue_ms"
+            | "match_grpc_room_create_ms"
             | "chat_wss_handshake_ms"
             | "chat_wss_message_ms"
     )
@@ -406,5 +437,28 @@ mod tests {
         ] {
             assert!(is_low_cardinality_key(key));
         }
+    }
+
+    #[test]
+    fn merge_combines_raw_time_series_at_shared_boundaries() {
+        let mut first = Metrics::default();
+        first.increment("requests", 2);
+        first.observe_latency("operation_ms", 10);
+        first.record_time_series(100, "virtual_players", 3);
+        let mut second = Metrics::default();
+        second.increment("requests", 5);
+        second.observe_latency("operation_ms", 1_000);
+        second.record_time_series(100, "virtual_players", 4);
+        second.record_time_series(200, "virtual_players", 1);
+
+        let mut merged = first.snapshot();
+        merged.merge(&second.snapshot());
+        assert_eq!(merged.counters["requests"], 7);
+        assert_eq!(merged.histograms["operation_ms"].count(), 2);
+        assert_eq!(merged.histograms["operation_ms"].percentile(0.99), 1_000);
+        assert_eq!(merged.time_series[&100]["virtual_players"], 7);
+        assert_eq!(merged.time_series[&200]["virtual_players"], 1);
+        let encoded = serde_json::to_string(&merged).unwrap();
+        assert!(!encoded.contains("percentile"));
     }
 }

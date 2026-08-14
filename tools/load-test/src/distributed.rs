@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::contracts::{AbortSignal, MetricBatch, RunPlan, RunSummary, WorkerAssignment};
+use crate::metrics::MetricsSnapshot;
 
 pub const DISTRIBUTED_SCHEMA_VERSION: u32 = 1;
 pub const MIN_DISTRIBUTED_SCHEMA_VERSION: u32 = 1;
@@ -248,6 +249,78 @@ impl MetricBatchLedger {
     }
 }
 
+/// Controller-side merge boundary for worker metric batches.
+///
+/// Workers send mergeable HDR payloads and raw counters/time-series samples.
+/// The controller aligns batches by sequence and requires every worker to use
+/// the same monotonic window for that sequence. Percentiles are intentionally
+/// absent from the wire contract and can only be calculated from the merged
+/// HDR distributions after ingestion.
+#[derive(Debug, Default)]
+pub struct DistributedMetricsAggregator {
+    ledger: MetricBatchLedger,
+    windows: BTreeMap<u64, (u64, u64)>,
+    snapshot: MetricsSnapshot,
+}
+
+impl DistributedMetricsAggregator {
+    pub fn ingest(
+        &mut self,
+        batch: &MetricBatch,
+        plan: &RunPlan,
+    ) -> Result<BatchDisposition, DistributedError> {
+        validate_series_boundaries(batch)?;
+        if let Some((start, end)) = self.windows.get(&batch.sequence)
+            && (*start != batch.window_start_monotonic_ms || *end != batch.window_end_monotonic_ms)
+        {
+            return Err(DistributedError::InvalidBatch(
+                "workers used different metric boundaries for the same sequence".into(),
+            ));
+        }
+        let disposition = self.ledger.ingest(batch, plan)?;
+        if disposition != BatchDisposition::Duplicate {
+            self.windows.entry(batch.sequence).or_insert((
+                batch.window_start_monotonic_ms,
+                batch.window_end_monotonic_ms,
+            ));
+            self.snapshot.merge(&MetricsSnapshot {
+                counters: batch.counters.clone(),
+                histograms: batch.histograms.clone(),
+                time_series: batch.time_series.clone(),
+            });
+        }
+        Ok(disposition)
+    }
+
+    pub fn snapshot(&self) -> MetricsSnapshot {
+        self.snapshot.clone()
+    }
+
+    pub fn missing_sequences(&self, worker_id: &str) -> Vec<u64> {
+        self.ledger.missing_sequences(worker_id)
+    }
+}
+
+fn validate_series_boundaries(batch: &MetricBatch) -> Result<(), DistributedError> {
+    for (boundary_ms, samples) in &batch.time_series {
+        if *boundary_ms < batch.window_start_monotonic_ms
+            || *boundary_ms > batch.window_end_monotonic_ms
+        {
+            return Err(DistributedError::InvalidBatch(
+                "time-series sample falls outside its metric window".into(),
+            ));
+        }
+        for key in samples {
+            if !crate::metrics::is_low_cardinality_key(key.0) {
+                return Err(DistributedError::InvalidBatch(
+                    "time-series key is not low-cardinality".into(),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug)]
 pub struct PendingBatchStore {
     max_batches: usize,
@@ -441,6 +514,67 @@ mod tests {
             BatchDisposition::MissingGap
         );
         assert_eq!(ledger.missing_sequences("worker-0000"), vec![1]);
+    }
+
+    #[test]
+    fn distributed_aggregator_merges_raw_values_and_hdr_once() {
+        let p = plan();
+        let mut worker_a = Metrics::default();
+        worker_a.increment("requests", 2);
+        worker_a.observe_latency("operation_ms", 10);
+        worker_a.record_time_series(100, "virtual_players", 3);
+        let mut worker_b = Metrics::default();
+        worker_b.increment("requests", 5);
+        worker_b.observe_latency("operation_ms", 1_000);
+        worker_b.record_time_series(100, "virtual_players", 4);
+        let first = MetricBatch::new("r1", "worker-0000", 0, 0, 100, worker_a.snapshot());
+        let second = MetricBatch::new("r1", "worker-0001", 0, 0, 100, worker_b.snapshot());
+        let mut aggregator = DistributedMetricsAggregator::default();
+        assert_eq!(
+            aggregator.ingest(&first, &p).unwrap(),
+            BatchDisposition::Accepted
+        );
+        assert_eq!(
+            aggregator.ingest(&second, &p).unwrap(),
+            BatchDisposition::Accepted
+        );
+        assert_eq!(
+            aggregator.ingest(&second, &p).unwrap(),
+            BatchDisposition::Duplicate
+        );
+        let snapshot = aggregator.snapshot();
+        assert_eq!(snapshot.counters["requests"], 7);
+        assert_eq!(snapshot.histograms["operation_ms"].count(), 2);
+        assert_eq!(snapshot.histograms["operation_ms"].percentile(0.99), 1_000);
+        assert_eq!(snapshot.time_series[&100]["virtual_players"], 7);
+    }
+
+    #[test]
+    fn distributed_aggregator_rejects_boundary_drift_and_out_of_window_samples() {
+        let p = plan();
+        let mut first_metrics = Metrics::default();
+        first_metrics.record_time_series(100, "virtual_players", 1);
+        let first = MetricBatch::new("r1", "worker-0000", 0, 0, 100, first_metrics.snapshot());
+        let mut drift_metrics = Metrics::default();
+        drift_metrics.record_time_series(110, "virtual_players", 1);
+        let drift = MetricBatch::new("r1", "worker-0001", 0, 10, 110, drift_metrics.snapshot());
+        let mut aggregator = DistributedMetricsAggregator::default();
+        aggregator.ingest(&first, &p).unwrap();
+        assert!(matches!(
+            aggregator.ingest(&drift, &p),
+            Err(DistributedError::InvalidBatch(reason))
+                if reason.contains("different metric boundaries")
+        ));
+
+        let mut outside_metrics = Metrics::default();
+        outside_metrics.record_time_series(200, "virtual_players", 1);
+        let outside =
+            MetricBatch::new("r1", "worker-0002", 1, 100, 150, outside_metrics.snapshot());
+        assert!(matches!(
+            aggregator.ingest(&outside, &p),
+            Err(DistributedError::InvalidBatch(reason))
+                if reason.contains("outside its metric window")
+        ));
     }
 
     #[test]

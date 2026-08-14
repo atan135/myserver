@@ -9,6 +9,7 @@ pub mod abort;
 pub mod accounts;
 pub mod auth_budget;
 pub mod auth_http;
+pub mod baseline;
 pub mod calibration;
 pub mod chat_wss;
 pub mod compatibility;
@@ -31,6 +32,7 @@ pub mod resource;
 pub mod scheduler;
 pub mod side_http;
 pub mod side_services;
+pub mod soak;
 pub mod step;
 pub mod virtual_player;
 

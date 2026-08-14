@@ -36,6 +36,8 @@ pub struct MetricBatch {
     pub window_end_monotonic_ms: u64,
     pub counters: BTreeMap<String, u64>,
     pub histograms: BTreeMap<String, HistogramSnapshot>,
+    #[serde(default)]
+    pub time_series: BTreeMap<u64, BTreeMap<String, u64>>,
     pub checksum: String,
 }
 
@@ -50,14 +52,14 @@ impl MetricBatch {
     ) -> Self {
         let run_id = run_id.into();
         let worker_id = worker_id.into();
-        let checksum = checksum_parts(&[
+        let checksum = checksum_for_metrics(
             &run_id,
             &worker_id,
-            &sequence.to_string(),
-            &window_start_monotonic_ms.to_string(),
-            &window_end_monotonic_ms.to_string(),
-            &serde_json::to_string(&metrics).expect("metrics must serialize"),
-        ]);
+            sequence,
+            window_start_monotonic_ms,
+            window_end_monotonic_ms,
+            &metrics,
+        );
         Self {
             schema_version: SCHEMA_VERSION,
             run_id,
@@ -67,6 +69,7 @@ impl MetricBatch {
             window_end_monotonic_ms,
             counters: metrics.counters,
             histograms: metrics.histograms,
+            time_series: metrics.time_series,
             checksum,
         }
     }
@@ -75,17 +78,82 @@ impl MetricBatch {
         let metrics = MetricsSnapshot {
             counters: self.counters.clone(),
             histograms: self.histograms.clone(),
+            time_series: self.time_series.clone(),
         };
-        self.checksum
-            == checksum_parts(&[
-                &self.run_id,
-                &self.worker_id,
-                &self.sequence.to_string(),
-                &self.window_start_monotonic_ms.to_string(),
-                &self.window_end_monotonic_ms.to_string(),
-                &serde_json::to_string(&metrics).expect("metrics must serialize"),
-            ])
+        let current = checksum_for_metrics(
+            &self.run_id,
+            &self.worker_id,
+            self.sequence,
+            self.window_start_monotonic_ms,
+            self.window_end_monotonic_ms,
+            &metrics,
+        );
+        if self.checksum == current {
+            return true;
+        }
+        // Batches persisted before the raw time-series field was introduced
+        // remain recoverable, but only when they carry no time-series data.
+        self.time_series.is_empty()
+            && self.checksum
+                == checksum_for_legacy_metrics(
+                    &self.run_id,
+                    &self.worker_id,
+                    self.sequence,
+                    self.window_start_monotonic_ms,
+                    self.window_end_monotonic_ms,
+                    &self.counters,
+                    &self.histograms,
+                )
     }
+}
+
+#[derive(Serialize)]
+struct LegacyMetricsSnapshot<'a> {
+    counters: &'a BTreeMap<String, u64>,
+    histograms: &'a BTreeMap<String, HistogramSnapshot>,
+}
+
+fn checksum_for_metrics(
+    run_id: &str,
+    worker_id: &str,
+    sequence: u64,
+    window_start_monotonic_ms: u64,
+    window_end_monotonic_ms: u64,
+    metrics: &MetricsSnapshot,
+) -> String {
+    let metrics_json = serde_json::to_string(metrics).expect("metrics must serialize");
+    checksum_parts(&[
+        run_id,
+        worker_id,
+        &sequence.to_string(),
+        &window_start_monotonic_ms.to_string(),
+        &window_end_monotonic_ms.to_string(),
+        &metrics_json,
+    ])
+}
+
+fn checksum_for_legacy_metrics(
+    run_id: &str,
+    worker_id: &str,
+    sequence: u64,
+    window_start_monotonic_ms: u64,
+    window_end_monotonic_ms: u64,
+    counters: &BTreeMap<String, u64>,
+    histograms: &BTreeMap<String, HistogramSnapshot>,
+) -> String {
+    let metrics_json = serde_json::to_string(&LegacyMetricsSnapshot {
+        counters,
+        histograms,
+    })
+    .expect("legacy metrics must serialize");
+    checksum_parts(&[
+        run_id,
+        worker_id,
+        &sequence.to_string(),
+        &window_start_monotonic_ms.to_string(),
+        &window_end_monotonic_ms.to_string(),
+        &metrics_json,
+    ])
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -161,5 +229,22 @@ mod tests {
             serde_json::from_str::<MetricBatch>(&serde_json::to_string(&batch).unwrap()).unwrap(),
             batch
         );
+    }
+
+    #[test]
+    fn empty_time_series_accepts_legacy_batch_checksum() {
+        let mut metrics = Metrics::default();
+        metrics.increment("requests", 2);
+        let mut batch = MetricBatch::new("r1", "w1", 2, 10, 20, metrics.snapshot());
+        batch.checksum = checksum_for_legacy_metrics(
+            &batch.run_id,
+            &batch.worker_id,
+            batch.sequence,
+            batch.window_start_monotonic_ms,
+            batch.window_end_monotonic_ms,
+            &batch.counters,
+            &batch.histograms,
+        );
+        assert!(batch.checksum_is_valid());
     }
 }

@@ -222,6 +222,9 @@ pub fn redact_text(input: &str) -> String {
         "authorization",
         "admin_token",
         "secret",
+        "api_key",
+        "private_key",
+        "credential",
         "account",
         "email",
         "player_id",
@@ -297,6 +300,9 @@ fn is_sensitive_key(key: &str) -> bool {
         "ticket",
         "authorization",
         "secret",
+        "api_key",
+        "private_key",
+        "credential",
         "email",
         "identity",
     ]
@@ -330,14 +336,27 @@ fn write_timeseries(path: PathBuf, metrics: &MetricsSnapshot) -> std::io::Result
         file,
         "monotonic_ms,virtual_players,scheduler_lag_ms,queue_depth,metrics_dropped"
     )?;
-    writeln!(
-        file,
-        "0,{},{},{},{}",
-        metrics.counters.get("virtual_players").unwrap_or(&0),
-        metrics.counters.get("scheduler_lag_ms").unwrap_or(&0),
-        metrics.counters.get("scheduler_queue_depth").unwrap_or(&0),
-        metrics.counters.get("metrics_dropped").unwrap_or(&0)
-    )
+    if metrics.time_series.is_empty() {
+        return writeln!(
+            file,
+            "0,{},{},{},{}",
+            metrics.counters.get("virtual_players").unwrap_or(&0),
+            metrics.counters.get("scheduler_lag_ms").unwrap_or(&0),
+            metrics.counters.get("scheduler_queue_depth").unwrap_or(&0),
+            metrics.counters.get("metrics_dropped").unwrap_or(&0)
+        );
+    }
+    for (boundary_ms, samples) in &metrics.time_series {
+        writeln!(
+            file,
+            "{boundary_ms},{},{},{},{}",
+            samples.get("virtual_players").unwrap_or(&0),
+            samples.get("scheduler_lag_ms").unwrap_or(&0),
+            samples.get("scheduler_queue_depth").unwrap_or(&0),
+            samples.get("metrics_dropped").unwrap_or(&0)
+        )?;
+    }
+    Ok(())
 }
 
 fn write_error_samples(path: PathBuf, samples: &[ErrorSample]) -> std::io::Result<()> {
@@ -516,6 +535,48 @@ mod tests {
     }
 
     #[test]
+    fn timeseries_report_preserves_merged_boundary_rows() {
+        let root =
+            std::env::temp_dir().join(format!("loadtest-timeseries-report-{}", std::process::id()));
+        let value = config();
+        let mut metrics = MetricsSnapshot::default();
+        metrics.time_series.insert(
+            100,
+            BTreeMap::from([
+                ("virtual_players".into(), 7),
+                ("scheduler_lag_ms".into(), 3),
+                ("scheduler_queue_depth".into(), 2),
+                ("metrics_dropped".into(), 0),
+            ]),
+        );
+        let errors = ErrorBuffer::default();
+        let report = write_report(
+            &root,
+            ReportInput {
+                run_id: "timeseries-run",
+                config: &value,
+                effective_budget: &value.budget,
+                status: "completed",
+                abort_reason: None,
+                shutdown_phase: None,
+                deadline_unix_ms: 3,
+                graceful_shutdown_ms: 1,
+                started_unix_ms: 1,
+                ended_unix_ms: 2,
+                metrics,
+                resources: ResourceSampler.sample(0, 0, 0),
+                errors: &errors,
+                auth_metrics: None,
+                calibration: None,
+            },
+        )
+        .unwrap();
+        let csv = fs::read_to_string(report.join("timeseries.csv")).unwrap();
+        assert!(csv.contains("100,7,3,2,0"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn ticket_metric_names_remain_visible_while_ticket_values_are_redacted() {
         let rendered = serde_json::to_string(&redact_json(serde_json::json!({
             "ticket_attempts": 3,
@@ -526,6 +587,25 @@ mod tests {
         assert!(rendered.contains("ticket_attempts"));
         assert!(rendered.contains("ticket_successes"));
         assert!(!rendered.contains("opaque-secret-value"));
+    }
+
+    #[test]
+    fn report_redaction_covers_nested_credentials_and_preserves_safe_categories() {
+        let rendered = serde_json::to_string(&redact_json(serde_json::json!({
+            "certificate": {
+                "private_key": "-----BEGIN PRIVATE KEY-----secret",
+                "api_key": "api-secret",
+                "credential_ref": "vault://prod/loadtest",
+            },
+            "status": "timeout",
+            "ticket_attempts": 4,
+        })))
+        .unwrap();
+        assert!(!rendered.contains("BEGIN PRIVATE KEY"));
+        assert!(!rendered.contains("api-secret"));
+        assert!(!rendered.contains("vault://prod/loadtest"));
+        assert!(rendered.contains("timeout"));
+        assert!(rendered.contains("ticket_attempts"));
     }
 
     #[test]
