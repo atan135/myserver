@@ -1385,6 +1385,10 @@ impl GameSessionRunner {
         let mut trackers = [RoomFlowTracker::default(), RoomFlowTracker::default()];
         let mut player_match_metrics =
             [PlayerMatchMetrics::default(), PlayerMatchMetrics::default()];
+        // MatchEventPush may race the response to this player's MatchStartReq.
+        // Keep at most one terminal assignment per player until the event
+        // observation phase consumes it.
+        let mut pending_match_events = [None, None];
 
         if let Err(error) = gate.validate() {
             close_two_player_sessions(&mut sessions, &mut transports, pool);
@@ -1536,6 +1540,7 @@ impl GameSessionRunner {
                 MessageType::MatchEventStreamRes,
                 crate::gameplay::DEFAULT_STEP_TIMEOUT_MS,
                 &mut player_match_metrics[player_index],
+                None,
             )
             .await?;
         }
@@ -1561,6 +1566,7 @@ impl GameSessionRunner {
                 MessageType::MatchStartRes,
                 crate::gameplay::DEFAULT_STEP_TIMEOUT_MS,
                 &mut player_match_metrics[player_index],
+                Some(&mut pending_match_events[player_index]),
             )
             .await?;
             let body = crate::pb::MatchStartRes::decode(response.body.as_slice())
@@ -1589,6 +1595,7 @@ impl GameSessionRunner {
                 pool,
                 crate::gameplay::DEFAULT_STEP_TIMEOUT_MS,
                 &mut player_match_metrics[player_index],
+                &mut pending_match_events[player_index],
             )
             .await?;
             match classify_player_match_event(&event, &mut player_match_metrics[player_index]) {
@@ -1690,6 +1697,7 @@ impl GameSessionRunner {
                 MessageType::MatchStatusRes,
                 crate::gameplay::DEFAULT_STEP_TIMEOUT_MS,
                 &mut player_match_metrics[player_index],
+                None,
             )
             .await?;
             let body = crate::pb::MatchStatusRes::decode(response.body.as_slice())
@@ -2385,6 +2393,22 @@ async fn receive_gameplay_response(
     }
 }
 
+fn retain_pending_match_event(
+    packet: &Packet,
+    pending_match_event: &mut Option<MatchEventPush>,
+) -> Result<(), GameLiveError> {
+    if pending_match_event.is_some() {
+        return Err(GameLiveError::Transport(
+            "received multiple match events while awaiting match start response",
+        ));
+    }
+    *pending_match_event = Some(
+        MatchEventPush::decode(packet.body.as_slice())
+            .map_err(|_| GameLiveError::Transport("invalid match event body"))?,
+    );
+    Ok(())
+}
+
 async fn receive_match_response(
     transport: &mut LiveKcpTransport,
     session: &mut VirtualPlayerSession,
@@ -2393,6 +2417,7 @@ async fn receive_match_response(
     expected: MessageType,
     timeout_ms: u64,
     match_metrics: &mut PlayerMatchMetrics,
+    mut pending_match_event: Option<&mut Option<MatchEventPush>>,
 ) -> Result<Packet, GameLiveError> {
     let deadline = Instant::now() + Duration::from_millis(timeout_ms);
     loop {
@@ -2413,6 +2438,15 @@ async fn receive_match_response(
                 message_type: actual,
                 ..
             } if actual == expected => return Ok(packet),
+            VirtualPlayerEvent::Push {
+                message_type: MessageType::MatchEventPush,
+                ..
+            } => {
+                if let Some(pending) = pending_match_event.as_deref_mut() {
+                    retain_pending_match_event(&packet, pending)?;
+                }
+                continue;
+            }
             VirtualPlayerEvent::Push { .. } => continue,
             VirtualPlayerEvent::Response { .. } => {
                 return Err(GameLiveError::Transport("unexpected match response"));
@@ -2428,7 +2462,11 @@ async fn receive_match_event(
     pool: &mut AccountLeasePool,
     timeout_ms: u64,
     match_metrics: &mut PlayerMatchMetrics,
+    pending_match_event: &mut Option<MatchEventPush>,
 ) -> Result<MatchEventPush, GameLiveError> {
+    if let Some(event) = pending_match_event.take() {
+        return Ok(event);
+    }
     let deadline = Instant::now() + Duration::from_millis(timeout_ms);
     loop {
         let packet = transport.receive_until(deadline).await.map_err(|_| {
@@ -4156,6 +4194,34 @@ mod tests {
             snapshot.counters["player_match_grpc_status_observation_holes"],
             1
         );
+    }
+
+    #[test]
+    fn match_event_arriving_before_match_start_response_is_retained() {
+        // `receive_match_response` invokes this when a push is interleaved
+        // before the expected MatchStartRes. The event must remain available
+        // for the later MatchEvent observation phase instead of being dropped.
+        let packet = response(
+            MessageType::MatchEventPush,
+            0,
+            &MatchEventPush {
+                event: "matched".into(),
+                match_id: "canonical-match".into(),
+                room_id: "canonical-room".into(),
+                token: String::new(),
+                error_code: String::new(),
+            },
+        );
+        let mut pending = None;
+        retain_pending_match_event(&packet, &mut pending).unwrap();
+
+        let retained = pending.take().expect("interleaved event is retained");
+        assert_eq!(retained.event, "matched");
+        assert!(!retained.match_id.is_empty());
+        assert!(!retained.room_id.is_empty());
+
+        retain_pending_match_event(&packet, &mut pending).unwrap();
+        assert!(retain_pending_match_event(&packet, &mut pending).is_err());
     }
 
     #[test]

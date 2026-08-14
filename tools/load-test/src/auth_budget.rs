@@ -98,11 +98,13 @@ pub fn estimate_game_run(scenario: &Scenario) -> Result<GameRunBudgetEstimate, S
         });
     };
     if gameplay.coordination == LiveGameplayCoordination::TwoPlayerDefaultMatch {
-        // Two KCP sessions each send AuthReq+PingReq. The mutable room plan is
-        // join x2, ready x2, start x1, one input per player, leave x2.
+        // Two KCP sessions each send AuthReq+PingReq, then each subscribes to
+        // match events, starts matching, and confirms MatchStatus. The mutable
+        // room plan is join x2, ready x2, start x1, one input per player,
+        // leave x2.
         return Ok(GameRunBudgetEstimate {
             kcp_connections_per_flow: 2,
-            game_messages_per_flow: 13,
+            game_messages_per_flow: 19,
             gameplay_potential_writes_per_flow: 36,
             auth_flows_per_game_flow: 2,
         });
@@ -997,17 +999,17 @@ mod tests {
         let game = estimate_game_run(&scenario).unwrap();
         assert_eq!(game.auth_flows_per_game_flow, 2);
         assert_eq!(game.kcp_connections_per_flow, 2);
-        assert_eq!(game.game_messages_per_flow, 13);
+        assert_eq!(game.game_messages_per_flow, 19);
         assert_eq!(game.gameplay_potential_writes_per_flow, 36);
         let mut constrained = budget();
         constrained.max_virtual_players = 2;
         // `list_characters` retains its existing two retry reservations, so
-        // the hard estimate is 14 HTTP attempts + 2 KCP connects + 13 KCP
-        // messages, even though a no-retry happy path executes 25 operations.
-        constrained.max_total_operations = 28;
+        // the hard estimate is 14 HTTP attempts + 2 KCP connects + 19 KCP
+        // messages, even though a no-retry happy path executes 31 operations.
+        constrained.max_total_operations = 34;
         constrained.max_data_writes = 51;
         assert!(validate_game_run_budget_for_scenario(&estimate, &scenario, &constrained).is_err());
-        constrained.max_total_operations = 29;
+        constrained.max_total_operations = 35;
         constrained.max_data_writes = 52;
         assert!(validate_game_run_budget_for_scenario(&estimate, &scenario, &constrained).is_ok());
     }
