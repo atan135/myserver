@@ -1,7 +1,7 @@
 use std::env;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use loadtest_core::SCHEMA_VERSION;
@@ -26,8 +26,8 @@ use loadtest_core::calibration::{
 };
 use loadtest_core::chat_wss::execute_live_chat_steps;
 use loadtest_core::config::{
-    BudgetOverride, LiveGameplayCoordination, LoadModel, LoadTestConfig, RunAccess, load_config,
-    load_private_config,
+    BudgetOverride, EnvironmentKind, LiveGameplayCoordination, LoadModel, LoadTestConfig,
+    RunAccess, load_config, load_private_config,
 };
 use loadtest_core::contracts::{RunPlan, single_process_assignment};
 use loadtest_core::game_kcp::{GameProxyEndpoint, ReconnectPolicy};
@@ -567,6 +567,260 @@ fn finish_game_action_after_cleanup<C, R>(
     }
 }
 
+/// A player-facing KCP match can share the ticket obtained during the same
+/// auth flow with public chat/mail/announce calls, but only in an explicitly
+/// local or test two-player flow. Direct match-service diagnostics remain a
+/// separate transport and cannot be mixed with the formal player path.
+fn validate_live_game_side_service_composite(
+    environment: EnvironmentKind,
+    game_mode: bool,
+    two_player_default_match: bool,
+    live_chat: bool,
+    live_match: bool,
+    live_match_internal: bool,
+    live_http: bool,
+) -> Result<bool, String> {
+    if !game_mode {
+        return Ok(false);
+    }
+    if live_match || live_match_internal {
+        return Err(
+            "direct match-service gRPC diagnostics cannot be combined with --execute-game; use the player KCP match path"
+                .into(),
+        );
+    }
+    if !(live_chat || live_http) {
+        return Ok(false);
+    }
+    if !matches!(environment, EnvironmentKind::Local | EnvironmentKind::Test) {
+        return Err(
+            "live game + side-service composite execution is limited to local/test environments"
+                .into(),
+        );
+    }
+    if !two_player_default_match {
+        return Err(
+            "live game + side-service composite execution requires two-player default_match coordination"
+                .into(),
+        );
+    }
+    Ok(true)
+}
+
+fn check_live_composite_side_controller(
+    config: &LoadTestConfig,
+    deadline_unix_ms: u64,
+    ctrl_c: &AtomicBool,
+    protection: &DryRunProtection<'_>,
+    abort: &mut AbortController,
+) -> Result<(), String> {
+    abort.check_ctrl_c(ctrl_c);
+    abort.check_stop_file(config.stop_file.as_deref().map(Path::new));
+    abort.check_deadline(unix_ms(), deadline_unix_ms);
+    if abort.should_stop_new_sessions() || revalidate_or_abort(protection, abort).is_some() {
+        return Err("composite side-service admission stopped".into());
+    }
+    Ok(())
+}
+
+fn composite_chat_admission_writes(
+    steps: &[loadtest_core::side_services::PlannedSideServiceStep],
+) -> Result<Vec<u64>, String> {
+    if steps
+        .iter()
+        .any(|step| step.service != SideServiceKind::Chat)
+    {
+        return Err("composite chat admission received a non-chat operation".into());
+    }
+    // `execute_live_chat_steps` always sends one authentication request. A
+    // declared ChatAuth represents that same request; otherwise reserve it
+    // explicitly before the configured operations.
+    let mut writes = Vec::with_capacity(steps.len().saturating_add(1));
+    if !steps.iter().any(|step| {
+        matches!(
+            step.operation,
+            loadtest_core::side_services::SideServiceOperation::ChatAuth
+        )
+    }) {
+        writes.push(0);
+    }
+    writes.extend(
+        steps
+            .iter()
+            .map(|step| u64::from(step.operation.is_write())),
+    );
+    Ok(writes)
+}
+
+fn live_composite_http_enabled(
+    side: &loadtest_core::side_services::SideServicesScenario,
+    service: SideServiceKind,
+) -> bool {
+    match service {
+        SideServiceKind::Mail => side.mail.as_ref().is_some_and(|config| config.live_http),
+        SideServiceKind::Announce => side
+            .announce
+            .as_ref()
+            .is_some_and(|config| config.live_http),
+        _ => false,
+    }
+}
+
+/// Execute public side-service diagnostics after both KCP players have closed
+/// their shared `default_match` room. Each caller invokes this once per
+/// authenticated player, so tickets never cross account boundaries and the
+/// synchronous controller retains one global admission ledger.
+#[allow(clippy::too_many_arguments)]
+fn execute_live_game_side_services(
+    config: &LoadTestConfig,
+    budget: &loadtest_core::config::HardBudget,
+    ticket: &str,
+    character_id: &str,
+    action_deadline: Instant,
+    deadline_unix_ms: u64,
+    dispatch_admission: &mut AuthDispatchAdmission,
+    abort: &mut AbortController,
+    ctrl_c: &AtomicBool,
+    protection: &DryRunProtection<'_>,
+) -> Result<loadtest_core::metrics::MetricsSnapshot, String> {
+    let side = config
+        .scenario
+        .side_services
+        .as_ref()
+        .ok_or("live game-side composite requires side_services")?;
+    let plan = side
+        .executable_plan(budget)
+        .map_err(|error| format!("live composite side-service plan rejected: {error}"))?;
+    let mut metrics = Metrics::default();
+
+    if let Some(chat) = side.chat.as_ref().filter(|chat| chat.live_websocket) {
+        let descriptor = chat
+            .descriptor
+            .as_ref()
+            .ok_or("live composite chat requires an explicit descriptor")?;
+        let chat_steps = plan
+            .steps
+            .iter()
+            .filter(|step| step.service == SideServiceKind::Chat)
+            .cloned()
+            .collect::<Vec<_>>();
+        dispatch_admission
+            .admit_side_connection(action_deadline, || {
+                check_live_composite_side_controller(
+                    config,
+                    deadline_unix_ms,
+                    ctrl_c,
+                    protection,
+                    abort,
+                )
+            })
+            .map_err(|error| map_auth_admission_to_string(abort, error))?;
+        // The concrete chat runner applies every configured think_time before
+        // sending that operation. Private/group sends conservatively reserve
+        // one potential write before their frame can be dispatched.
+        for writes in composite_chat_admission_writes(&chat_steps)? {
+            dispatch_admission
+                .admit_side_message_with_writes(writes, action_deadline, || {
+                    check_live_composite_side_controller(
+                        config,
+                        deadline_unix_ms,
+                        ctrl_c,
+                        protection,
+                        abort,
+                    )
+                })
+                .map_err(|error| map_auth_admission_to_string(abort, error))?;
+        }
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_io()
+            .enable_time()
+            .build()
+            .map_err(|_| "could not create guarded composite chat runtime")?;
+        let chat_metrics = runtime
+            .block_on(execute_live_chat_steps(
+                descriptor,
+                config.environment.kind,
+                chat.live_websocket,
+                ticket.to_owned(),
+                character_id,
+                &chat_steps,
+                action_deadline
+                    .saturating_duration_since(Instant::now())
+                    .as_millis() as u64,
+                ReconnectPolicy {
+                    max_attempts: 1,
+                    base_delay_ms: 100,
+                    max_delay_ms: 500,
+                    max_jitter_ms: 50,
+                },
+            ))
+            .map_err(|error| format!("composite chat WebSocket execution failed: {error:?}"))?;
+        chat_metrics.merge_into_metrics(&mut metrics);
+    }
+
+    let http_steps = plan
+        .steps
+        .iter()
+        .filter(|step| {
+            matches!(
+                step.service,
+                SideServiceKind::Mail | SideServiceKind::Announce
+            ) && live_composite_http_enabled(side, step.service)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    if !http_steps.is_empty() {
+        let http_metrics = execute_live_mail_announce_steps(
+            side,
+            config.environment.kind,
+            &config.account_prepare.batch,
+            ticket,
+            &http_steps,
+            action_deadline
+                .saturating_duration_since(Instant::now())
+                .as_millis() as u64,
+            |admission| match admission {
+                SideHttpAdmission::Connection => dispatch_admission
+                    .admit_side_connection(action_deadline, || {
+                        check_live_composite_side_controller(
+                            config,
+                            deadline_unix_ms,
+                            ctrl_c,
+                            protection,
+                            abort,
+                        )
+                    })
+                    .map(|_| ())
+                    .map_err(|error| {
+                        loadtest_core::side_http::SideHttpError::Admission(
+                            map_auth_admission_to_string(abort, error),
+                        )
+                    }),
+                SideHttpAdmission::Message { writes } => dispatch_admission
+                    .admit_side_message_with_writes(u64::from(writes), action_deadline, || {
+                        check_live_composite_side_controller(
+                            config,
+                            deadline_unix_ms,
+                            ctrl_c,
+                            protection,
+                            abort,
+                        )
+                    })
+                    .map(|_| ())
+                    .map_err(|error| {
+                        loadtest_core::side_http::SideHttpError::Admission(
+                            map_auth_admission_to_string(abort, error),
+                        )
+                    }),
+            },
+        )
+        .map_err(|error| format!("composite mail/announce HTTP execution failed: {error:?}"))?;
+        http_metrics.merge_into_metrics(&mut metrics);
+    }
+
+    Ok(metrics.snapshot())
+}
+
 fn run_live(cli: &Cli) -> Result<(), String> {
     if !cli.execute_auth {
         return Err(
@@ -605,11 +859,6 @@ fn run_live(cli: &Cli) -> Result<(), String> {
                 .as_ref()
                 .is_some_and(|announce| announce.live_http)
     });
-    if (live_chat || live_match || live_match_internal || live_http) && game_mode {
-        return Err(
-            "live side-service HTTP/WSS/gRPC diagnostics cannot be combined with --execute-game until a ticket-sharing flow is explicitly configured".into(),
-        );
-    }
     if game_mode {
         validate_game_execution_gate(cli, &config)?;
     }
@@ -683,6 +932,15 @@ fn run_live(cli: &Cli) -> Result<(), String> {
             .is_some_and(|gameplay| {
                 gameplay.coordination == LiveGameplayCoordination::TwoPlayerDefaultMatch
             });
+    let live_game_side_service_composite = validate_live_game_side_service_composite(
+        config.environment.kind,
+        game_mode,
+        two_player_default_match,
+        live_chat,
+        live_match,
+        live_match_internal,
+        live_http,
+    )?;
     if game_mode
         && !game_auth_operations.iter().any(|operation| {
             matches!(
@@ -904,9 +1162,16 @@ fn run_live(cli: &Cli) -> Result<(), String> {
                     && pre_game_auth_completed.iter().all(|completed| *completed)
                 {
                     let mut tickets = Vec::with_capacity(2);
+                    let mut side_credentials = Vec::with_capacity(2);
                     for execution in &mut executions {
                         match execution.take_game_credentials() {
-                            Some((ticket, _)) => tickets.push(ticket),
+                            Some((ticket, character_id)) => {
+                                // The same ticket remains local to its own
+                                // player and is only reused after that
+                                // player's KCP session has reached Closed.
+                                side_credentials.push((ticket.clone(), character_id));
+                                tickets.push(ticket);
+                            }
                             None => {
                                 errors.push(
                                     "game_ticket_missing",
@@ -1072,6 +1337,37 @@ fn run_live(cli: &Cli) -> Result<(), String> {
                                     Default::default(),
                                 );
                                 failed = true;
+                            }
+                        }
+                    }
+                    if !failed && live_game_side_service_composite {
+                        // The KCP pair is complete before any public
+                        // side-service request. Process each authenticated
+                        // player in account order so chat/mail/announce never
+                        // create a second concurrent load stream.
+                        for (ticket, character_id) in side_credentials {
+                            match execute_live_game_side_services(
+                                &config,
+                                &budget,
+                                &ticket,
+                                &character_id,
+                                action_deadline,
+                                deadline_unix_ms,
+                                &mut dispatch_admission,
+                                &mut abort,
+                                &ctrl_c,
+                                &protection,
+                            ) {
+                                Ok(metrics) => core_metrics.merge_snapshot(&metrics),
+                                Err(_) => {
+                                    errors.push(
+                                        "game_side_service_execution_failed",
+                                        "post-game chat/mail/announce execution did not complete",
+                                        Default::default(),
+                                    );
+                                    failed = true;
+                                    break;
+                                }
                             }
                         }
                     }
@@ -2395,6 +2691,128 @@ mod tests {
         );
 
         assert_eq!(events.into_inner(), vec!["cleanup", "game_metrics"]);
+    }
+
+    #[test]
+    fn local_default_match_composite_is_sequential_and_rejects_non_player_match_paths() {
+        assert!(
+            validate_live_game_side_service_composite(
+                EnvironmentKind::Local,
+                true,
+                true,
+                true,
+                false,
+                false,
+                true,
+            )
+            .unwrap()
+        );
+        assert!(
+            validate_live_game_side_service_composite(
+                EnvironmentKind::Test,
+                true,
+                true,
+                false,
+                false,
+                false,
+                true,
+            )
+            .unwrap()
+        );
+        assert!(
+            validate_live_game_side_service_composite(
+                EnvironmentKind::Production,
+                true,
+                true,
+                true,
+                false,
+                false,
+                false,
+            )
+            .is_err()
+        );
+        assert!(
+            validate_live_game_side_service_composite(
+                EnvironmentKind::Local,
+                true,
+                false,
+                true,
+                false,
+                false,
+                false,
+            )
+            .is_err()
+        );
+        assert!(
+            validate_live_game_side_service_composite(
+                EnvironmentKind::Local,
+                true,
+                true,
+                false,
+                true,
+                false,
+                false,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn composite_chat_admission_reserves_private_and_group_writes() {
+        use loadtest_core::side_services::{PlannedSideServiceStep, SideServiceOperation};
+
+        let steps = [
+            PlannedSideServiceStep {
+                service: SideServiceKind::Chat,
+                operation: SideServiceOperation::ChatAuth,
+                weight: 1,
+                think_time_ms: 0,
+            },
+            PlannedSideServiceStep {
+                service: SideServiceKind::Chat,
+                operation: SideServiceOperation::ChatPrivate,
+                weight: 1,
+                think_time_ms: 0,
+            },
+            PlannedSideServiceStep {
+                service: SideServiceKind::Chat,
+                operation: SideServiceOperation::ChatHistory,
+                weight: 1,
+                think_time_ms: 0,
+            },
+        ];
+        assert_eq!(composite_chat_admission_writes(&steps).unwrap(), [0, 1, 0]);
+
+        let implicit_auth = [PlannedSideServiceStep {
+            service: SideServiceKind::Chat,
+            operation: SideServiceOperation::ChatGroup,
+            weight: 1,
+            think_time_ms: 0,
+        }];
+        assert_eq!(
+            composite_chat_admission_writes(&implicit_auth).unwrap(),
+            [0, 1]
+        );
+    }
+
+    #[test]
+    fn composite_http_filter_uses_each_service_live_gate() {
+        let side = loadtest_core::side_services::SideServicesScenario {
+            mail: Some(loadtest_core::side_services::SideServiceConfig {
+                live_http: false,
+                ..Default::default()
+            }),
+            announce: Some(loadtest_core::side_services::SideServiceConfig {
+                live_http: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(!live_composite_http_enabled(&side, SideServiceKind::Mail));
+        assert!(live_composite_http_enabled(
+            &side,
+            SideServiceKind::Announce
+        ));
     }
 
     #[test]

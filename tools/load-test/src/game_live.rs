@@ -243,6 +243,119 @@ pub struct TwoPlayerGameRunResult {
     pub players: Vec<GameRunResult>,
 }
 
+/// Player-facing match telemetry. This records only observations visible from
+/// the authenticated KCP protocol; it deliberately does not infer the
+/// match-service -> game-server room-create callback duration.
+#[derive(Debug, Clone, Default)]
+struct PlayerMatchMetrics {
+    event_stream_connections: u64,
+    attempts: u64,
+    successes: u64,
+    statuses: u64,
+    cancellations: u64,
+    timeouts: u64,
+    business_errors: u64,
+    /// KCP exposes player outcomes, not the game-server -> match-service
+    /// gRPC status. One hole is recorded for every player match start rather
+    /// than treating a later KCP event as evidence of a successful RPC.
+    grpc_status_observation_holes: u64,
+    queue_ms: Vec<u64>,
+    room_create_closed_unobserved: bool,
+    queued_at: Option<Instant>,
+}
+
+impl PlayerMatchMetrics {
+    fn record_event_stream(&mut self) {
+        self.event_stream_connections = self.event_stream_connections.saturating_add(1);
+    }
+
+    fn record_start(&mut self) {
+        self.attempts = self.attempts.saturating_add(1);
+        self.grpc_status_observation_holes = self.grpc_status_observation_holes.saturating_add(1);
+        self.queued_at = Some(Instant::now());
+    }
+
+    fn record_matched(&mut self) {
+        self.successes = self.successes.saturating_add(1);
+        if let Some(started_at) = self.queued_at.take() {
+            self.queue_ms.push(started_at.elapsed().as_millis() as u64);
+        }
+    }
+
+    fn record_timeout(&mut self) {
+        self.timeouts = self.timeouts.saturating_add(1);
+    }
+
+    fn snapshot(&self) -> crate::metrics::MetricsSnapshot {
+        let mut metrics = crate::metrics::Metrics::default();
+        for (key, value) in [
+            (
+                "player_match_event_stream_connections",
+                self.event_stream_connections,
+            ),
+            ("player_match_attempts", self.attempts),
+            ("player_match_successes", self.successes),
+            ("player_match_statuses", self.statuses),
+            ("player_match_cancellations", self.cancellations),
+            ("player_match_timeouts", self.timeouts),
+            ("player_match_business_errors", self.business_errors),
+            (
+                "player_match_grpc_status_observation_holes",
+                self.grpc_status_observation_holes,
+            ),
+            (
+                "player_match_room_create_closed_unobserved",
+                u64::from(self.room_create_closed_unobserved),
+            ),
+        ] {
+            metrics.increment(key, value);
+        }
+        for latency_ms in &self.queue_ms {
+            metrics.observe_latency("player_match_queue_ms", *latency_ms);
+        }
+        metrics.snapshot()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PlayerMatchEventOutcome {
+    Matched,
+    Cancelled,
+    TimedOut,
+    Invalid,
+}
+
+fn classify_player_match_event(
+    event: &MatchEventPush,
+    expected_match_id: Option<&str>,
+    metrics: &mut PlayerMatchMetrics,
+) -> PlayerMatchEventOutcome {
+    if event.event == "match_cancelled" {
+        metrics.cancellations = metrics.cancellations.saturating_add(1);
+        return PlayerMatchEventOutcome::Cancelled;
+    }
+    if event.event == "match_failed" && event.error_code == "MATCH_TIMEOUT" {
+        metrics.record_timeout();
+        return PlayerMatchEventOutcome::TimedOut;
+    }
+    if event.event == "matched"
+        && !event.room_id.is_empty()
+        && expected_match_id.is_none_or(|match_id| event.match_id == match_id)
+    {
+        return PlayerMatchEventOutcome::Matched;
+    }
+    metrics.business_errors = metrics.business_errors.saturating_add(1);
+    PlayerMatchEventOutcome::Invalid
+}
+
+fn with_player_match_metrics(
+    mut room_metrics: crate::metrics::MetricsSnapshot,
+    player_match_metrics: &PlayerMatchMetrics,
+) -> crate::metrics::MetricsSnapshot {
+    room_metrics.merge(&player_match_metrics.snapshot());
+    room_metrics
+}
+
 #[derive(Debug, Clone)]
 struct PreparedLiveGameplay {
     approved_room_id: String,
@@ -1253,6 +1366,8 @@ impl GameSessionRunner {
             vec![GameRunnerStep::AccountLeased],
         ];
         let mut trackers = [RoomFlowTracker::default(), RoomFlowTracker::default()];
+        let mut player_match_metrics =
+            [PlayerMatchMetrics::default(), PlayerMatchMetrics::default()];
 
         if let Err(error) = gate.validate() {
             close_two_player_sessions(&mut sessions, &mut transports, pool);
@@ -1386,6 +1501,7 @@ impl GameSessionRunner {
         // for this path; it must be learned from MatchEventPush.
         let mut matched_rooms = [String::new(), String::new()];
         for player_index in 0..2 {
+            player_match_metrics[player_index].record_event_stream();
             let stream = sessions[player_index].begin_gameplay_request(
                 pool,
                 MessageType::MatchEventStreamReq,
@@ -1402,11 +1518,13 @@ impl GameSessionRunner {
                 &stream,
                 MessageType::MatchEventStreamRes,
                 crate::gameplay::DEFAULT_STEP_TIMEOUT_MS,
+                &mut player_match_metrics[player_index],
             )
             .await?;
         }
         let mut match_ids = [String::new(), String::new()];
         for player_index in 0..2 {
+            player_match_metrics[player_index].record_start();
             let start = sessions[player_index].begin_gameplay_request(
                 pool,
                 MessageType::MatchStartReq,
@@ -1426,14 +1544,22 @@ impl GameSessionRunner {
                 &start,
                 MessageType::MatchStartRes,
                 crate::gameplay::DEFAULT_STEP_TIMEOUT_MS,
+                &mut player_match_metrics[player_index],
             )
             .await?;
             let body = crate::pb::MatchStartRes::decode(response.body.as_slice())
                 .map_err(|_| GameLiveError::Transport("invalid match start response"))?;
             if !body.ok || body.match_id.is_empty() {
+                player_match_metrics[player_index].business_errors = player_match_metrics
+                    [player_index]
+                    .business_errors
+                    .saturating_add(1);
                 return Err(GameLiveError::GameplayFailed {
                     message: "match start rejected".to_string(),
-                    metrics: trackers[player_index].telemetry(),
+                    metrics: with_player_match_metrics(
+                        trackers[player_index].telemetry(),
+                        &player_match_metrics[player_index],
+                    ),
                     failure_category: Some("match_start_rejected"),
                 });
             }
@@ -1446,28 +1572,69 @@ impl GameSessionRunner {
                 &mut sessions[player_index],
                 pool,
                 crate::gameplay::DEFAULT_STEP_TIMEOUT_MS,
+                &mut player_match_metrics[player_index],
             )
             .await?;
-            if event.event != "matched"
-                || event.room_id.is_empty()
-                || event.match_id != match_ids[player_index]
-            {
-                return Err(GameLiveError::GameplayFailed {
-                    message: "match event did not produce a room".to_string(),
-                    metrics: trackers[player_index].telemetry(),
-                    failure_category: Some("match_event_invalid"),
-                });
+            match classify_player_match_event(
+                &event,
+                Some(&match_ids[player_index]),
+                &mut player_match_metrics[player_index],
+            ) {
+                PlayerMatchEventOutcome::Matched => {
+                    player_match_metrics[player_index].record_matched();
+                    matched_rooms[player_index] = event.room_id;
+                    steps[player_index].push(GameRunnerStep::MatchMatched);
+                }
+                PlayerMatchEventOutcome::Cancelled => {
+                    return Err(GameLiveError::GameplayFailed {
+                        message: "match was cancelled before room assignment".to_string(),
+                        metrics: with_player_match_metrics(
+                            trackers[player_index].telemetry(),
+                            &player_match_metrics[player_index],
+                        ),
+                        failure_category: Some("match_cancelled"),
+                    });
+                }
+                PlayerMatchEventOutcome::TimedOut => {
+                    return Err(GameLiveError::GameplayFailed {
+                        message: "match timed out before room assignment".to_string(),
+                        metrics: with_player_match_metrics(
+                            trackers[player_index].telemetry(),
+                            &player_match_metrics[player_index],
+                        ),
+                        failure_category: Some("match_event_timeout"),
+                    });
+                }
+                PlayerMatchEventOutcome::Invalid => {
+                    return Err(GameLiveError::GameplayFailed {
+                        message: "match event did not produce a room".to_string(),
+                        metrics: with_player_match_metrics(
+                            trackers[player_index].telemetry(),
+                            &player_match_metrics[player_index],
+                        ),
+                        failure_category: Some("match_event_invalid"),
+                    });
+                }
             }
-            matched_rooms[player_index] = event.room_id;
-            steps[player_index].push(GameRunnerStep::MatchMatched);
         }
         if matched_rooms[0] != matched_rooms[1] {
+            for metrics in &mut player_match_metrics {
+                metrics.business_errors = metrics.business_errors.saturating_add(1);
+            }
             return Err(GameLiveError::GameplayFailed {
                 message: "matched players received different rooms".to_string(),
-                metrics: trackers[0].telemetry(),
+                metrics: {
+                    let mut snapshot = trackers[0].telemetry();
+                    snapshot.merge(&player_match_metrics[0].snapshot());
+                    snapshot.merge(&player_match_metrics[1].snapshot());
+                    snapshot
+                },
                 failure_category: Some("match_room_mismatch"),
             });
         }
+        // MatchEventPush contains no server-side room-create timestamp. Keep
+        // this as an explicit observation hole rather than using queue time.
+        player_match_metrics[0].room_create_closed_unobserved = true;
         for player_index in 0..2 {
             let status = sessions[player_index].begin_gameplay_request(
                 pool,
@@ -1484,17 +1651,28 @@ impl GameSessionRunner {
                 &status,
                 MessageType::MatchStatusRes,
                 crate::gameplay::DEFAULT_STEP_TIMEOUT_MS,
+                &mut player_match_metrics[player_index],
             )
             .await?;
             let body = crate::pb::MatchStatusRes::decode(response.body.as_slice())
                 .map_err(|_| GameLiveError::Transport("invalid match status response"))?;
             if !body.ok || body.room_id != matched_rooms[player_index] {
+                player_match_metrics[player_index].business_errors = player_match_metrics
+                    [player_index]
+                    .business_errors
+                    .saturating_add(1);
                 return Err(GameLiveError::GameplayFailed {
                     message: "match status did not confirm room".to_string(),
-                    metrics: trackers[player_index].telemetry(),
+                    metrics: with_player_match_metrics(
+                        trackers[player_index].telemetry(),
+                        &player_match_metrics[player_index],
+                    ),
                     failure_category: Some("match_status_invalid"),
                 });
             }
+            player_match_metrics[player_index].statuses = player_match_metrics[player_index]
+                .statuses
+                .saturating_add(1);
             steps[player_index].push(GameRunnerStep::MatchStatusRead);
         }
         let mut prepared = prepared;
@@ -1792,10 +1970,15 @@ impl GameSessionRunner {
         let [session_one, session_two] = sessions;
         let [steps_one, steps_two] = steps;
         let [tracker_one, tracker_two] = trackers;
+        let [match_metrics_one, match_metrics_two] = player_match_metrics;
+        let gameplay_metrics_one =
+            with_player_match_metrics(tracker_one.telemetry(), &match_metrics_one);
+        let gameplay_metrics_two =
+            with_player_match_metrics(tracker_two.telemetry(), &match_metrics_two);
         Ok(TwoPlayerGameRunResult {
             players: vec![
-                result(session_one, steps_one, Some(tracker_one.telemetry())),
-                result(session_two, steps_two, Some(tracker_two.telemetry())),
+                result(session_one, steps_one, Some(gameplay_metrics_one)),
+                result(session_two, steps_two, Some(gameplay_metrics_two)),
             ],
         })
     }
@@ -2171,14 +2354,16 @@ async fn receive_match_response(
     outbound: &OutboundPacket,
     expected: MessageType,
     timeout_ms: u64,
+    match_metrics: &mut PlayerMatchMetrics,
 ) -> Result<Packet, GameLiveError> {
     let deadline = Instant::now() + Duration::from_millis(timeout_ms);
     loop {
         let packet = transport.receive_until(deadline).await.map_err(|_| {
             let _ = session.handle_request_timeout(pool, outbound, 0);
+            match_metrics.record_timeout();
             GameLiveError::GameplayFailed {
                 message: "match response timeout".to_string(),
-                metrics: crate::metrics::MetricsSnapshot::default(),
+                metrics: match_metrics.snapshot(),
                 failure_category: Some("match_response_timeout"),
             }
         })?;
@@ -2204,18 +2389,20 @@ async fn receive_match_event(
     session: &mut VirtualPlayerSession,
     pool: &mut AccountLeasePool,
     timeout_ms: u64,
+    match_metrics: &mut PlayerMatchMetrics,
 ) -> Result<MatchEventPush, GameLiveError> {
     let deadline = Instant::now() + Duration::from_millis(timeout_ms);
     loop {
-        let packet =
-            transport
-                .receive_until(deadline)
-                .await
-                .map_err(|_| GameLiveError::GameplayFailed {
-                    message: "match event timeout".to_string(),
-                    metrics: crate::metrics::MetricsSnapshot::default(),
-                    failure_category: Some("match_event_timeout"),
-                })?;
+        let packet = transport.receive_until(deadline).await.map_err(|_| {
+            // The timeout is a player-facing match observation; no
+            // service-side room timestamp is available here.
+            match_metrics.record_timeout();
+            GameLiveError::GameplayFailed {
+                message: "match event timeout".to_string(),
+                metrics: match_metrics.snapshot(),
+                failure_category: Some("match_event_timeout"),
+            }
+        })?;
         match session.handle_packet(pool, packet.clone())? {
             VirtualPlayerEvent::Push {
                 message_type: MessageType::MatchEventPush,
@@ -3835,6 +4022,90 @@ mod tests {
         );
         assert_eq!(first.active_connections(), 0);
         assert_eq!(second.active_connections(), 0);
+    }
+
+    #[test]
+    fn player_match_metrics_keep_queue_and_room_create_observation_separate() {
+        let mut metrics = PlayerMatchMetrics::default();
+        metrics.record_event_stream();
+        metrics.record_start();
+        metrics.record_matched();
+        metrics.statuses = 1;
+        metrics.cancellations = 1;
+        metrics.record_timeout();
+        metrics.room_create_closed_unobserved = true;
+        let snapshot = metrics.snapshot();
+        assert_eq!(
+            snapshot.counters["player_match_event_stream_connections"],
+            1
+        );
+        assert_eq!(snapshot.counters["player_match_attempts"], 1);
+        assert_eq!(snapshot.counters["player_match_successes"], 1);
+        assert_eq!(snapshot.counters["player_match_statuses"], 1);
+        assert_eq!(snapshot.counters["player_match_cancellations"], 1);
+        assert_eq!(snapshot.counters["player_match_timeouts"], 1);
+        assert_eq!(
+            snapshot.counters["player_match_grpc_status_observation_holes"],
+            1
+        );
+        assert_eq!(
+            snapshot.counters["player_match_room_create_closed_unobserved"],
+            1
+        );
+        assert_eq!(snapshot.histograms["player_match_queue_ms"].count(), 1);
+        assert!(
+            snapshot
+                .histograms
+                .get("match_grpc_room_create_ms")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn player_match_terminal_events_preserve_grpc_status_observation_holes() {
+        let mut metrics = PlayerMatchMetrics::default();
+        metrics.record_start();
+        let cancelled = MatchEventPush {
+            event: "match_cancelled".into(),
+            match_id: "match-a".into(),
+            room_id: String::new(),
+            token: String::new(),
+            error_code: String::new(),
+        };
+        assert_eq!(
+            classify_player_match_event(&cancelled, Some("match-a"), &mut metrics),
+            PlayerMatchEventOutcome::Cancelled
+        );
+        let timed_out = MatchEventPush {
+            event: "match_failed".into(),
+            match_id: "match-a".into(),
+            room_id: String::new(),
+            token: String::new(),
+            error_code: "MATCH_TIMEOUT".into(),
+        };
+        assert_eq!(
+            classify_player_match_event(&timed_out, Some("match-a"), &mut metrics),
+            PlayerMatchEventOutcome::TimedOut
+        );
+        let invalid = MatchEventPush {
+            event: "matched".into(),
+            match_id: "other-match".into(),
+            room_id: "room-a".into(),
+            token: String::new(),
+            error_code: String::new(),
+        };
+        assert_eq!(
+            classify_player_match_event(&invalid, Some("match-a"), &mut metrics),
+            PlayerMatchEventOutcome::Invalid
+        );
+        let snapshot = metrics.snapshot();
+        assert_eq!(snapshot.counters["player_match_cancellations"], 1);
+        assert_eq!(snapshot.counters["player_match_timeouts"], 1);
+        assert_eq!(snapshot.counters["player_match_business_errors"], 1);
+        assert_eq!(
+            snapshot.counters["player_match_grpc_status_observation_holes"],
+            1
+        );
     }
 
     #[test]

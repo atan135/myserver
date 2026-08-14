@@ -1,0 +1,134 @@
+{
+  "schema_version": 1,
+  "environment": {
+    "name": "local",
+    "kind": "local"
+  },
+  "targets": {
+    "auth_http": "http://127.0.0.1:3000",
+    "game_proxy": "kcp://127.0.0.1:4000"
+  },
+  "budget": {
+    "max_virtual_players": 2,
+    "max_login_qps": 0.2,
+    "max_new_connections_per_second": 1.0,
+    "max_business_messages_per_second": 4.0,
+    "max_messages_per_connection_per_second": 2.0,
+    "max_duration_secs": 31,
+    "max_total_operations": 80,
+    "max_error_rate": 0.1,
+    "max_connection_failure_rate": 0.1,
+    "max_p99_ms": 1000,
+    "max_data_writes": 60
+  },
+  "scenario": {
+    "name": "local-composite-player-dry-run",
+    "load": {
+      "type": "staged",
+      "stages": [
+        {
+          "name": "default-match-pair",
+          "virtual_players": 2,
+          "duration_secs": 31
+        }
+      ]
+    },
+    "steps": [
+      {
+        "name": "login_entry",
+        "timeout_ms": 1000,
+        "think_time_ms": 200,
+        "expected": { "kind": "success" },
+        "idempotency": "read_only",
+        "retry": { "kind": "never" }
+      },
+      {
+        "name": "online_room_frame",
+        "timeout_ms": 1000,
+        "think_time_ms": 350,
+        "expected": { "kind": "success" },
+        "idempotency": "read_only",
+        "retry": { "kind": "never" }
+      },
+      {
+        "name": "match_social_mail_announce",
+        "timeout_ms": 1000,
+        "think_time_ms": 500,
+        "expected": { "kind": "success" },
+        "idempotency": "read_only",
+        "retry": { "kind": "never" }
+      }
+    ],
+    "writes_data": true,
+    "auth": {
+      "operations": ["login", "me", "list_characters", "select_character", "issue_ticket", "logout"],
+      "allow_same_account_concurrency": false
+    },
+    "live_gameplay": {
+      "room_id": "approved-local-default-match-room",
+      "policy_id": "default_match",
+      "coordination": "two_player_default_match",
+      "profile": "normal",
+      "lockstep_scenario_json": "{\"version\":1,\"tickRate\":20,\"config\":{\"movement\":{\"bounds\":{\"minX\":-250000,\"minY\":-250000,\"maxX\":250000,\"maxY\":250000},\"defaultSpeedPerSecondMilli\":6000,\"maxSpeedPerSecondMilli\":10000}},\"initial\":{\"frame\":0,\"seed\":12345,\"entities\":[{\"id\":1001,\"kind\":\"player\",\"characterId\":\"chr_a\",\"teamId\":1,\"x\":0,\"y\":0,\"radius\":500,\"hp\":100}]},\"inputs\":[{\"frame\":1,\"characterId\":\"chr_a\",\"entityId\":1001,\"seq\":1,\"command\":{\"type\":\"Move\",\"dirX\":1000,\"dirY\":0,\"speedPerSecondMilli\":6000}}],\"assertions\":{\"finalFrame\":5,\"finalHash\":\"e128a3607fa6de93\",\"entityPositions\":[{\"entityId\":1001,\"x\":600,\"y\":0,\"toleranceMilli\":0}]}}",
+      "max_frame_inputs": 1
+    },
+    "side_services": {
+      "chat": {
+        "descriptor": { "host": "127.0.0.1", "port": 9001, "protocol": "wss" },
+        "steps": [
+          { "operation": "chat_auth", "weight": 1, "think_time_ms": 250 },
+          { "operation": "chat_private", "weight": 1, "think_time_ms": 700 },
+          { "operation": "chat_history", "weight": 1, "think_time_ms": 900 }
+        ],
+        "writes": true,
+        "live_websocket": true
+      },
+      "match": {
+        "descriptor": { "host": "127.0.0.1", "port": 9002, "protocol": "grpc" },
+        "steps": [
+          { "operation": "match_event_stream", "weight": 1, "think_time_ms": 100 },
+          { "operation": "match_start", "weight": 1, "think_time_ms": 300 },
+          { "operation": "match_status", "weight": 1, "think_time_ms": 200 }
+        ],
+        "writes": true
+      },
+      "mail": {
+        "descriptor": { "host": "127.0.0.1", "port": 9003, "protocol": "http" },
+        "steps": [
+          { "operation": "mail_list", "weight": 1, "think_time_ms": 500 },
+          { "operation": "mail_detail", "weight": 1, "think_time_ms": 800 },
+          { "operation": "mail_read", "weight": 1, "think_time_ms": 1200 },
+          { "operation": "mail_claim", "weight": 1, "think_time_ms": 1500 }
+        ],
+        "writes": true,
+        "live_http": true,
+        "write_batch": "comp"
+      },
+      "announce": {
+        "descriptor": { "host": "127.0.0.1", "port": 9004, "protocol": "http" },
+        "steps": [
+          { "operation": "announce_list", "weight": 1, "think_time_ms": 1000 },
+          { "operation": "announce_detail", "weight": 1, "think_time_ms": 1200 }
+        ],
+        "live_http": true
+      },
+      "composition": {
+        "weights": { "chat": 1, "match": 1, "mail": 1, "announce": 1 },
+        "max_operations_per_player": 16,
+        "max_operations_per_service_per_player": {
+          "chat": 3,
+          "match": 3,
+          "mail": 4,
+          "announce": 2
+        }
+      }
+    }
+  },
+  "account_prepare": {
+    "batch": "comp",
+    "account_count": 2,
+    "character_name_prefix": "loadtest"
+  },
+  "reports_root": "tools/load-test/reports",
+  "prepare_reports_root": "tools/load-test/prepare-reports"
+}

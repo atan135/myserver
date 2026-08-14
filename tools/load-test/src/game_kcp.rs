@@ -1166,6 +1166,34 @@ mod tests {
                 seq: stream.seq(),
             }
         );
+        let matched = crate::pb::MatchEventPush {
+            event: "matched".into(),
+            match_id: "match-1".into(),
+            room_id: "room-from-match".into(),
+            token: String::new(),
+            error_code: String::new(),
+        };
+        let matched_packet = game_protocol::Packet::new(
+            game_protocol::PacketHeader {
+                msg_type: MessageType::MatchEventPush as u16,
+                seq: 0,
+                body_len: game_protocol::encode_body(&matched).len() as u32,
+            },
+            game_protocol::encode_body(&matched),
+        );
+        assert_eq!(
+            lifecycle.handle_packet(matched_packet.clone()).unwrap(),
+            GameLifecycleEvent::Push {
+                message_type: MessageType::MatchEventPush,
+                seq: 0,
+            }
+        );
+        assert_eq!(
+            crate::pb::MatchEventPush::decode(matched_packet.body.as_slice())
+                .unwrap()
+                .room_id,
+            "room-from-match"
+        );
 
         let cancel = lifecycle.begin_match_cancel("match-1").unwrap();
         let cancel_body = crate::pb::MatchCancelReq::decode(cancel.body()).unwrap();
@@ -1188,6 +1216,92 @@ mod tests {
             }
         );
         assert_eq!(lifecycle.pending_requests(), 0);
+    }
+
+    #[test]
+    fn player_match_terminal_sequences_keep_event_stream_start_cancel_status_and_push_correlated() {
+        for (event, error_code) in [("match_cancelled", ""), ("match_failed", "MATCH_TIMEOUT")] {
+            let mut lifecycle = GameConnectionLifecycle::new(1_024, policy(1)).unwrap();
+            lifecycle.begin_connect().unwrap();
+            lifecycle.begin_auth("private-ticket").unwrap();
+            lifecycle.handle_packet(auth_response(1, true, "")).unwrap();
+
+            let stream = lifecycle.begin_match_event_stream().unwrap();
+            assert_eq!(stream.message_type(), MessageType::MatchEventStreamReq);
+            lifecycle
+                .handle_packet(game_protocol::Packet::new(
+                    game_protocol::PacketHeader {
+                        msg_type: MessageType::MatchEventStreamRes as u16,
+                        seq: stream.seq(),
+                        body_len: 0,
+                    },
+                    Vec::new(),
+                ))
+                .unwrap();
+
+            let start = lifecycle.begin_match_start("default_match").unwrap();
+            lifecycle
+                .handle_packet(game_protocol::Packet::new(
+                    game_protocol::PacketHeader {
+                        msg_type: MessageType::MatchStartRes as u16,
+                        seq: start.seq(),
+                        body_len: 0,
+                    },
+                    Vec::new(),
+                ))
+                .unwrap();
+
+            let cancel = lifecycle.begin_match_cancel("match-terminal").unwrap();
+            lifecycle
+                .handle_packet(game_protocol::Packet::new(
+                    game_protocol::PacketHeader {
+                        msg_type: MessageType::MatchCancelRes as u16,
+                        seq: cancel.seq(),
+                        body_len: 0,
+                    },
+                    Vec::new(),
+                ))
+                .unwrap();
+
+            let status = lifecycle.begin_match_status().unwrap();
+            lifecycle
+                .handle_packet(game_protocol::Packet::new(
+                    game_protocol::PacketHeader {
+                        msg_type: MessageType::MatchStatusRes as u16,
+                        seq: status.seq(),
+                        body_len: 0,
+                    },
+                    Vec::new(),
+                ))
+                .unwrap();
+
+            let terminal = crate::pb::MatchEventPush {
+                event: event.into(),
+                match_id: "match-terminal".into(),
+                room_id: String::new(),
+                token: String::new(),
+                error_code: error_code.into(),
+            };
+            let packet = game_protocol::Packet::new(
+                game_protocol::PacketHeader {
+                    msg_type: MessageType::MatchEventPush as u16,
+                    seq: 0,
+                    body_len: game_protocol::encode_body(&terminal).len() as u32,
+                },
+                game_protocol::encode_body(&terminal),
+            );
+            assert_eq!(
+                lifecycle.handle_packet(packet.clone()).unwrap(),
+                GameLifecycleEvent::Push {
+                    message_type: MessageType::MatchEventPush,
+                    seq: 0,
+                }
+            );
+            let decoded = crate::pb::MatchEventPush::decode(packet.body.as_slice()).unwrap();
+            assert_eq!(decoded.event, event);
+            assert_eq!(decoded.error_code, error_code);
+            assert_eq!(lifecycle.pending_requests(), 0);
+        }
     }
 
     #[test]

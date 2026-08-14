@@ -48,6 +48,15 @@ pub struct SideHttpMetrics {
     pub mail_writes: u64,
     pub announce_writes: u64,
     pub notifications: u64,
+    pub mail_claim_successes: u64,
+    pub mail_claim_idempotent_replays: u64,
+    pub mail_claim_processing: u64,
+    pub mail_claim_reconciliation_pending: u64,
+    pub mail_claim_retryable_failures: u64,
+    /// Public mail responses do not carry an outbox/NATS correlation
+    /// timestamp. Keep the absence explicit instead of deriving a latency
+    /// from the HTTP request duration.
+    pub mail_notification_observation_holes: u64,
 }
 
 impl SideHttpMetrics {
@@ -57,6 +66,24 @@ impl SideHttpMetrics {
         metrics.increment("side_announce_writes", self.announce_writes);
         metrics.increment("side_http_writes", self.writes);
         metrics.increment("side_mail_notifications", self.notifications);
+        metrics.increment("side_mail_claim_successes", self.mail_claim_successes);
+        metrics.increment(
+            "side_mail_claim_idempotent_replays",
+            self.mail_claim_idempotent_replays,
+        );
+        metrics.increment("side_mail_claim_processing", self.mail_claim_processing);
+        metrics.increment(
+            "side_mail_claim_reconciliation_pending",
+            self.mail_claim_reconciliation_pending,
+        );
+        metrics.increment(
+            "side_mail_claim_retryable_failures",
+            self.mail_claim_retryable_failures,
+        );
+        metrics.increment(
+            "side_mail_notification_observation_holes",
+            self.mail_notification_observation_holes,
+        );
     }
 }
 
@@ -206,6 +233,41 @@ fn announce_id_from(body: &Value) -> Option<String> {
         .and_then(|item| item.get("announce_id"))
         .and_then(Value::as_str)
         .map(str::to_owned)
+}
+
+fn record_mail_claim_result(metrics: &mut SideHttpMetrics, body: &Value) {
+    let status = body
+        .get("claim_status")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let already_claimed = body
+        .get("already_claimed")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    match (status, already_claimed) {
+        ("claimed", true) => {
+            metrics.mail_claim_idempotent_replays =
+                metrics.mail_claim_idempotent_replays.saturating_add(1);
+        }
+        ("claimed", false) => {
+            metrics.mail_claim_successes = metrics.mail_claim_successes.saturating_add(1);
+        }
+        ("processing", _) => {
+            metrics.mail_claim_processing = metrics.mail_claim_processing.saturating_add(1);
+        }
+        ("reconciliation_pending", _) => {
+            metrics.mail_claim_reconciliation_pending =
+                metrics.mail_claim_reconciliation_pending.saturating_add(1);
+        }
+        ("retryable_failure", _) => {
+            metrics.mail_claim_retryable_failures =
+                metrics.mail_claim_retryable_failures.saturating_add(1);
+        }
+        _ => {}
+    }
+    metrics.mail_notification_observation_holes = metrics
+        .mail_notification_observation_holes
+        .saturating_add(1);
 }
 
 fn record_success(
@@ -379,6 +441,9 @@ pub fn execute_live_mail_announce_steps(
             Ok(response) => {
                 if step.operation == SideServiceOperation::MailList {
                     mail_id = mail_id_from(&response.body);
+                }
+                if step.operation == SideServiceOperation::MailClaim {
+                    record_mail_claim_result(&mut metrics, &response.body);
                 }
                 if matches!(
                     step.operation,
@@ -582,6 +647,35 @@ mod tests {
     }
 
     #[test]
+    fn mail_claim_classification_preserves_idempotency_and_observation_holes() {
+        let mut metrics = SideHttpMetrics::default();
+        for body in [
+            serde_json::json!({"claim_status":"claimed", "already_claimed":false}),
+            serde_json::json!({"claim_status":"claimed", "already_claimed":true}),
+            serde_json::json!({"claim_status":"processing", "already_claimed":false}),
+            serde_json::json!({"claim_status":"reconciliation_pending"}),
+            serde_json::json!({"claim_status":"retryable_failure"}),
+        ] {
+            record_mail_claim_result(&mut metrics, &body);
+        }
+        assert_eq!(metrics.mail_claim_successes, 1);
+        assert_eq!(metrics.mail_claim_idempotent_replays, 1);
+        assert_eq!(metrics.mail_claim_processing, 1);
+        assert_eq!(metrics.mail_claim_reconciliation_pending, 1);
+        assert_eq!(metrics.mail_claim_retryable_failures, 1);
+        assert_eq!(metrics.mail_notification_observation_holes, 5);
+
+        let mut projected = crate::metrics::Metrics::default();
+        metrics.merge_into_metrics(&mut projected);
+        let snapshot = projected.snapshot();
+        assert_eq!(snapshot.counters["side_mail_claim_idempotent_replays"], 1);
+        assert_eq!(
+            snapshot.counters["side_mail_notification_observation_holes"],
+            5
+        );
+    }
+
+    #[test]
     fn production_and_missing_batch_writes_fail_before_transport() {
         let scenario = scenario(true);
         let steps = [step(
@@ -598,6 +692,64 @@ mod tests {
             |_| panic!("admission must not run"),
         );
         assert!(matches!(result, Err(SideHttpError::LiveTransportForbidden)));
+    }
+
+    #[test]
+    fn service_live_http_gate_rejects_mail_writes_before_admission_or_transport() {
+        let (port, server) = spawn_json_server(vec![
+            r#"{"mails":[{"mail_id":"mail-1"}]}"#,
+            r#"{"claim_status":"claimed","already_claimed":false}"#,
+        ]);
+        let mut scenario = scenario_with_port(true, port);
+        scenario.mail.as_mut().unwrap().live_http = false;
+        let steps = [
+            step(SideServiceKind::Mail, SideServiceOperation::MailList),
+            step(SideServiceKind::Mail, SideServiceOperation::MailClaim),
+        ];
+        let mut admissions = Vec::new();
+        let result = execute_live_mail_announce_steps(
+            &scenario,
+            EnvironmentKind::Local,
+            "loadtest-local",
+            "ticket",
+            &steps,
+            20,
+            |admission| {
+                admissions.push(admission);
+                Ok(())
+            },
+        );
+        assert!(matches!(
+            result,
+            Err(SideHttpError::LiveTransportNotEnabled)
+        ));
+        assert!(admissions.is_empty(), "mail write must not be admitted");
+
+        scenario.mail.as_mut().unwrap().live_http = true;
+        let metrics = execute_live_mail_announce_steps(
+            &scenario,
+            EnvironmentKind::Local,
+            "loadtest-local",
+            "ticket",
+            &steps,
+            1_000,
+            |admission| {
+                admissions.push(admission);
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(metrics.writes, 1);
+        assert_eq!(metrics.mail_writes, 1);
+        assert_eq!(
+            admissions,
+            vec![
+                SideHttpAdmission::Connection,
+                SideHttpAdmission::Message { writes: false },
+                SideHttpAdmission::Message { writes: true },
+            ]
+        );
+        server.join().expect("test HTTP server thread");
     }
 
     #[test]

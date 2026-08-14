@@ -758,6 +758,11 @@ impl LoadTestConfig {
             side_services
                 .validate_for_environment(self.environment.kind)
                 .map_err(ConfigError::Rejected)?;
+            if side_services.writes_data() && !self.scenario.writes_data {
+                return Err(ConfigError::Rejected(
+                    "side-service write operations require scenario.writes_data=true".into(),
+                ));
+            }
         }
         Ok(())
     }
@@ -903,6 +908,10 @@ fn validate_private_config(path: &Path) -> Result<(), ConfigError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::side_services::{
+        ServiceDescriptor, SideServiceConfig, SideServiceOperation, SideServiceStep,
+        SideServicesScenario, SideTransportKind,
+    };
     use crate::step::{ExpectedResponse, Idempotency, RetryPolicy};
 
     fn config() -> LoadTestConfig {
@@ -1199,6 +1208,39 @@ mod tests {
                 .to_string()
                 .contains("room_id")
         );
+    }
+
+    #[test]
+    fn side_service_writes_require_the_scenario_write_budget_boundary() {
+        let mut value = config();
+        value.scenario.side_services = Some(SideServicesScenario {
+            mail: Some(SideServiceConfig {
+                descriptor: Some(ServiceDescriptor {
+                    host: "127.0.0.1".into(),
+                    port: 9003,
+                    protocol: SideTransportKind::Http,
+                }),
+                steps: vec![SideServiceStep {
+                    operation: SideServiceOperation::MailClaim,
+                    weight: 1,
+                    think_time_ms: 100,
+                }],
+                writes: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        assert!(
+            value
+                .validate_structural()
+                .unwrap_err()
+                .to_string()
+                .contains("writes_data")
+        );
+        value.scenario.writes_data = true;
+        value.budget.max_data_writes = 1;
+        value.validate_structural().unwrap();
+        assert!(value.scenario.side_services.as_ref().unwrap().writes_data());
     }
 
     #[test]

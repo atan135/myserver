@@ -373,6 +373,18 @@ pub struct SideServicesScenario {
 }
 
 impl SideServicesScenario {
+    pub fn writes_data(&self) -> bool {
+        [
+            self.chat.as_ref(),
+            self.mail.as_ref(),
+            self.announce.as_ref(),
+            self.r#match.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        .any(|config| config.writes)
+    }
+
     pub fn validate(&self) -> Result<(), String> {
         for (kind, config) in [
             (SideServiceKind::Chat, self.chat.as_ref()),
@@ -381,6 +393,34 @@ impl SideServicesScenario {
             (SideServiceKind::Match, self.r#match.as_ref()),
         ] {
             let Some(config) = config else { continue };
+            let invalid_transport_gate = match kind {
+                SideServiceKind::Chat => {
+                    config.live_grpc
+                        || config.live_internal
+                        || config.live_http
+                        || config.write_batch.is_some()
+                }
+                SideServiceKind::Mail | SideServiceKind::Announce => {
+                    config.live_websocket || config.live_grpc || config.live_internal
+                }
+                SideServiceKind::Match => {
+                    config.live_websocket || config.live_http || config.write_batch.is_some()
+                }
+            };
+            if invalid_transport_gate {
+                return Err(format!(
+                    "{kind:?} contains a live transport gate that is not applicable to its protocol"
+                ));
+            }
+            if config.write_batch.is_some()
+                && !(matches!(kind, SideServiceKind::Mail | SideServiceKind::Announce)
+                    && config.live_http
+                    && config.writes)
+            {
+                return Err(format!(
+                    "{kind:?} write_batch requires an enabled live HTTP write scenario"
+                ));
+            }
             if let Some(descriptor) = &config.descriptor {
                 descriptor.validate(kind)?;
                 config.allowlist.validate(descriptor)?;
@@ -1263,6 +1303,32 @@ mod tests {
                 .validate_for_environment(EnvironmentKind::Production)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn service_configs_reject_transport_gates_for_another_protocol() {
+        let mut match_scenario = SideServicesScenario {
+            r#match: Some(SideServiceConfig {
+                descriptor: Some(descriptor(SideTransportKind::Grpc)),
+                live_http: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(match_scenario.validate().is_err());
+        match_scenario.r#match.as_mut().unwrap().live_http = false;
+        match_scenario.r#match.as_mut().unwrap().write_batch = Some("batch".into());
+        assert!(match_scenario.validate().is_err());
+
+        let mail_scenario = SideServicesScenario {
+            mail: Some(SideServiceConfig {
+                descriptor: Some(descriptor(SideTransportKind::Http)),
+                live_websocket: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(mail_scenario.validate().is_err());
     }
 
     fn budget() -> HardBudget {
