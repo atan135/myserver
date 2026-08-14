@@ -405,7 +405,10 @@ fn write_summary(
     let operation = metrics.histograms.get("operation_ms");
     let auth = auth_metrics.map_or_else(String::new, |auth| {
         format!(
-            "\nAuth login attempt QPS: {:.3}\n\nAuth login success rate: {:.3}\n\nAuth P50/P95/P99 latency (ms): {}/{}/{}\n\nAuth ticket success rate: {:.3}\n\nAuth rate-limit rate: {:.3}\n\nAuth connection-failure rate: {:.3}\n\nAuth HTTP status categories: {}\n\nAuth business code categories: {}\n\nAuth virtual player states: {}\n",
+            "\nAuth guard probes attempted/succeeded/admitted connections: {}/{}/{}\n\nAuth login attempt QPS: {:.3}\n\nAuth login success rate: {:.3}\n\nAuth P50/P95/P99 latency (ms): {}/{}/{}\n\nAuth ticket success rate: {:.3}\n\nAuth rate-limit rate: {:.3}\n\nAuth connection-failure rate: {:.3}\n\nAuth HTTP status categories: {}\n\nAuth business code categories: {}\n\nAuth virtual player states: {}\n",
+            auth.guard_probe_attempts,
+            auth.guard_probe_successes,
+            auth.guard_probe_connection_admissions,
             auth.login_qps(),
             auth.login_success_rate(),
             auth.p50_ms(),

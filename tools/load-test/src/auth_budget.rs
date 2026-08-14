@@ -48,6 +48,13 @@ pub struct PrepareBudgetEstimate {
 pub struct AuthRunBudgetEstimate {
     pub virtual_player_slots: u32,
     pub scheduled_flows: u64,
+    /// Auth business calls, including bounded read retries, but excluding the
+    /// credential-free remote target guard.
+    pub auth_http_operations: u64,
+    /// A remote authenticated-player run performs one target guard probe
+    /// before each possible auth attempt.
+    pub guard_probe_operations: u64,
+    /// All HTTP operations, including the remote guard probes.
     pub http_operations: u64,
     pub login_operations: u64,
     pub potential_data_writes: u64,
@@ -327,6 +334,14 @@ pub fn estimate_auth_run(
     scenario: &Scenario,
     budget: &HardBudget,
 ) -> Result<AuthRunBudgetEstimate, String> {
+    estimate_auth_run_with_guard_probes(scenario, budget, false)
+}
+
+pub fn estimate_auth_run_with_guard_probes(
+    scenario: &Scenario,
+    budget: &HardBudget,
+    include_guard_probes: bool,
+) -> Result<AuthRunBudgetEstimate, String> {
     let auth = scenario
         .auth
         .as_ref()
@@ -338,9 +353,15 @@ pub fn estimate_auth_run(
             .checked_add(auth_operation_max_http_attempts(*operation))
             .ok_or("auth HTTP operation estimate overflowed")
     })?;
-    let http_operations = scheduled_flows
+    let auth_http_operations = scheduled_flows
         .checked_mul(http_attempts_per_flow)
         .ok_or("auth HTTP operation estimate overflowed")?;
+    let guard_probe_operations = include_guard_probes
+        .then_some(auth_http_operations)
+        .unwrap_or(0);
+    let http_operations = auth_http_operations
+        .checked_add(guard_probe_operations)
+        .ok_or("auth guard-probe operation estimate overflowed")?;
     let login_per_flow = auth
         .operations
         .iter()
@@ -373,6 +394,8 @@ pub fn estimate_auth_run(
     Ok(AuthRunBudgetEstimate {
         virtual_player_slots,
         scheduled_flows,
+        auth_http_operations,
+        guard_probe_operations,
         http_operations,
         login_operations,
         potential_data_writes,
@@ -433,6 +456,14 @@ pub fn validate_staged_auth_windows(
     scenario: &Scenario,
     budget: &HardBudget,
 ) -> Result<(), String> {
+    validate_staged_auth_windows_with_guard_probes(scenario, budget, false)
+}
+
+pub fn validate_staged_auth_windows_with_guard_probes(
+    scenario: &Scenario,
+    budget: &HardBudget,
+    include_guard_probes: bool,
+) -> Result<(), String> {
     let LoadModel::Staged { stages } = &scenario.load else {
         return Ok(());
     };
@@ -456,9 +487,15 @@ pub fn validate_staged_auth_windows(
         let login_operations = flow_count
             .checked_mul(login_attempts_per_flow)
             .ok_or("staged auth login operation estimate overflowed")?;
-        let http_operations = flow_count
+        let auth_http_operations = flow_count
             .checked_mul(http_attempts_per_flow)
             .ok_or("staged auth HTTP operation estimate overflowed")?;
+        let guard_probe_operations = include_guard_probes
+            .then_some(auth_http_operations)
+            .unwrap_or(0);
+        let http_operations = auth_http_operations
+            .checked_add(guard_probe_operations)
+            .ok_or("staged auth guard-probe operation estimate overflowed")?;
         let minimum_login_admission_ms =
             minimum_admission_ms(login_operations, budget.max_login_qps)?;
         let minimum_dispatch_admission_ms = minimum_admission_ms(
@@ -723,6 +760,45 @@ mod tests {
                 },
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn remote_auth_run_reserves_guard_probes_in_operation_and_stage_windows() {
+        let scenario = auth_scenario(LoadModel::Staged {
+            stages: vec![LoadStage {
+                name: "guarded".into(),
+                virtual_players: 2,
+                duration_secs: 4,
+            }],
+        });
+        let mut remote_budget = budget();
+        remote_budget.max_virtual_players = 2;
+        remote_budget.max_total_operations = 4;
+        remote_budget.max_new_connections_per_second = 1.0;
+        remote_budget.max_business_messages_per_second = 1.0;
+        remote_budget.max_messages_per_connection_per_second = 1.0;
+        let estimate =
+            estimate_auth_run_with_guard_probes(&scenario, &remote_budget, true).unwrap();
+
+        assert_eq!(estimate.auth_http_operations, 2);
+        assert_eq!(estimate.guard_probe_operations, 2);
+        assert_eq!(estimate.http_operations, 4);
+        assert!(validate_auth_run_budget(&estimate, &remote_budget).is_ok());
+
+        remote_budget.max_total_operations = 3;
+        assert!(
+            validate_auth_run_budget(&estimate, &remote_budget)
+                .unwrap_err()
+                .contains("HTTP operations")
+        );
+
+        remote_budget.max_total_operations = 4;
+        remote_budget.max_new_connections_per_second = 0.5;
+        assert!(
+            validate_staged_auth_windows_with_guard_probes(&scenario, &remote_budget, true,)
+                .unwrap_err()
+                .contains("HTTP attempts")
         );
     }
 

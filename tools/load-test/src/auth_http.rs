@@ -794,6 +794,9 @@ fn parse_json_body(value: Value) -> AuthResponseBody {
 #[derive(Clone, Debug, Serialize)]
 pub struct AuthRunMetrics {
     pub requests: u64,
+    pub guard_probe_attempts: u64,
+    pub guard_probe_successes: u64,
+    pub guard_probe_connection_admissions: u64,
     pub login_requests: u64,
     pub login_successes: u64,
     pub connection_failures: u64,
@@ -805,6 +808,7 @@ pub struct AuthRunMetrics {
     pub outcomes: BTreeMap<AuthOutcomeCategory, u64>,
     pub virtual_player_states: BTreeMap<VirtualPlayerState, u64>,
     pub latency_ms: HistogramSnapshot,
+    pub guard_probe_latency_ms: HistogramSnapshot,
     pub login_latency_ms: HistogramSnapshot,
     pub ticket_latency_ms: HistogramSnapshot,
     /// Monotonic wall-clock duration supplied by the controller. It includes
@@ -816,6 +820,9 @@ impl Default for AuthRunMetrics {
     fn default() -> Self {
         Self {
             requests: 0,
+            guard_probe_attempts: 0,
+            guard_probe_successes: 0,
+            guard_probe_connection_admissions: 0,
             login_requests: 0,
             login_successes: 0,
             connection_failures: 0,
@@ -827,6 +834,7 @@ impl Default for AuthRunMetrics {
             outcomes: BTreeMap::new(),
             virtual_player_states: BTreeMap::new(),
             latency_ms: HistogramSnapshot::default(),
+            guard_probe_latency_ms: HistogramSnapshot::default(),
             login_latency_ms: HistogramSnapshot::default(),
             ticket_latency_ms: HistogramSnapshot::default(),
             wall_clock_window_ms: 0,
@@ -837,6 +845,15 @@ impl Default for AuthRunMetrics {
 impl AuthRunMetrics {
     pub fn merge(&mut self, other: &Self) {
         self.requests = self.requests.saturating_add(other.requests);
+        self.guard_probe_attempts = self
+            .guard_probe_attempts
+            .saturating_add(other.guard_probe_attempts);
+        self.guard_probe_successes = self
+            .guard_probe_successes
+            .saturating_add(other.guard_probe_successes);
+        self.guard_probe_connection_admissions = self
+            .guard_probe_connection_admissions
+            .saturating_add(other.guard_probe_connection_admissions);
         self.login_requests = self.login_requests.saturating_add(other.login_requests);
         self.login_successes = self.login_successes.saturating_add(other.login_successes);
         self.connection_failures = self
@@ -847,6 +864,8 @@ impl AuthRunMetrics {
         self.rate_limited = self.rate_limited.saturating_add(other.rate_limited);
         self.wall_clock_window_ms = self.wall_clock_window_ms.max(other.wall_clock_window_ms);
         self.latency_ms.merge(&other.latency_ms);
+        self.guard_probe_latency_ms
+            .merge(&other.guard_probe_latency_ms);
         self.login_latency_ms.merge(&other.login_latency_ms);
         self.ticket_latency_ms.merge(&other.ticket_latency_ms);
         for (key, value) in &other.http_statuses {
@@ -912,6 +931,17 @@ impl AuthRunMetrics {
 
     pub fn p99_ms(&self) -> u64 {
         self.latency_ms.percentile(0.99)
+    }
+
+    pub fn record_guard_probe(&mut self, started: std::time::Instant, success: bool) {
+        self.guard_probe_attempts = self.guard_probe_attempts.saturating_add(1);
+        self.guard_probe_connection_admissions =
+            self.guard_probe_connection_admissions.saturating_add(1);
+        if success {
+            self.guard_probe_successes = self.guard_probe_successes.saturating_add(1);
+        }
+        self.guard_probe_latency_ms
+            .record(started.elapsed().as_millis() as u64);
     }
 
     fn record(&mut self, request: &AuthHttpRequest, response: &AuthHttpResponse, elapsed_ms: u64) {

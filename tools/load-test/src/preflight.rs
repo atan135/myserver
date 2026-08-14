@@ -1,11 +1,15 @@
 use serde::Serialize;
 
-use crate::auth_budget::{AuthRunBudgetEstimate, estimate_auth_run};
+use crate::auth_budget::{
+    AuthRunBudgetEstimate, estimate_auth_run, estimate_auth_run_with_guard_probes,
+};
 use crate::config::{EnvironmentKind, HardBudget, LoadModel, LoadTestConfig, RunAccess};
 use crate::side_services::ServiceDescriptor;
 
 const SUPPORTED_LOAD_MODELS: [&str; 4] = ["fixed_concurrency", "arrival_rate", "staged", "burst"];
-const PROTECTION_CONTRACT: &str = "fail_closed: revalidate DNS, certificate, descriptor, and environment identity before ramp and every controller tick";
+const LOCAL_PROTECTION_CONTRACT: &str =
+    "fail_closed: revalidate the approved local target before ramp and every controller tick";
+const REMOTE_AUTH_PROTECTION_CONTRACT: &str = "fail_closed: before every admitted auth attempt, probe DNS/TLS/auth environment identity; controller and KCP checkpoints only recheck the approved test window; pin the auth game descriptor before KCP";
 
 /// A safe-to-display execution contract emitted before any load scheduling,
 /// transport setup, or report directory write occurs.
@@ -43,6 +47,29 @@ pub fn summarize_run<'a>(
     deadline_unix_ms: u64,
     dry_run: bool,
     account_manifest_supplied: bool,
+) -> Result<PreflightSummary<'a>, String> {
+    summarize_run_with_guard_probes(
+        command,
+        config,
+        budget,
+        access,
+        deadline_unix_ms,
+        dry_run,
+        account_manifest_supplied,
+        false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn summarize_run_with_guard_probes<'a>(
+    command: &'a str,
+    config: &'a LoadTestConfig,
+    budget: &'a HardBudget,
+    access: RunAccess<'_>,
+    deadline_unix_ms: u64,
+    dry_run: bool,
+    account_manifest_supplied: bool,
+    include_guard_probes: bool,
 ) -> Result<PreflightSummary<'a>, String> {
     let targets = config
         .parsed_targets()
@@ -106,10 +133,20 @@ pub fn summarize_run<'a>(
             .scenario
             .auth
             .as_ref()
-            .map(|_| estimate_auth_run(&config.scenario, budget))
+            .map(|_| {
+                if include_guard_probes {
+                    estimate_auth_run_with_guard_probes(&config.scenario, budget, true)
+                } else {
+                    estimate_auth_run(&config.scenario, budget)
+                }
+            })
             .transpose()?,
         auth_http_admission_mapping: config.scenario.auth.as_ref().map(|_| {
-            "each outbound attempt is admitted as one HTTP operation, one new HTTP/1.1 connection, one business message, and one message on a worst-case connection; Connection: close disables reuse"
+            if include_guard_probes {
+                "each remote auth guard probe and outbound auth attempt is admitted as one HTTP operation, one new HTTP/1.1 connection, one business message, and one message on a worst-case connection; Connection: close disables reuse"
+            } else {
+                "each outbound attempt is admitted as one HTTP operation, one new HTTP/1.1 connection, one business message, and one message on a worst-case connection; Connection: close disables reuse"
+            }
         }),
         selected_load_model: &config.scenario.load,
         supported_load_models: SUPPORTED_LOAD_MODELS,
@@ -120,7 +157,11 @@ pub fn summarize_run<'a>(
         max_data_writes: budget.max_data_writes,
         dry_run,
         remote_gate,
-        protection_revalidation: PROTECTION_CONTRACT,
+        protection_revalidation: if include_guard_probes {
+            REMOTE_AUTH_PROTECTION_CONTRACT
+        } else {
+            LOCAL_PROTECTION_CONTRACT
+        },
         side_service_steps,
         side_service_descriptors,
     })
@@ -191,5 +232,37 @@ mod tests {
         assert!(!output.contains("password"));
         assert!(!output.contains("token"));
         assert!(!output.contains("ticket"));
+    }
+
+    #[test]
+    fn guarded_auth_preflight_includes_each_remote_probe_in_the_budget() {
+        let mut config = config();
+        config.scenario.auth = Some(crate::config::AuthScenario {
+            operations: vec![crate::config::AuthOperation::Login],
+            allow_same_account_concurrency: false,
+            same_account_session_effect: None,
+        });
+        let budget = config.effective_budget(&BudgetOverride::default()).unwrap();
+        let summary = summarize_run_with_guard_probes(
+            "run",
+            &config,
+            &budget,
+            RunAccess::default(),
+            100,
+            false,
+            true,
+            true,
+        )
+        .unwrap();
+        let estimate = summary
+            .auth_budget_estimate
+            .as_ref()
+            .expect("auth estimate");
+        assert_eq!(estimate.auth_http_operations, 2);
+        assert_eq!(estimate.guard_probe_operations, 2);
+        assert_eq!(estimate.http_operations, 4);
+        let output = serde_json::to_string(&summary).unwrap();
+        assert!(output.contains("guard_probe_operations"));
+        assert!(output.contains("before every admitted auth attempt"));
     }
 }

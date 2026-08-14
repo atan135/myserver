@@ -17,8 +17,9 @@ use loadtest_core::accounts::{
     read_manifest,
 };
 use loadtest_core::auth_budget::{
-    LIVE_GAMEPLAY_POTENTIAL_WRITES_PER_MESSAGE, estimate_auth_run, validate_auth_run_budget,
-    validate_game_run_budget_for_scenario, validate_staged_auth_windows,
+    LIVE_GAMEPLAY_POTENTIAL_WRITES_PER_MESSAGE, estimate_auth_run_with_guard_probes,
+    validate_auth_run_budget, validate_game_run_budget_for_scenario,
+    validate_staged_auth_windows_with_guard_probes,
 };
 use loadtest_core::auth_http::{
     AuthAdmissionError, AuthDispatchAdmission, AuthHttpRequest, AuthHttpTransport,
@@ -47,8 +48,10 @@ use loadtest_core::match_grpc::{
     execute_live_match_steps,
 };
 use loadtest_core::metrics::Metrics;
-use loadtest_core::preflight::summarize_run;
-use loadtest_core::protection::{DryRunProtection, revalidate_or_abort};
+use loadtest_core::preflight::{summarize_run, summarize_run_with_guard_probes};
+use loadtest_core::protection::{
+    DryRunProtection, LiveAuthProtection, RuntimeProtection, revalidate_or_abort,
+};
 use loadtest_core::reconnect_burst::{
     ReconnectBurstAction, ReconnectBurstAdmission, ReconnectBurstExecutionGate,
     ReconnectBurstExecutor, ReconnectBurstSpec, ReconnectBurstStep, execute_reconnect_burst,
@@ -70,6 +73,116 @@ use loadtest_core::virtual_player::{VirtualPlayerEvent, VirtualPlayerSession};
 use prost::Message;
 
 static NEXT_MATCH_INTERNAL_DIAGNOSTIC_ID: AtomicU64 = AtomicU64::new(1);
+
+/// Remote authenticated-player execution has two protection cadences. A
+/// credential-free guard probe validates DNS/TLS/health immediately before an
+/// admitted auth attempt; high-frequency controller and KCP checkpoints only
+/// validate the bounded test window so they cannot emit unbudgeted HTTP.
+trait AuthenticatedPlayerProtection: RuntimeProtection {
+    fn revalidate_while_waiting(&self) -> Result<(), String> {
+        self.revalidate()
+    }
+
+    fn revalidate_before_auth_dispatch(&self) -> Result<(), String> {
+        self.revalidate()
+    }
+
+    fn uses_guard_probe(&self) -> bool {
+        false
+    }
+
+    fn observe_auth_services(&self, _services: Option<&AuthServicesPayload>) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+impl AuthenticatedPlayerProtection for DryRunProtection<'_> {}
+
+impl AuthenticatedPlayerProtection for LiveAuthProtection<'_> {
+    fn revalidate_while_waiting(&self) -> Result<(), String> {
+        LiveAuthProtection::revalidate_while_waiting(self)
+    }
+
+    fn uses_guard_probe(&self) -> bool {
+        true
+    }
+
+    fn observe_auth_services(&self, services: Option<&AuthServicesPayload>) -> Result<(), String> {
+        LiveAuthProtection::observe_auth_services(self, services)
+    }
+}
+
+enum RunPlayerProtection<'a> {
+    Local(DryRunProtection<'a>),
+    Remote(LiveAuthProtection<'a>),
+}
+
+impl RuntimeProtection for RunPlayerProtection<'_> {
+    fn verify_dns(&self) -> Result<(), String> {
+        match self {
+            Self::Local(protection) => protection.verify_dns(),
+            Self::Remote(protection) => protection.verify_dns(),
+        }
+    }
+
+    fn verify_certificate(&self) -> Result<(), String> {
+        match self {
+            Self::Local(protection) => protection.verify_certificate(),
+            Self::Remote(protection) => protection.verify_certificate(),
+        }
+    }
+
+    fn verify_descriptor(&self) -> Result<(), String> {
+        match self {
+            Self::Local(protection) => protection.verify_descriptor(),
+            Self::Remote(protection) => protection.verify_descriptor(),
+        }
+    }
+
+    fn verify_environment_identity(&self) -> Result<(), String> {
+        match self {
+            Self::Local(protection) => protection.verify_environment_identity(),
+            Self::Remote(protection) => protection.verify_environment_identity(),
+        }
+    }
+
+    fn revalidate(&self) -> Result<(), String> {
+        match self {
+            Self::Local(protection) => protection.revalidate(),
+            Self::Remote(protection) => protection.revalidate_while_waiting(),
+        }
+    }
+}
+
+impl AuthenticatedPlayerProtection for RunPlayerProtection<'_> {
+    fn revalidate_while_waiting(&self) -> Result<(), String> {
+        match self {
+            Self::Local(protection) => protection.revalidate_while_waiting(),
+            Self::Remote(protection) => protection.revalidate_while_waiting(),
+        }
+    }
+
+    fn revalidate_before_auth_dispatch(&self) -> Result<(), String> {
+        match self {
+            Self::Local(protection) => protection.revalidate_before_auth_dispatch(),
+            Self::Remote(protection) => protection.revalidate_before_auth_dispatch(),
+        }
+    }
+
+    fn uses_guard_probe(&self) -> bool {
+        match self {
+            Self::Local(protection) => protection.uses_guard_probe(),
+            Self::Remote(protection) => protection.uses_guard_probe(),
+        }
+    }
+
+    fn observe_auth_services(&self, services: Option<&AuthServicesPayload>) -> Result<(), String> {
+        match self {
+            Self::Local(protection) => protection.observe_auth_services(services),
+            Self::Remote(protection) => protection.observe_auth_services(services),
+        }
+    }
+}
 
 fn main() -> ExitCode {
     match execute(env::args().skip(1).collect()) {
@@ -510,6 +623,12 @@ fn dry_run_auth_metrics(
 
 fn record_auth_metrics(metrics: &mut Metrics, auth: &AuthRunMetrics) {
     metrics.increment("auth_requests", auth.requests);
+    metrics.increment("auth_guard_probe_attempts", auth.guard_probe_attempts);
+    metrics.increment("auth_guard_probe_successes", auth.guard_probe_successes);
+    metrics.increment(
+        "auth_guard_probe_connection_admissions",
+        auth.guard_probe_connection_admissions,
+    );
     metrics.increment("auth_login_requests", auth.login_requests);
     metrics.increment("auth_login_successes", auth.login_successes);
     metrics.increment("auth_connection_failures", auth.connection_failures);
@@ -525,6 +644,73 @@ fn record_auth_metrics(metrics: &mut Metrics, auth: &AuthRunMetrics) {
     if auth.latency_ms.count() > 0 {
         metrics.merge_latency("auth_operation_ms", &auth.latency_ms);
     }
+    if auth.guard_probe_latency_ms.count() > 0 {
+        metrics.merge_latency("auth_guard_probe_ms", &auth.guard_probe_latency_ms);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn admit_live_auth_request<P: AuthenticatedPlayerProtection>(
+    admission: &mut AuthDispatchAdmission,
+    request: &AuthHttpRequest,
+    action_deadline: Instant,
+    protection: &P,
+    abort: &mut AbortController,
+    ctrl_c: &AtomicBool,
+    stop_file: Option<&Path>,
+    deadline_unix_ms: u64,
+    guard_metrics: &mut AuthRunMetrics,
+) -> Result<Duration, String> {
+    if protection.uses_guard_probe() {
+        admission
+            .admit_guard_probe(action_deadline, || {
+                check_authenticated_player_checkpoint(
+                    protection,
+                    abort,
+                    ctrl_c,
+                    stop_file,
+                    deadline_unix_ms,
+                )
+            })
+            .map_err(|error| map_auth_admission_to_string(abort, error))?;
+        let started = Instant::now();
+        let guard_result = protection.revalidate_before_auth_dispatch();
+        guard_metrics.record_guard_probe(started, guard_result.is_ok());
+        if guard_result.is_err() {
+            abort.check_protection(false);
+            return Err("remote auth target protection failed before request dispatch".into());
+        }
+    }
+    admission
+        .admit(request, action_deadline, || {
+            check_authenticated_player_checkpoint(
+                protection,
+                abort,
+                ctrl_c,
+                stop_file,
+                deadline_unix_ms,
+            )
+        })
+        .map_err(|error| map_auth_admission_to_string(abort, error))
+}
+
+fn check_authenticated_player_checkpoint<P: AuthenticatedPlayerProtection>(
+    protection: &P,
+    abort: &mut AbortController,
+    ctrl_c: &AtomicBool,
+    stop_file: Option<&Path>,
+    deadline_unix_ms: u64,
+) -> Result<(), String> {
+    abort.check_ctrl_c(ctrl_c);
+    abort.check_stop_file(stop_file);
+    abort.check_deadline(unix_ms(), deadline_unix_ms);
+    if protection.revalidate_while_waiting().is_err() {
+        abort.check_protection(false);
+    }
+    if abort.should_stop_new_sessions() {
+        return Err("auth admission stopped before request dispatch".into());
+    }
+    Ok(())
 }
 
 /// Accumulates only the fixed-cardinality KCP/gRPC pressure state needed by
@@ -728,11 +914,37 @@ fn validate_live_game_side_service_composite(
     Ok(true)
 }
 
-fn check_live_composite_side_controller(
+fn validate_remote_authenticated_player_chain(
+    environment: EnvironmentKind,
+    game_mode: bool,
+    two_player_default_match: bool,
+    reconnect_burst_mode: bool,
+    live_chat: bool,
+    live_match: bool,
+    live_match_internal: bool,
+    live_http: bool,
+) -> Result<(), String> {
+    if !environment.is_remote() {
+        return Ok(());
+    }
+    if game_mode
+        && two_player_default_match
+        && !reconnect_burst_mode
+        && !(live_chat || live_match || live_match_internal || live_http)
+    {
+        return Ok(());
+    }
+    Err(
+        "remote live execution is restricted to the authenticated two-player default_match player chain; chat, mail, announce, direct match diagnostics, reconnect bursts, and auth-only runs are forbidden"
+            .into(),
+    )
+}
+
+fn check_live_composite_side_controller<P: RuntimeProtection>(
     config: &LoadTestConfig,
     deadline_unix_ms: u64,
     ctrl_c: &AtomicBool,
-    protection: &DryRunProtection<'_>,
+    protection: &P,
     abort: &mut AbortController,
 ) -> Result<(), String> {
     abort.check_ctrl_c(ctrl_c);
@@ -836,7 +1048,7 @@ fn resolve_live_side_services(
 /// authenticated player, so tickets never cross account boundaries and the
 /// synchronous controller retains one global admission ledger.
 #[allow(clippy::too_many_arguments)]
-fn execute_live_game_side_services(
+fn execute_live_game_side_services<P: RuntimeProtection>(
     config: &LoadTestConfig,
     budget: &loadtest_core::config::HardBudget,
     ticket: &str,
@@ -848,7 +1060,7 @@ fn execute_live_game_side_services(
     dispatch_admission: &mut AuthDispatchAdmission,
     abort: &mut AbortController,
     ctrl_c: &AtomicBool,
-    protection: &DryRunProtection<'_>,
+    protection: &P,
 ) -> Result<loadtest_core::metrics::MetricsSnapshot, String> {
     let configured_side = config
         .scenario
@@ -1186,6 +1398,26 @@ fn run_live(cli: &Cli) -> Result<(), String> {
         .as_ref()
         .ok_or("--execute-auth requires scenario.auth operations")?;
     let reconnect_burst_mode = config.scenario.reconnect_burst.is_some();
+    let two_player_default_match = !reconnect_burst_mode
+        && game_mode
+        && config
+            .scenario
+            .live_gameplay
+            .as_ref()
+            .is_some_and(|gameplay| {
+                gameplay.coordination == LiveGameplayCoordination::TwoPlayerDefaultMatch
+            });
+    validate_remote_authenticated_player_chain(
+        config.environment.kind,
+        game_mode,
+        two_player_default_match,
+        reconnect_burst_mode,
+        live_chat,
+        live_match,
+        live_match_internal,
+        live_http,
+    )?;
+    let remote_authenticated_player_chain = config.environment.kind.is_remote();
     if game_mode && !reconnect_burst_mode {
         validate_live_game_load_model(
             &config.scenario.load,
@@ -1205,8 +1437,16 @@ fn run_live(cli: &Cli) -> Result<(), String> {
     if reconnect_burst_mode {
         validate_live_reconnect_burst_gate(cli, &config, &budget)?;
     }
-    let auth_budget_estimate = estimate_auth_run(&config.scenario, &budget)?;
-    validate_staged_auth_windows(&config.scenario, &budget)?;
+    let auth_budget_estimate = estimate_auth_run_with_guard_probes(
+        &config.scenario,
+        &budget,
+        remote_authenticated_player_chain,
+    )?;
+    validate_staged_auth_windows_with_guard_probes(
+        &config.scenario,
+        &budget,
+        remote_authenticated_player_chain,
+    )?;
     validate_auth_run_budget(&auth_budget_estimate, &budget)?;
     if game_mode && !reconnect_burst_mode {
         validate_game_run_budget_for_scenario(&auth_budget_estimate, &config.scenario, &budget)?;
@@ -1246,15 +1486,6 @@ fn run_live(cli: &Cli) -> Result<(), String> {
             },
         )
     };
-    let two_player_default_match = !reconnect_burst_mode
-        && game_mode
-        && config
-            .scenario
-            .live_gameplay
-            .as_ref()
-            .is_some_and(|gameplay| {
-                gameplay.coordination == LiveGameplayCoordination::TwoPlayerDefaultMatch
-            });
     let live_game_side_service_composite = validate_live_game_side_service_composite(
         config.environment.kind,
         game_mode,
@@ -1287,7 +1518,7 @@ fn run_live(cli: &Cli) -> Result<(), String> {
                 .saturating_mul(1_000),
         ),
     );
-    let preflight = summarize_run(
+    let preflight = summarize_run_with_guard_probes(
         "run",
         &config,
         &budget,
@@ -1298,6 +1529,7 @@ fn run_live(cli: &Cli) -> Result<(), String> {
         deadline_unix_ms,
         false,
         true,
+        remote_authenticated_player_chain,
     )?;
     println!(
         "preflight={}",
@@ -1391,7 +1623,11 @@ fn run_live(cli: &Cli) -> Result<(), String> {
         },
     };
     let secret_provider = EnvironmentSecretProvider::new(&private);
-    let protection = DryRunProtection::new(&config);
+    let protection = if remote_authenticated_player_chain {
+        RunPlayerProtection::Remote(LiveAuthProtection::new(&config, Duration::from_secs(5))?)
+    } else {
+        RunPlayerProtection::Local(DryRunProtection::new(&config))
+    };
     let ctrl_c = install_ctrl_c_flag()
         .map_err(|error| format!("failed to install Ctrl+C handler: {error}"))?;
     let mut lifecycle = Lifecycle::default();
@@ -1682,23 +1918,17 @@ fn run_live(cli: &Cli) -> Result<(), String> {
                         &lease.logical_account_id,
                         &password,
                         |_, request| {
-                            dispatch_admission
-                                .admit(request, action_deadline, || {
-                                    abort.check_ctrl_c(&ctrl_c);
-                                    abort.check_stop_file(
-                                        config.stop_file.as_deref().map(Path::new),
-                                    );
-                                    abort.check_deadline(unix_ms(), deadline_unix_ms);
-                                    if abort.should_stop_new_sessions()
-                                        || revalidate_or_abort(&protection, &mut abort).is_some()
-                                    {
-                                        return Err(
-                                            "auth admission stopped before request dispatch".into(),
-                                        );
-                                    }
-                                    Ok(())
-                                })
-                                .map_err(|error| map_auth_admission_to_string(&mut abort, error))
+                            admit_live_auth_request(
+                                &mut dispatch_admission,
+                                request,
+                                action_deadline,
+                                &protection,
+                                &mut abort,
+                                &ctrl_c,
+                                config.stop_file.as_deref().map(Path::new),
+                                deadline_unix_ms,
+                                &mut auth_metrics,
+                            )
                         },
                     );
                     let completed = execution.error.is_none();
@@ -1726,13 +1956,27 @@ fn run_live(cli: &Cli) -> Result<(), String> {
                     for execution in &mut executions {
                         match execution.take_game_credentials() {
                             Some((ticket, character_id)) => {
+                                let auth_services = execution.take_side_services();
+                                if protection
+                                    .observe_auth_services(auth_services.as_ref())
+                                    .is_err()
+                                {
+                                    errors.push(
+                                        "auth_game_descriptor_rejected",
+                                        "auth public game descriptor was rejected before KCP setup",
+                                        Default::default(),
+                                    );
+                                    abort.check_protection(false);
+                                    failed = true;
+                                    break;
+                                }
                                 // The same ticket remains local to its own
                                 // player and is only reused after that
                                 // player's KCP session has reached Closed.
                                 side_credentials.push((
                                     ticket.clone(),
                                     character_id,
-                                    execution.take_side_services(),
+                                    auth_services,
                                 ));
                                 tickets.push(ticket);
                             }
@@ -1975,21 +2219,17 @@ fn run_live(cli: &Cli) -> Result<(), String> {
                             );
                             failed = true;
                         } else if execute_deferred_logout(&mut transport, execution, |request| {
-                            dispatch_admission
-                                .admit(request, action_deadline, || {
-                                    abort.check_ctrl_c(&ctrl_c);
-                                    abort.check_stop_file(
-                                        config.stop_file.as_deref().map(Path::new),
-                                    );
-                                    abort.check_deadline(unix_ms(), deadline_unix_ms);
-                                    if abort.should_stop_new_sessions()
-                                        || revalidate_or_abort(&protection, &mut abort).is_some()
-                                    {
-                                        return Err("deferred logout stopped".into());
-                                    }
-                                    Ok(())
-                                })
-                                .map_err(|error| map_auth_admission_to_string(&mut abort, error))
+                            admit_live_auth_request(
+                                &mut dispatch_admission,
+                                request,
+                                action_deadline,
+                                &protection,
+                                &mut abort,
+                                &ctrl_c,
+                                config.stop_file.as_deref().map(Path::new),
+                                deadline_unix_ms,
+                                &mut auth_metrics,
+                            )
                         })
                         .is_err()
                         {
@@ -3654,6 +3894,8 @@ fn usage() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
+
     use loadtest_core::abort::AbortReason;
     use loadtest_core::auth_http::{AuthHttpStatusCategory, AuthOutcomeCategory};
     use loadtest_core::control_plane::ObservationSnapshot;
@@ -4206,6 +4448,165 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn remote_execution_is_limited_to_the_two_player_player_chain() {
+        assert!(
+            validate_remote_authenticated_player_chain(
+                EnvironmentKind::Production,
+                true,
+                true,
+                false,
+                false,
+                false,
+                false,
+                false,
+            )
+            .is_ok()
+        );
+        for rejected in [
+            (false, true, false, false, false, false, false),
+            (true, false, false, false, false, false, false),
+            (true, true, true, false, false, false, false),
+            (true, true, false, true, false, false, false),
+            (true, true, false, false, false, false, true),
+        ] {
+            assert!(
+                validate_remote_authenticated_player_chain(
+                    EnvironmentKind::Production,
+                    rejected.0,
+                    rejected.1,
+                    rejected.2,
+                    rejected.3,
+                    rejected.4,
+                    rejected.5,
+                    rejected.6,
+                )
+                .is_err()
+            );
+        }
+        assert!(
+            validate_remote_authenticated_player_chain(
+                EnvironmentKind::Local,
+                false,
+                false,
+                true,
+                true,
+                true,
+                true,
+                true,
+            )
+            .is_ok()
+        );
+    }
+
+    struct CountingRemoteProtection {
+        waiting_checks: Cell<u32>,
+        guard_probes: Cell<u32>,
+    }
+
+    impl RuntimeProtection for CountingRemoteProtection {
+        fn verify_dns(&self) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn verify_certificate(&self) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn verify_descriptor(&self) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn verify_environment_identity(&self) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    impl AuthenticatedPlayerProtection for CountingRemoteProtection {
+        fn revalidate_while_waiting(&self) -> Result<(), String> {
+            self.waiting_checks
+                .set(self.waiting_checks.get().saturating_add(1));
+            Ok(())
+        }
+
+        fn revalidate_before_auth_dispatch(&self) -> Result<(), String> {
+            self.guard_probes
+                .set(self.guard_probes.get().saturating_add(1));
+            Ok(())
+        }
+
+        fn uses_guard_probe(&self) -> bool {
+            true
+        }
+    }
+
+    #[test]
+    fn guarded_auth_admission_budgets_one_probe_and_keeps_wait_checks_local() {
+        let budget = loadtest_core::config::HardBudget {
+            max_virtual_players: 1,
+            max_login_qps: 10.0,
+            max_new_connections_per_second: 10.0,
+            max_business_messages_per_second: 10.0,
+            max_messages_per_connection_per_second: 10.0,
+            max_duration_secs: 2,
+            max_total_operations: 8,
+            max_error_rate: 1.0,
+            max_connection_failure_rate: 1.0,
+            max_p99_ms: 1_000,
+            max_data_writes: 3,
+        };
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut admission = AuthDispatchAdmission::new(&budget).unwrap();
+        admission
+            .admit(
+                &AuthHttpRequest::Me {
+                    access_token: "in-memory-only".into(),
+                },
+                deadline,
+                || Ok(()),
+            )
+            .unwrap();
+        let protection = CountingRemoteProtection {
+            waiting_checks: Cell::new(0),
+            guard_probes: Cell::new(0),
+        };
+        let mut abort = AbortController::default();
+        let ctrl_c = AtomicBool::new(false);
+        let mut auth_metrics = AuthRunMetrics::default();
+
+        admit_live_auth_request(
+            &mut admission,
+            &AuthHttpRequest::Login {
+                login_name: "loadtest-account".into(),
+                password: "in-memory-only".into(),
+            },
+            deadline,
+            &protection,
+            &mut abort,
+            &ctrl_c,
+            None,
+            u64::MAX,
+            &mut auth_metrics,
+        )
+        .unwrap();
+
+        assert!(protection.waiting_checks.get() > 1);
+        assert_eq!(protection.guard_probes.get(), 1);
+        assert_eq!(admission.used_operations(), 3);
+        assert_eq!(auth_metrics.guard_probe_attempts, 1);
+        assert_eq!(auth_metrics.guard_probe_successes, 1);
+        assert_eq!(auth_metrics.guard_probe_connection_admissions, 1);
+        let mut core_metrics = Metrics::default();
+        record_auth_metrics(&mut core_metrics, &auth_metrics);
+        let snapshot = core_metrics.snapshot();
+        assert_eq!(snapshot.counters["auth_guard_probe_attempts"], 1);
+        assert_eq!(
+            snapshot.counters["auth_guard_probe_connection_admissions"],
+            1
+        );
+        assert_eq!(snapshot.histograms["auth_guard_probe_ms"].count(), 1);
     }
 
     #[test]
