@@ -18,9 +18,9 @@ mind when interpreting a report:
 | Chat | Deterministic WSS fake and a bounded live WebSocket runner | Live WebSocket is restricted to an explicit local/test diagnostic gate. Server persistence and push latency require a separately confirmed service smoke. |
 | Match | Deterministic gRPC fake, bounded `MatchInternal` diagnostic, and match event/queue metric projection | Direct gRPC and `MatchInternal` are development/isolated diagnostics only. They do not represent the formal player `game-proxy -> game-server -> match-service -> room` capacity path. |
 | Mail and announcements | Deterministic HTTP fake and bounded live list/detail/read/claim or announcement-read requests | Live HTTP is restricted to local/test. Mail notification delivery, outbox/NATS timing, and announcement writes require a separately approved service test; production writes are rejected. |
-| Calibration, soak and reconnect | Offline generator calibration, bounded soak-window assessment/rolling persistence, and a reconnect-burst planner/fake | No live soak, reconnect storm, resource-leak observation, or service recovery conclusion is implied. |
+| Calibration, soak and reconnect | Offline generator calibration, bounded soak-window assessment/rolling persistence, and a guarded live reconnect-burst executor | The executor requires local/test plus explicit game gates. No real reconnect storm, live soak, resource-leak observation, or service recovery/capacity conclusion has been accepted. |
 | Baseline comparison | Offline report identity/threshold comparison for throughput, P95/P99, errors and generator working set | Reports without aligned service-version observations are non-comparable; no repeated stable-environment acceptance run has been completed. |
-| Distributed execution | Versioned plan, assignment, batch, heartbeat, abort and summary contracts; deterministic slicing, ledger, pending and fail-closed state machines | No mTLS controller/worker transport, short-lived worker registration, or multi-process acceptance run is implemented. |
+| Distributed execution | Versioned plan, assignment, batch, heartbeat, abort and summary contracts; deterministic slicing, ledger, pending and fail-closed state machines; private mTLS gRPC controller/worker control plane | The control plane is loopback-tested only. It is not wired into a production CLI/orchestrator, and no cross-machine or real multi-worker acceptance run has been completed. |
 
 `side_services` supports per-step `weight` and `think_time_ms`, a composite
 service weight map, and global/per-player operation caps. These controls shape
@@ -47,6 +47,32 @@ the same boundary, while HDR payloads are merged before any P50/P95/P99 is
 calculated. Percentile values are not accepted on the wire and are never
 averaged across workers. A missing sequence or worker leaves the final report
 incomplete, so remaining observations must not be extrapolated.
+
+### Private controller/worker control plane
+
+`tools/load-test/proto/loadtest_control.proto` is a private protocol rather
+than a player or target-service protocol. It carries only control identity,
+strict message sequencing, and JSON envelopes of the existing `RunPlan`,
+`WorkerAssignment`, `MetricBatch`, `WorkerHeartbeat`, and `AbortSignal`
+contracts. Player HTTP/KCP/WSS/gRPC endpoints, target descriptors, tickets,
+account pools, target credentials, and business metrics transports have no
+representation in this interface.
+
+The controller listener requires a worker client certificate signed by its
+configured CA. A worker credential is bound to exactly one `run_id`,
+`worker_id`, and client-certificate SHA-256 fingerprint, has a maximum
+15-minute lifetime, and contains a one-time registration nonce. Rotating a
+credential revokes that worker's old control sessions. Once registered, a
+worker can only read its own assignment, submit its own metric batches and
+heartbeats, and read the abort signal for its own run. Unsupported protocol
+versions, expired or rotated credentials, cross-worker/run requests, replayed
+or out-of-order control messages, and duplicate metric batches are rejected.
+Any RPC or malformed control response makes the worker client fail closed.
+
+Controller and worker TLS material use separate types and redact PEM/key bytes
+from debug output. The implemented tests generate certificates in memory and
+exercise mTLS on a local loopback listener. This is not a CLI startup path or
+evidence of a real cross-machine, multi-worker, remote, or production run.
 
 ## Protocol Sources
 
