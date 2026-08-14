@@ -17,6 +17,7 @@ use crate::auth_budget::{
 use crate::config::AuthOperation;
 use crate::config::HardBudget;
 use crate::metrics::HistogramSnapshot;
+use crate::side_services::AuthServicesPayload;
 
 const MAX_IDEMPOTENT_RETRIES: u8 = 2;
 
@@ -470,6 +471,7 @@ pub struct AuthSuccess {
     pub access_token: Option<String>,
     pub ticket: Option<String>,
     pub character_id: Option<String>,
+    pub services: Option<AuthServicesPayload>,
 }
 
 #[derive(Clone)]
@@ -759,10 +761,18 @@ fn parse_json_body(value: Value) -> AuthResponseBody {
                 .and_then(Value::as_str)
         })
         .map(str::to_string);
+    let services = match value.get("services") {
+        Some(services) => match serde_json::from_value(services.clone()) {
+            Ok(services) => Some(services),
+            Err(_) => return AuthResponseBody::InvalidJson,
+        },
+        None => None,
+    };
     AuthResponseBody::Success(AuthSuccess {
         access_token,
         ticket,
         character_id,
+        services,
     })
 }
 
@@ -980,6 +990,7 @@ pub struct AuthExecution {
     ticket: Option<String>,
     character_id: Option<String>,
     access_token: Option<String>,
+    side_services: Option<AuthServicesPayload>,
 }
 
 impl AuthExecution {
@@ -990,6 +1001,7 @@ impl AuthExecution {
             ticket: None,
             character_id: None,
             access_token: None,
+            side_services: None,
         }
     }
 
@@ -1000,6 +1012,7 @@ impl AuthExecution {
             ticket: None,
             character_id: None,
             access_token: None,
+            side_services: None,
         }
     }
 
@@ -1007,6 +1020,12 @@ impl AuthExecution {
     /// making them serializable or including them in reports.
     pub fn take_game_credentials(&mut self) -> Option<(String, String)> {
         self.ticket.take().zip(self.character_id.take())
+    }
+
+    /// Transfers the latest auth-discovered public service descriptors. These
+    /// endpoint values stay in memory and are never included in reports.
+    pub fn take_side_services(&mut self) -> Option<AuthServicesPayload> {
+        self.side_services.take()
     }
 
     fn take_logout_request(&mut self) -> Option<AuthHttpRequest> {
@@ -1096,6 +1115,7 @@ where
     let mut access_token: Option<String> = None;
     let mut character_id: Option<String> = None;
     let mut game_credentials: Option<(String, String)> = None;
+    let mut side_services: Option<AuthServicesPayload> = None;
     let mut state = VirtualPlayerState::AwaitingLogin;
 
     for operation in operations {
@@ -1221,6 +1241,9 @@ where
                 ),
             );
         };
+        if success.services.is_some() {
+            side_services = success.services.clone();
+        }
         match operation {
             AuthOperation::Login | AuthOperation::DuplicateLogin => {
                 access_token = success.access_token;
@@ -1282,6 +1305,7 @@ where
         execution.character_id = Some(character_id);
     }
     execution.access_token = access_token;
+    execution.side_services = side_services;
     execution
 }
 
@@ -1357,6 +1381,7 @@ impl AuthHttpTransport for FakeAuthHttpService {
                             | AuthHttpRequest::CreateCharacter { .. }
                     )
                     .then(|| "fake-character".into()),
+                    services: None,
                 }),
             },
             FakeAuthOutcome::RateLimited => AuthHttpResponse {
@@ -1422,6 +1447,7 @@ mod tests {
                     access_token: None,
                     ticket: None,
                     character_id: None,
+                    services: None,
                 }),
             }
         }
@@ -1490,6 +1516,35 @@ mod tests {
         };
         assert_eq!(create.character_id.as_deref(), Some("chr_0000000000001"));
         assert_eq!(list.character_id.as_deref(), Some("chr_0000000000002"));
+    }
+
+    #[test]
+    fn auth_success_retains_service_descriptors_without_serializing_credentials() {
+        let response = parse_json_body(serde_json::json!({
+            "ok": true,
+            "accessToken": "test-access-token",
+            "services": {
+                "game": { "host": "game.example", "port": 4000, "protocol": "kcp" },
+                "chat": { "host": "chat.example", "port": 443, "protocol": "wss" },
+                "mail": null,
+                "announce": null
+            }
+        }));
+        let AuthResponseBody::Success(success) = response else {
+            panic!("auth response with descriptors must parse as success");
+        };
+        assert_eq!(
+            success
+                .services
+                .as_ref()
+                .unwrap()
+                .chat
+                .as_ref()
+                .unwrap()
+                .host,
+            "chat.example"
+        );
+        assert_eq!(success.access_token.as_deref(), Some("test-access-token"));
     }
 
     #[test]

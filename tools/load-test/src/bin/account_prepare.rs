@@ -747,6 +747,7 @@ mod tests {
                     access_token,
                     ticket: None,
                     character_id,
+                    services: None,
                 }),
             };
             match request {

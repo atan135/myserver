@@ -11,6 +11,7 @@ use crate::auth_http::AuthRunMetrics;
 use crate::calibration::CalibrationReport;
 use crate::config::{HardBudget, LoadTestConfig};
 use crate::metrics::MetricsSnapshot;
+use crate::registry_observation::RegistryObservationReport;
 use crate::resource::GeneratorResources;
 
 pub const MAX_ERROR_SAMPLES: usize = 100;
@@ -116,6 +117,10 @@ pub struct ReportInput<'a> {
     /// controller. They are optional in a report, but baseline comparison
     /// deliberately rejects absent observations.
     pub service_versions: Option<&'a BTreeMap<String, String>>,
+    /// Safe projection of explicit read-only registry observation evidence.
+    /// The type intentionally excludes registry connection and endpoint address
+    /// details, so it is suitable for a report artifact.
+    pub registry_observation: Option<&'a RegistryObservationReport>,
 }
 
 #[derive(Debug, Serialize)]
@@ -140,6 +145,7 @@ struct RunJson<'a> {
     generator_resources: GeneratorResources,
     calibration: Option<&'a CalibrationReport>,
     service_versions: Option<&'a BTreeMap<String, String>>,
+    registry_observation_available: bool,
 }
 
 pub fn write_report(root: &Path, input: ReportInput<'_>) -> std::io::Result<PathBuf> {
@@ -174,11 +180,18 @@ pub fn write_report(root: &Path, input: ReportInput<'_>) -> std::io::Result<Path
         generator_resources: input.resources,
         calibration: input.calibration,
         service_versions: input.service_versions,
+        registry_observation_available: input.registry_observation.is_some(),
     };
     write_json(report_dir.join("run.json"), &run)?;
     write_json(report_dir.join("metrics.json"), &input.metrics)?;
     if let Some(auth_metrics) = input.auth_metrics {
         write_json(report_dir.join("auth-metrics.json"), auth_metrics)?;
+    }
+    if let Some(registry_observation) = input.registry_observation {
+        write_json(
+            report_dir.join("registry-observation.json"),
+            registry_observation,
+        )?;
     }
     write_timeseries(report_dir.join("timeseries.csv"), &input.metrics)?;
     write_error_samples(report_dir.join("errors.jsonl"), input.errors.samples())?;
@@ -485,6 +498,8 @@ mod tests {
     use super::*;
     use crate::auth_http::{FakeAuthHttpService, FakeAuthOutcome, execute_auth_operations};
     use crate::config::*;
+    use crate::control_plane::ObservationSnapshot;
+    use crate::registry_observation::RegistryObservationReport;
     use crate::resource::ResourceSampler;
 
     fn config() -> LoadTestConfig {
@@ -525,6 +540,7 @@ mod tests {
                 auth_metrics: None,
                 calibration: None,
                 service_versions: None,
+                registry_observation: None,
             },
         )
         .unwrap();
@@ -580,6 +596,7 @@ mod tests {
                 auth_metrics: None,
                 calibration: None,
                 service_versions: None,
+                registry_observation: None,
             },
         )
         .unwrap();
@@ -737,6 +754,7 @@ mod tests {
                 auth_metrics: Some(&auth_metrics),
                 calibration: None,
                 service_versions: Some(&BTreeMap::from([("game".into(), "v1".into())])),
+                registry_observation: None,
             },
         )
         .unwrap();
@@ -748,6 +766,60 @@ mod tests {
         assert!(serialized.contains("\"ticket_successes\": 1"));
         let summary = fs::read_to_string(report.join("summary.md")).unwrap();
         assert!(summary.contains("Auth connection-failure rate: 0.167"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn registry_observation_writes_a_safe_separate_artifact() {
+        let root = std::env::temp_dir().join(format!(
+            "loadtest-registry-observation-report-{}",
+            std::process::id()
+        ));
+        let value = config();
+        let observation = RegistryObservationReport {
+            snapshot: ObservationSnapshot {
+                run_id: "registry-run".into(),
+                window_start_unix_ms: 1,
+                window_end_unix_ms: 2,
+                source: "registry_readonly_v1".into(),
+                freshness_ms: 3,
+                complete: false,
+            },
+            registry_instance_count: 0,
+            instance_metric_count: 0,
+            instances: Vec::new(),
+            stale_cleanups: Vec::new(),
+            routes: Vec::new(),
+            holes: Default::default(),
+        };
+        let report = write_report(
+            &root,
+            ReportInput {
+                run_id: "registry-run",
+                config: &value,
+                effective_budget: &value.budget,
+                status: "completed",
+                abort_reason: None,
+                shutdown_phase: None,
+                deadline_unix_ms: 3,
+                graceful_shutdown_ms: 1,
+                started_unix_ms: 1,
+                ended_unix_ms: 2,
+                metrics: MetricsSnapshot::default(),
+                resources: ResourceSampler.sample(0, 0, 0),
+                errors: &ErrorBuffer::default(),
+                auth_metrics: None,
+                calibration: None,
+                service_versions: None,
+                registry_observation: Some(&observation),
+            },
+        )
+        .unwrap();
+        let serialized = fs::read_to_string(report.join("registry-observation.json")).unwrap();
+        assert!(serialized.contains("registry_readonly_v1"));
+        assert!(!serialized.contains("redis://"));
+        let run = fs::read_to_string(report.join("run.json")).unwrap();
+        assert!(run.contains("\"registry_observation_available\": true"));
         fs::remove_dir_all(root).unwrap();
     }
 }

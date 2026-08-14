@@ -216,6 +216,7 @@ mod tests {
                 reconnect_burst: None,
                 live_gameplay: None,
                 side_services: None,
+                registry_observation: None,
             },
             reports_root: "reports".into(),
             prepare_reports_root: "prepare".into(),

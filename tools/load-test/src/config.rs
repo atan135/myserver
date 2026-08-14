@@ -191,6 +191,49 @@ pub struct Scenario {
     pub live_gameplay: Option<LiveGameplayScenario>,
     #[serde(default)]
     pub side_services: Option<crate::side_services::SideServicesScenario>,
+    #[serde(default)]
+    pub registry_observation: Option<RegistryObservationConfig>,
+}
+
+/// Explicit opt-in for the read-only registry/metrics observer. Connection
+/// details are deliberately runtime-only and never part of this config.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RegistryObservationConfig {
+    pub read_only: bool,
+    pub max_heartbeat_age_ms: u64,
+    pub max_discovery_latency_ms: u64,
+    pub max_stale_cleanup_latency_ms: u64,
+    pub max_metric_age_ms: u64,
+}
+
+impl RegistryObservationConfig {
+    pub fn validate(&self, environment: EnvironmentKind) -> Result<(), String> {
+        if !self.read_only {
+            return Err("registry observation must explicitly declare read_only=true".into());
+        }
+        if !matches!(environment, EnvironmentKind::Local | EnvironmentKind::Test) {
+            return Err(
+                "registry observation is restricted to explicit local/test diagnostics".into(),
+            );
+        }
+        for (name, value) in [
+            ("max_heartbeat_age_ms", self.max_heartbeat_age_ms),
+            ("max_discovery_latency_ms", self.max_discovery_latency_ms),
+            (
+                "max_stale_cleanup_latency_ms",
+                self.max_stale_cleanup_latency_ms,
+            ),
+            ("max_metric_age_ms", self.max_metric_age_ms),
+        ] {
+            if value == 0 || value > 300_000 {
+                return Err(format!(
+                    "registry observation {name} must be within 1..=300000"
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 pub const MAX_LIVE_GAMEPLAY_FRAME_INPUTS: u32 = 8;
@@ -914,6 +957,11 @@ impl LoadTestConfig {
                 ));
             }
         }
+        if let Some(registry_observation) = &self.scenario.registry_observation {
+            registry_observation
+                .validate(self.environment.kind)
+                .map_err(ConfigError::Rejected)?;
+        }
         Ok(())
     }
 
@@ -1121,6 +1169,7 @@ mod tests {
                 reconnect_burst: None,
                 live_gameplay: None,
                 side_services: None,
+                registry_observation: None,
             },
             reports_root: "reports".into(),
             prepare_reports_root: "prepare-reports".into(),
@@ -1496,6 +1545,24 @@ mod tests {
         value.scenario.steps[0].idempotency = Idempotency::Write;
         value.scenario.steps[0].retry = RetryPolicy::Bounded { attempts: 2 };
         assert!(value.validate_structural().is_err());
+    }
+
+    #[test]
+    fn registry_observation_is_explicit_read_only_and_local_test_only() {
+        let observer = RegistryObservationConfig {
+            read_only: true,
+            max_heartbeat_age_ms: 5_000,
+            max_discovery_latency_ms: 500,
+            max_stale_cleanup_latency_ms: 5_000,
+            max_metric_age_ms: 5_000,
+        };
+        assert!(observer.validate(EnvironmentKind::Local).is_ok());
+        assert!(observer.validate(EnvironmentKind::Test).is_ok());
+        assert!(observer.validate(EnvironmentKind::Production).is_err());
+
+        let mut writable = observer;
+        writable.read_only = false;
+        assert!(writable.validate(EnvironmentKind::Local).is_err());
     }
 
     #[test]

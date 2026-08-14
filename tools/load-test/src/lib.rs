@@ -28,6 +28,7 @@ pub mod metrics;
 pub mod preflight;
 pub mod protection;
 pub mod reconnect_burst;
+pub mod registry_observation;
 pub mod report;
 pub mod resource;
 pub mod scheduler;

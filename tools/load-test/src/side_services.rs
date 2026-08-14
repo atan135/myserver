@@ -107,6 +107,18 @@ pub fn parse_auth_service_descriptors(
         .ok_or(DescriptorValidationError::ServicesMissing)?;
     let services: AuthServicesPayload = serde_json::from_value(services.clone())
         .map_err(|_| DescriptorValidationError::PayloadInvalid)?;
+    validate_auth_service_descriptors(&services, required, allowlists, tracker)
+}
+
+/// Validates descriptors supplied by a successful auth response. This is kept
+/// separate from JSON parsing so the live runner can retain the parsed payload
+/// in memory without reparsing or logging a full auth response.
+pub fn validate_auth_service_descriptors(
+    services: &AuthServicesPayload,
+    required: &BTreeSet<SideServiceKind>,
+    allowlists: &BTreeMap<SideServiceKind, DescriptorAllowlist>,
+    tracker: &mut DescriptorChangeTracker,
+) -> Result<AuthDescriptorSet, DescriptorValidationError> {
     for (kind, descriptor) in [
         (SideServiceKind::Chat, services.chat.as_ref()),
         (SideServiceKind::Mail, services.mail.as_ref()),
@@ -129,9 +141,100 @@ pub fn parse_auth_service_descriptors(
         }
     }
     Ok(AuthDescriptorSet {
-        services,
+        services: services.clone(),
         observations: tracker.observations().to_vec(),
     })
+}
+
+/// Resolves public chat/mail/announce endpoints from the authenticated auth
+/// response. An explicit scenario descriptor remains a local/test diagnostic
+/// fallback when discovery returns no endpoint; the runner never invents a
+/// host or fixed port. Match remains an explicit local/test gRPC diagnostic
+/// because auth-http does not expose a public Match descriptor.
+pub fn resolve_auth_service_descriptors(
+    scenario: &SideServicesScenario,
+    services: Option<&AuthServicesPayload>,
+    required: &BTreeSet<SideServiceKind>,
+    tracker: &mut DescriptorChangeTracker,
+) -> Result<SideServicesScenario, DescriptorValidationError> {
+    let Some(services) = services else {
+        return Ok(scenario.clone());
+    };
+    let mut resolved = scenario.clone();
+    let allowlists = BTreeMap::from([
+        (
+            SideServiceKind::Chat,
+            resolved
+                .chat
+                .as_ref()
+                .map(|config| config.allowlist.clone())
+                .unwrap_or_default(),
+        ),
+        (
+            SideServiceKind::Mail,
+            resolved
+                .mail
+                .as_ref()
+                .map(|config| config.allowlist.clone())
+                .unwrap_or_default(),
+        ),
+        (
+            SideServiceKind::Announce,
+            resolved
+                .announce
+                .as_ref()
+                .map(|config| config.allowlist.clone())
+                .unwrap_or_default(),
+        ),
+    ]);
+    let discovered = [
+        (SideServiceKind::Chat, services.chat.as_ref()),
+        (SideServiceKind::Mail, services.mail.as_ref()),
+        (SideServiceKind::Announce, services.announce.as_ref()),
+    ]
+    .into_iter()
+    .filter_map(|(kind, descriptor)| {
+        required
+            .contains(&kind)
+            .then_some(descriptor?)
+            .map(|_| kind)
+    })
+    .collect();
+    validate_auth_service_descriptors(services, &discovered, &allowlists, tracker)?;
+    if let Some(descriptor) = services
+        .chat
+        .as_ref()
+        .filter(|_| required.contains(&SideServiceKind::Chat))
+    {
+        resolved
+            .chat
+            .as_mut()
+            .expect("required chat has config")
+            .descriptor = Some(descriptor.clone());
+    }
+    if let Some(descriptor) = services
+        .mail
+        .as_ref()
+        .filter(|_| required.contains(&SideServiceKind::Mail))
+    {
+        resolved
+            .mail
+            .as_mut()
+            .expect("required mail has config")
+            .descriptor = Some(descriptor.clone());
+    }
+    if let Some(descriptor) = services
+        .announce
+        .as_ref()
+        .filter(|_| required.contains(&SideServiceKind::Announce))
+    {
+        resolved
+            .announce
+            .as_mut()
+            .expect("required announce has config")
+            .descriptor = Some(descriptor.clone());
+    }
+    Ok(resolved)
 }
 
 impl ServiceDescriptor {
@@ -1015,6 +1118,56 @@ mod tests {
                 _
             ))
         ));
+    }
+
+    #[test]
+    fn auth_descriptor_resolution_prefers_discovery_and_keeps_explicit_fallback() {
+        let static_chat = ServiceDescriptor {
+            host: "127.0.0.1".into(),
+            port: 9001,
+            protocol: SideTransportKind::Wss,
+        };
+        let scenario = SideServicesScenario {
+            chat: Some(SideServiceConfig {
+                descriptor: Some(static_chat.clone()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let required = [SideServiceKind::Chat].into();
+        let discovered = AuthServicesPayload {
+            game: None,
+            chat: Some(ServiceDescriptor {
+                host: "chat.example".into(),
+                port: 443,
+                protocol: SideTransportKind::Wss,
+            }),
+            mail: None,
+            announce: None,
+        };
+        let mut tracker = DescriptorChangeTracker::default();
+        let resolved =
+            resolve_auth_service_descriptors(&scenario, Some(&discovered), &required, &mut tracker)
+                .unwrap();
+        assert_eq!(
+            resolved.chat.unwrap().descriptor.unwrap().host,
+            "chat.example"
+        );
+        assert_eq!(tracker.observations().len(), 1);
+
+        let fallback = resolve_auth_service_descriptors(
+            &scenario,
+            Some(&AuthServicesPayload {
+                game: None,
+                chat: None,
+                mail: None,
+                announce: None,
+            }),
+            &required,
+            &mut tracker,
+        )
+        .unwrap();
+        assert_eq!(fallback.chat.unwrap().descriptor.unwrap(), static_chat);
     }
 
     #[test]

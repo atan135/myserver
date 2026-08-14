@@ -1,4 +1,5 @@
 use std::cell::RefCell;
+use std::collections::BTreeSet;
 use std::env;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -32,7 +33,7 @@ use loadtest_core::calibration::{
 use loadtest_core::chat_wss::execute_live_chat_steps;
 use loadtest_core::config::{
     AuthOperation, BudgetOverride, EnvironmentKind, LiveGameplayCoordination, LoadModel,
-    LoadTestConfig, RunAccess, load_config, load_private_config,
+    LoadTestConfig, RegistryObservationConfig, RunAccess, load_config, load_private_config,
 };
 use loadtest_core::contracts::{RunPlan, single_process_assignment};
 use loadtest_core::game_kcp::{GameProxyEndpoint, KcpBackpressureMetrics, ReconnectPolicy};
@@ -53,12 +54,18 @@ use loadtest_core::reconnect_burst::{
     ReconnectBurstExecutor, ReconnectBurstSpec, ReconnectBurstStep, execute_reconnect_burst,
     plan_reconnect_burst,
 };
+use loadtest_core::registry_observation::{
+    RegistryObservationError, RegistryObservationReport, RegistryObservationRequest,
+    collect_runtime_registry_observation, registry_recheck_interval_ms,
+};
 use loadtest_core::report::{ErrorBuffer, ReportInput, write_report};
 use loadtest_core::resource::ResourceSampler;
 use loadtest_core::scheduler::MonotonicScheduler;
 use loadtest_core::side_http::{SideHttpAdmission, execute_live_mail_announce_steps};
-use loadtest_core::side_services::SideServiceKind;
-use loadtest_core::side_services::execute_side_services_dry;
+use loadtest_core::side_services::{
+    AuthServicesPayload, DescriptorChangeTracker, SideServiceKind, SideServicesScenario,
+    execute_side_services_dry, resolve_auth_service_descriptors,
+};
 use loadtest_core::virtual_player::{VirtualPlayerEvent, VirtualPlayerSession};
 use prost::Message;
 
@@ -329,6 +336,7 @@ fn run_dry(cli: &Cli) -> Result<(), String> {
             auth_metrics: auth_metrics.as_ref(),
             calibration: None,
             service_versions: None,
+            registry_observation: None,
         },
     )
     .map_err(|error| error.to_string())?;
@@ -449,6 +457,7 @@ fn calibrate_dry(cli: &Cli) -> Result<(), String> {
             auth_metrics: None,
             calibration: Some(&calibration),
             service_versions: None,
+            registry_observation: None,
         },
     )
     .map_err(|error| error.to_string())?;
@@ -764,10 +773,7 @@ fn composite_chat_admission_writes(
     Ok(writes)
 }
 
-fn live_composite_http_enabled(
-    side: &loadtest_core::side_services::SideServicesScenario,
-    service: SideServiceKind,
-) -> bool {
+fn live_composite_http_enabled(side: &SideServicesScenario, service: SideServiceKind) -> bool {
     match service {
         SideServiceKind::Mail => side.mail.as_ref().is_some_and(|config| config.live_http),
         SideServiceKind::Announce => side
@@ -776,6 +782,53 @@ fn live_composite_http_enabled(
             .is_some_and(|config| config.live_http),
         _ => false,
     }
+}
+
+fn required_auth_side_services(side: &SideServicesScenario) -> BTreeSet<SideServiceKind> {
+    [
+        (
+            SideServiceKind::Chat,
+            side.chat
+                .as_ref()
+                .is_some_and(|config| config.live_websocket),
+        ),
+        (
+            SideServiceKind::Mail,
+            side.mail.as_ref().is_some_and(|config| config.live_http),
+        ),
+        (
+            SideServiceKind::Announce,
+            side.announce
+                .as_ref()
+                .is_some_and(|config| config.live_http),
+        ),
+    ]
+    .into_iter()
+    .filter_map(|(service, enabled)| enabled.then_some(service))
+    .collect()
+}
+
+fn resolve_live_side_services(
+    side: &SideServicesScenario,
+    auth_services: Option<&AuthServicesPayload>,
+    tracker: &mut DescriptorChangeTracker,
+    metrics: &mut Metrics,
+) -> Result<SideServicesScenario, String> {
+    let observation_count = tracker.observations().len();
+    let resolved = resolve_auth_service_descriptors(
+        side,
+        auth_services,
+        &required_auth_side_services(side),
+        tracker,
+    )
+    .map_err(|error| format!("auth-discovered side-service descriptor rejected: {error}"))?;
+    for observation in &tracker.observations()[observation_count..] {
+        metrics.increment("side_auth_descriptor_resolutions", 1);
+        if observation.changed {
+            metrics.increment("side_auth_descriptor_changes", 1);
+        }
+    }
+    Ok(resolved)
 }
 
 /// Execute public side-service diagnostics after both KCP players have closed
@@ -788,6 +841,8 @@ fn execute_live_game_side_services(
     budget: &loadtest_core::config::HardBudget,
     ticket: &str,
     character_id: &str,
+    auth_services: Option<&AuthServicesPayload>,
+    descriptor_tracker: &mut DescriptorChangeTracker,
     action_deadline: Instant,
     deadline_unix_ms: u64,
     dispatch_admission: &mut AuthDispatchAdmission,
@@ -795,15 +850,21 @@ fn execute_live_game_side_services(
     ctrl_c: &AtomicBool,
     protection: &DryRunProtection<'_>,
 ) -> Result<loadtest_core::metrics::MetricsSnapshot, String> {
-    let side = config
+    let configured_side = config
         .scenario
         .side_services
         .as_ref()
         .ok_or("live game-side composite requires side_services")?;
+    let mut metrics = Metrics::default();
+    let side = resolve_live_side_services(
+        configured_side,
+        auth_services,
+        descriptor_tracker,
+        &mut metrics,
+    )?;
     let plan = side
         .executable_plan(budget)
         .map_err(|error| format!("live composite side-service plan rejected: {error}"))?;
-    let mut metrics = Metrics::default();
 
     if let Some(chat) = side.chat.as_ref().filter(|chat| chat.live_websocket) {
         let descriptor = chat
@@ -877,13 +938,13 @@ fn execute_live_game_side_services(
             matches!(
                 step.service,
                 SideServiceKind::Mail | SideServiceKind::Announce
-            ) && live_composite_http_enabled(side, step.service)
+            ) && live_composite_http_enabled(&side, step.service)
         })
         .cloned()
         .collect::<Vec<_>>();
     if !http_steps.is_empty() {
         let http_metrics = execute_live_mail_announce_steps(
-            side,
+            &side,
             config.environment.kind,
             &config.account_prepare.batch,
             ticket,
@@ -931,6 +992,151 @@ fn execute_live_game_side_services(
     }
 
     Ok(metrics.snapshot())
+}
+
+fn collect_registry_observation_for_run(
+    run_id: &str,
+    started_unix_ms: u64,
+    config: RegistryObservationConfig,
+) -> Result<RegistryObservationReport, RegistryObservationError> {
+    collect_runtime_registry_observation(&RegistryObservationRequest {
+        run_id: run_id.to_string(),
+        window_start_unix_ms: started_unix_ms,
+        window_end_unix_ms: unix_ms().max(started_unix_ms.saturating_add(1)),
+        config,
+    })
+}
+
+enum RegistryPreflightDecision {
+    Ready(RegistryObservationReport),
+    Incomplete(RegistryObservationReport),
+    Unavailable,
+}
+
+fn classify_registry_preflight(
+    result: Result<RegistryObservationReport, RegistryObservationError>,
+) -> RegistryPreflightDecision {
+    match result {
+        Ok(report) if report.snapshot.complete => RegistryPreflightDecision::Ready(report),
+        Ok(report) => RegistryPreflightDecision::Incomplete(report),
+        Err(_) => RegistryPreflightDecision::Unavailable,
+    }
+}
+
+fn write_registry_preflight_failure(
+    config: &LoadTestConfig,
+    budget: &loadtest_core::config::HardBudget,
+    run_id: &str,
+    started_unix_ms: u64,
+    deadline_unix_ms: u64,
+    observation: Option<&RegistryObservationReport>,
+    error_code: &str,
+    message: &str,
+) -> Result<(), String> {
+    let mut metrics = Metrics::default();
+    if let Some(observation) = observation {
+        observation.merge_into_metrics(&mut metrics);
+    }
+    let mut errors = ErrorBuffer::default();
+    errors.push(error_code, message, Default::default());
+    let report = write_report(
+        Path::new(&config.reports_root),
+        ReportInput {
+            run_id,
+            config,
+            effective_budget: budget,
+            status: "failed",
+            abort_reason: Some("MetricsStale"),
+            shutdown_phase: None,
+            deadline_unix_ms,
+            graceful_shutdown_ms: config.graceful_shutdown_ms,
+            started_unix_ms,
+            ended_unix_ms: unix_ms(),
+            metrics: metrics.snapshot(),
+            resources: ResourceSampler.sample(0, 0, 0),
+            errors: &errors,
+            auth_metrics: None,
+            calibration: None,
+            service_versions: None,
+            registry_observation: observation,
+        },
+    )
+    .map_err(|error| error.to_string())?;
+    Err(format!(
+        "read-only registry observation blocked transport setup; report={}",
+        report.display()
+    ))
+}
+
+fn record_registry_observation_result(
+    result: Result<RegistryObservationReport, RegistryObservationError>,
+    latest_observation: &mut Option<RegistryObservationReport>,
+    metrics: &mut Metrics,
+    errors: &mut ErrorBuffer,
+    abort: &mut AbortController,
+    failed: &mut bool,
+) {
+    match result {
+        Ok(report) => {
+            let complete = report.snapshot.complete;
+            report.merge_into_metrics(metrics);
+            *latest_observation = Some(report);
+            if !complete {
+                errors.push(
+                    "registry_observation_incomplete",
+                    "read-only registry observation has explicit coverage holes",
+                    Default::default(),
+                );
+                *failed = true;
+                abort.request(AbortReason::MetricsStale);
+            }
+        }
+        Err(_) => {
+            errors.push(
+                "registry_observation_unavailable",
+                "read-only registry observation could not be collected",
+                Default::default(),
+            );
+            *failed = true;
+            abort.request(AbortReason::MetricsStale);
+        }
+    }
+}
+
+fn refresh_registry_observation_if_due(
+    now_unix_ms: u64,
+    next_recheck_unix_ms: &mut u64,
+    run_id: &str,
+    started_unix_ms: u64,
+    config: &RegistryObservationConfig,
+    latest_observation: &mut Option<RegistryObservationReport>,
+    metrics: &mut Metrics,
+    errors: &mut ErrorBuffer,
+    abort: &mut AbortController,
+    failed: &mut bool,
+) {
+    if now_unix_ms < *next_recheck_unix_ms {
+        return;
+    }
+    *next_recheck_unix_ms = now_unix_ms.saturating_add(registry_recheck_interval_ms(config));
+    record_registry_observation_result(
+        collect_registry_observation_for_run(run_id, started_unix_ms, config.clone()),
+        latest_observation,
+        metrics,
+        errors,
+        abort,
+        failed,
+    );
+}
+
+fn live_run_terminal_status(abort: &AbortController, failed: bool) -> &'static str {
+    if abort.should_stop_new_sessions() {
+        "aborted"
+    } else if failed {
+        "failed"
+    } else {
+        "completed"
+    }
 }
 
 fn run_live(cli: &Cli) -> Result<(), String> {
@@ -1071,6 +1277,7 @@ fn run_live(cli: &Cli) -> Result<(), String> {
     }
 
     let started = unix_ms();
+    let run_id = format!("auth-{}-{started}", std::process::id());
     let profile_deadline_unix_ms =
         effective_deadline(&config, &budget, cli.deadline_unix_ms, started)?;
     let deadline_unix_ms = profile_deadline_unix_ms.min(
@@ -1096,6 +1303,44 @@ fn run_live(cli: &Cli) -> Result<(), String> {
         "preflight={}",
         serde_json::to_string(&preflight).expect("preflight summary serializes")
     );
+
+    let registry_observation_config = config.scenario.registry_observation.clone();
+    let mut registry_observation = match registry_observation_config.as_ref() {
+        Some(registry_config) => match classify_registry_preflight(
+            collect_registry_observation_for_run(&run_id, started, registry_config.clone()),
+        ) {
+            RegistryPreflightDecision::Ready(report) => Some(report),
+            RegistryPreflightDecision::Incomplete(report) => {
+                return write_registry_preflight_failure(
+                    &config,
+                    &budget,
+                    &run_id,
+                    started,
+                    deadline_unix_ms,
+                    Some(&report),
+                    "registry_observation_incomplete",
+                    "read-only registry observation has explicit coverage holes",
+                );
+            }
+            RegistryPreflightDecision::Unavailable => {
+                return write_registry_preflight_failure(
+                    &config,
+                    &budget,
+                    &run_id,
+                    started,
+                    deadline_unix_ms,
+                    None,
+                    "registry_observation_unavailable",
+                    "read-only registry observation could not be collected",
+                );
+            }
+        },
+        None => None,
+    };
+    let mut registry_next_recheck_unix_ms =
+        registry_observation_config.as_ref().map(|registry_config| {
+            unix_ms().saturating_add(registry_recheck_interval_ms(registry_config))
+        });
 
     let account_ids = manifest
         .ready_accounts()
@@ -1162,6 +1407,10 @@ fn run_live(cli: &Cli) -> Result<(), String> {
     );
     let mut core_metrics = Metrics::default();
     core_metrics.increment("virtual_players", requested_players as u64);
+    if let Some(observation) = registry_observation.as_ref() {
+        observation.merge_into_metrics(&mut core_metrics);
+    }
+    let mut descriptor_tracker = DescriptorChangeTracker::default();
     let mut auth_metrics = AuthRunMetrics::default();
     let mut dispatch_admission = AuthDispatchAdmission::new(&budget)?;
     let mut errors = ErrorBuffer::default();
@@ -1221,6 +1470,23 @@ fn run_live(cli: &Cli) -> Result<(), String> {
                 controller.check_ctrl_c(&ctrl_c);
                 controller.check_stop_file(config.stop_file.as_deref().map(Path::new));
                 controller.check_deadline(unix_ms(), deadline_unix_ms);
+                if let (Some(registry_config), Some(next_recheck_unix_ms)) = (
+                    registry_observation_config.as_ref(),
+                    registry_next_recheck_unix_ms.as_mut(),
+                ) {
+                    refresh_registry_observation_if_due(
+                        unix_ms(),
+                        next_recheck_unix_ms,
+                        &run_id,
+                        started,
+                        registry_config,
+                        &mut registry_observation,
+                        &mut core_metrics,
+                        &mut errors,
+                        controller,
+                        &mut failed,
+                    );
+                }
                 let protection_healthy = revalidate_or_abort(&protection, controller).is_none();
                 observe_controller_health(
                     &mut health_evaluator,
@@ -1296,6 +1562,26 @@ fn run_live(cli: &Cli) -> Result<(), String> {
         if abort.should_stop_new_sessions() {
             break;
         }
+        if let (Some(registry_config), Some(next_recheck_unix_ms)) = (
+            registry_observation_config.as_ref(),
+            registry_next_recheck_unix_ms.as_mut(),
+        ) {
+            refresh_registry_observation_if_due(
+                unix_ms(),
+                next_recheck_unix_ms,
+                &run_id,
+                started,
+                registry_config,
+                &mut registry_observation,
+                &mut core_metrics,
+                &mut errors,
+                &mut abort,
+                &mut failed,
+            );
+        }
+        if abort.should_stop_new_sessions() {
+            break;
+        }
         let elapsed_ms = monotonic_started.elapsed().as_millis() as u64;
         let tick = scheduler.due(elapsed_ms);
         core_metrics.increment(
@@ -1322,6 +1608,26 @@ fn run_live(cli: &Cli) -> Result<(), String> {
         }
 
         for (index, action) in tick.actions.iter().enumerate() {
+            if abort.should_stop_new_sessions() {
+                break;
+            }
+            if let (Some(registry_config), Some(next_recheck_unix_ms)) = (
+                registry_observation_config.as_ref(),
+                registry_next_recheck_unix_ms.as_mut(),
+            ) {
+                refresh_registry_observation_if_due(
+                    unix_ms(),
+                    next_recheck_unix_ms,
+                    &run_id,
+                    started,
+                    registry_config,
+                    &mut registry_observation,
+                    &mut core_metrics,
+                    &mut errors,
+                    &mut abort,
+                    &mut failed,
+                );
+            }
             if abort.should_stop_new_sessions() {
                 break;
             }
@@ -1423,7 +1729,11 @@ fn run_live(cli: &Cli) -> Result<(), String> {
                                 // The same ticket remains local to its own
                                 // player and is only reused after that
                                 // player's KCP session has reached Closed.
-                                side_credentials.push((ticket.clone(), character_id));
+                                side_credentials.push((
+                                    ticket.clone(),
+                                    character_id,
+                                    execution.take_side_services(),
+                                ));
                                 tickets.push(ticket);
                             }
                             None => {
@@ -1620,12 +1930,14 @@ fn run_live(cli: &Cli) -> Result<(), String> {
                         // side-service request. Process each authenticated
                         // player in account order so chat/mail/announce never
                         // create a second concurrent load stream.
-                        for (ticket, character_id) in side_credentials {
+                        for (ticket, character_id, auth_services) in side_credentials {
                             match execute_live_game_side_services(
                                 &config,
                                 &budget,
                                 &ticket,
                                 &character_id,
+                                auth_services.as_ref(),
+                                &mut descriptor_tracker,
                                 action_deadline,
                                 deadline_unix_ms,
                                 &mut dispatch_admission,
@@ -1740,8 +2052,9 @@ fn run_live(cli: &Cli) -> Result<(), String> {
                         .map_err(|error| map_auth_admission_to_string(&mut abort, error))
                 },
             );
-            let mut execution_failed = execution.error.is_some();
-            let pre_game_auth_completed = !execution_failed;
+            let auth_execution_failed = execution.error.is_some();
+            let mut execution_failed = auth_execution_failed;
+            let pre_game_auth_completed = !auth_execution_failed;
             let mut side_credentials = if !execution_failed
                 && !game_mode
                 && (live_chat || live_match || live_match_internal || live_http)
@@ -1750,7 +2063,50 @@ fn run_live(cli: &Cli) -> Result<(), String> {
             } else {
                 None
             };
-            if execution_failed {
+            let auth_side_services = execution.take_side_services();
+            let resolved_side_services = if !execution_failed
+                && !game_mode
+                && (live_chat || live_match || live_match_internal || live_http)
+            {
+                match config
+                    .scenario
+                    .side_services
+                    .as_ref()
+                    .ok_or("live side-service configuration disappeared after validation")
+                {
+                    Ok(side) => match resolve_live_side_services(
+                        side,
+                        auth_side_services.as_ref(),
+                        &mut descriptor_tracker,
+                        &mut core_metrics,
+                    ) {
+                        Ok(side) => Some(side),
+                        Err(_) => {
+                            errors.push(
+                                "auth_service_descriptor_rejected",
+                                "auth-discovered side-service descriptor was rejected",
+                                Default::default(),
+                            );
+                            failed = true;
+                            execution_failed = true;
+                            None
+                        }
+                    },
+                    Err(_) => {
+                        errors.push(
+                            "side_service_configuration_missing",
+                            "live side-service configuration disappeared after validation",
+                            Default::default(),
+                        );
+                        failed = true;
+                        execution_failed = true;
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+            if auth_execution_failed {
                 errors.push(
                     "auth_operation_failed",
                     "an auth operation failed; report categories contain no identity or secret",
@@ -2021,21 +2377,18 @@ fn run_live(cli: &Cli) -> Result<(), String> {
                 );
             }
             if !execution_failed && live_chat {
-                let chat = config
-                    .scenario
-                    .side_services
+                let side = resolved_side_services
                     .as_ref()
-                    .and_then(|side| side.chat.as_ref())
+                    .ok_or("resolved live side-service configuration disappeared")?;
+                let chat = side
+                    .chat
+                    .as_ref()
                     .ok_or("live chat configuration disappeared after validation")?;
                 let descriptor = chat
                     .descriptor
                     .as_ref()
                     .ok_or("live chat requires an explicit descriptor")?;
-                let plan = config
-                    .scenario
-                    .side_services
-                    .as_ref()
-                    .expect("live chat configuration exists")
+                let plan = side
                     .executable_plan(&budget)
                     .map_err(|error| format!("live chat plan rejected: {error}"))?;
                 let Some((ticket, character_id)) = side_credentials.clone() else {
@@ -2045,7 +2398,6 @@ fn run_live(cli: &Cli) -> Result<(), String> {
                         Default::default(),
                     );
                     failed = true;
-                    execution_failed = true;
                     finish_live_action(&mut auth_metrics, &execution.metrics, &mut abort, &budget);
                     continue;
                 };
@@ -2135,11 +2487,12 @@ fn run_live(cli: &Cli) -> Result<(), String> {
                 }
             }
             if !execution_failed && live_match {
-                let matcher = config
-                    .scenario
-                    .side_services
+                let side = resolved_side_services
                     .as_ref()
-                    .and_then(|side| side.r#match.as_ref())
+                    .ok_or("resolved live side-service configuration disappeared")?;
+                let matcher = side
+                    .r#match
+                    .as_ref()
                     .ok_or("live match configuration disappeared after validation")?;
                 let descriptor = matcher
                     .descriptor
@@ -2152,15 +2505,10 @@ fn run_live(cli: &Cli) -> Result<(), String> {
                         Default::default(),
                     );
                     failed = true;
-                    execution_failed = true;
                     finish_live_action(&mut auth_metrics, &execution.metrics, &mut abort, &budget);
                     continue;
                 };
-                let plan = config
-                    .scenario
-                    .side_services
-                    .as_ref()
-                    .expect("live match configuration exists")
+                let plan = side
                     .executable_plan(&budget)
                     .map_err(|error| format!("live match plan rejected: {error}"))?;
                 let match_steps = plan
@@ -2264,11 +2612,12 @@ fn run_live(cli: &Cli) -> Result<(), String> {
                 }
             }
             if !execution_failed && live_match_internal {
-                let matcher = config
-                    .scenario
-                    .side_services
+                let side = resolved_side_services
                     .as_ref()
-                    .and_then(|side| side.r#match.as_ref())
+                    .ok_or("resolved live side-service configuration disappeared")?;
+                let matcher = side
+                    .r#match
+                    .as_ref()
                     .ok_or("live MatchInternal configuration disappeared after validation")?;
                 let descriptor = matcher
                     .descriptor
@@ -2281,7 +2630,6 @@ fn run_live(cli: &Cli) -> Result<(), String> {
                         Default::default(),
                     );
                     failed = true;
-                    execution_failed = true;
                     finish_live_action(&mut auth_metrics, &execution.metrics, &mut abort, &budget);
                     continue;
                 };
@@ -2361,10 +2709,9 @@ fn run_live(cli: &Cli) -> Result<(), String> {
                 }
             }
             if !execution_failed && live_http {
-                let side =
-                    config.scenario.side_services.as_ref().ok_or(
-                        "live HTTP side-service configuration disappeared after validation",
-                    )?;
+                let side = resolved_side_services
+                    .as_ref()
+                    .ok_or("resolved live HTTP side-service configuration disappeared")?;
                 let plan = side
                     .executable_plan(&budget)
                     .map_err(|error| format!("live HTTP side-service plan rejected: {error}"))?;
@@ -2386,7 +2733,6 @@ fn run_live(cli: &Cli) -> Result<(), String> {
                         Default::default(),
                     );
                     failed = true;
-                    execution_failed = true;
                     finish_live_action(&mut auth_metrics, &execution.metrics, &mut abort, &budget);
                     continue;
                 };
@@ -2507,27 +2853,42 @@ fn run_live(cli: &Cli) -> Result<(), String> {
     }
     auth_metrics.set_wall_clock_window_ms(monotonic_started.elapsed().as_millis() as u64);
     record_auth_metrics(&mut core_metrics, &auth_metrics);
+    if let Some(registry_config) = registry_observation_config.as_ref() {
+        record_registry_observation_result(
+            collect_registry_observation_for_run(&run_id, started, registry_config.clone()),
+            &mut registry_observation,
+            &mut core_metrics,
+            &mut errors,
+            &mut abort,
+            &mut failed,
+        );
+    }
     core_metrics.increment(
         "auth_potential_data_writes",
         dispatch_admission.used_data_writes(),
     );
-    let status = if abort.should_stop_new_sessions() {
-        lifecycle.transition(RunState::Aborting).unwrap();
-        lifecycle.transition(RunState::Aborted).unwrap();
-        "aborted"
-    } else if failed {
-        lifecycle.transition(RunState::Failed).unwrap();
-        "failed"
-    } else {
-        lifecycle.transition(RunState::CoolingDown).unwrap();
-        lifecycle.transition(RunState::Completed).unwrap();
-        "completed"
+    let status = match live_run_terminal_status(&abort, failed) {
+        "aborted" => {
+            lifecycle.transition(RunState::Aborting).unwrap();
+            lifecycle.transition(RunState::Aborted).unwrap();
+            "aborted"
+        }
+        "failed" => {
+            lifecycle.transition(RunState::Failed).unwrap();
+            "failed"
+        }
+        "completed" => {
+            lifecycle.transition(RunState::CoolingDown).unwrap();
+            lifecycle.transition(RunState::Completed).unwrap();
+            "completed"
+        }
+        _ => unreachable!("live run status is closed"),
     };
     let abort_reason = abort.reason().map(|reason| format!("{reason:?}"));
     let report = write_report(
         Path::new(&config.reports_root),
         ReportInput {
-            run_id: &format!("auth-{}-{}", std::process::id(), started),
+            run_id: &run_id,
             config: &config,
             effective_budget: &budget,
             status,
@@ -2543,6 +2904,7 @@ fn run_live(cli: &Cli) -> Result<(), String> {
             auth_metrics: Some(&auth_metrics),
             calibration: None,
             service_versions: None,
+            registry_observation: registry_observation.as_ref(),
         },
     )
     .map_err(|error| error.to_string())?;
@@ -3294,6 +3656,85 @@ mod tests {
     use super::*;
     use loadtest_core::abort::AbortReason;
     use loadtest_core::auth_http::{AuthHttpStatusCategory, AuthOutcomeCategory};
+    use loadtest_core::control_plane::ObservationSnapshot;
+
+    fn registry_report(complete: bool) -> RegistryObservationReport {
+        RegistryObservationReport {
+            snapshot: ObservationSnapshot {
+                run_id: "registry-run".into(),
+                window_start_unix_ms: 1,
+                window_end_unix_ms: 2,
+                source: "registry_readonly_v1".into(),
+                freshness_ms: 0,
+                complete,
+            },
+            registry_instance_count: 0,
+            instance_metric_count: 0,
+            instances: Vec::new(),
+            stale_cleanups: Vec::new(),
+            routes: Vec::new(),
+            holes: Default::default(),
+        }
+    }
+
+    #[test]
+    fn registry_preflight_and_runtime_fail_closed_before_completed_status() {
+        assert!(matches!(
+            classify_registry_preflight(Ok(registry_report(true))),
+            RegistryPreflightDecision::Ready(_)
+        ));
+        assert!(matches!(
+            classify_registry_preflight(Ok(registry_report(false))),
+            RegistryPreflightDecision::Incomplete(_)
+        ));
+        assert!(matches!(
+            classify_registry_preflight(Err(RegistryObservationError::TransportUnavailable)),
+            RegistryPreflightDecision::Unavailable
+        ));
+
+        let mut latest = None;
+        let mut metrics = Metrics::default();
+        let mut errors = ErrorBuffer::default();
+        let mut abort = AbortController::default();
+        let mut failed = false;
+        record_registry_observation_result(
+            Ok(registry_report(false)),
+            &mut latest,
+            &mut metrics,
+            &mut errors,
+            &mut abort,
+            &mut failed,
+        );
+        assert!(latest.is_some());
+        assert!(failed);
+        assert_eq!(abort.reason(), Some(&AbortReason::MetricsStale));
+        assert_eq!(live_run_terminal_status(&abort, failed), "aborted");
+        assert_eq!(
+            errors.samples()[0].category,
+            "registry_observation_incomplete"
+        );
+
+        let mut latest = None;
+        let mut metrics = Metrics::default();
+        let mut errors = ErrorBuffer::default();
+        let mut abort = AbortController::default();
+        let mut failed = false;
+        record_registry_observation_result(
+            Err(RegistryObservationError::TransportUnavailable),
+            &mut latest,
+            &mut metrics,
+            &mut errors,
+            &mut abort,
+            &mut failed,
+        );
+        assert!(latest.is_none());
+        assert!(failed);
+        assert_eq!(live_run_terminal_status(&abort, failed), "aborted");
+        assert_eq!(
+            errors.samples()[0].category,
+            "registry_observation_unavailable"
+        );
+    }
 
     #[test]
     fn controller_health_tick_aborts_the_shared_controller_before_a_later_session() {

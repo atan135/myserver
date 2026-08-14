@@ -9,7 +9,7 @@ mod types;
 
 pub use client::{
     DiscoverySnapshot, DiscoveryWatch, DiscoveryWatchConfig, HeartbeatOutcome,
-    RegistryCapacityError, RegistryClient,
+    RegistryCapacityError, RegistryClient, REGISTRY_HEARTBEAT_TTL_SECONDS,
 };
 pub use convergence::{
     ConvergenceAttempt, ConvergenceConfig, ConvergenceJitter, ConvergencePhase,
