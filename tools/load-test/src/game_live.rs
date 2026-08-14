@@ -232,6 +232,7 @@ pub struct GameRunResult {
     pub terminal_state: VirtualPlayerSessionState,
     pub connection_released: bool,
     pub lease_released: bool,
+    pub backpressure: crate::game_kcp::KcpBackpressureMetrics,
     pub gameplay_metrics: Option<crate::metrics::MetricsSnapshot>,
 }
 
@@ -2723,6 +2724,7 @@ fn result(
         terminal_state: session.state(),
         connection_released: !session.connection_attached(),
         lease_released: !session.lease_held(),
+        backpressure: session.backpressure_metrics(),
         steps,
         gameplay_metrics,
     }

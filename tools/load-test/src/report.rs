@@ -112,6 +112,10 @@ pub struct ReportInput<'a> {
     pub errors: &'a ErrorBuffer,
     pub auth_metrics: Option<&'a AuthRunMetrics>,
     pub calibration: Option<&'a CalibrationReport>,
+    /// Service versions are observations gathered by a trusted read-only
+    /// controller. They are optional in a report, but baseline comparison
+    /// deliberately rejects absent observations.
+    pub service_versions: Option<&'a BTreeMap<String, String>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -126,6 +130,7 @@ struct RunJson<'a> {
     scenario_hash: String,
     tool_git_commit: &'static str,
     account_batch: &'a str,
+    load_phase: String,
     auth_metrics_available: bool,
     started_unix_ms: u64,
     ended_unix_ms: u64,
@@ -134,6 +139,7 @@ struct RunJson<'a> {
     budget: &'a HardBudget,
     generator_resources: GeneratorResources,
     calibration: Option<&'a CalibrationReport>,
+    service_versions: Option<&'a BTreeMap<String, String>>,
 }
 
 pub fn write_report(root: &Path, input: ReportInput<'_>) -> std::io::Result<PathBuf> {
@@ -158,6 +164,7 @@ pub fn write_report(root: &Path, input: ReportInput<'_>) -> std::io::Result<Path
         scenario_hash: format!("{:x}", Sha256::digest(scenario_json)),
         tool_git_commit: tool_git_commit(),
         account_batch: &input.config.account_prepare.batch,
+        load_phase: input.config.scenario.load.phase_identity(),
         auth_metrics_available: input.auth_metrics.is_some(),
         started_unix_ms: input.started_unix_ms,
         ended_unix_ms: input.ended_unix_ms,
@@ -166,6 +173,7 @@ pub fn write_report(root: &Path, input: ReportInput<'_>) -> std::io::Result<Path
         budget: input.effective_budget,
         generator_resources: input.resources,
         calibration: input.calibration,
+        service_versions: input.service_versions,
     };
     write_json(report_dir.join("run.json"), &run)?;
     write_json(report_dir.join("metrics.json"), &input.metrics)?;
@@ -516,6 +524,7 @@ mod tests {
                 errors: &errors,
                 auth_metrics: None,
                 calibration: None,
+                service_versions: None,
             },
         )
         .unwrap();
@@ -524,6 +533,8 @@ mod tests {
         let run = fs::read_to_string(report.join("run.json")).unwrap();
         assert!(!run.contains("127.0.0.1"));
         assert!(run.contains("\"account_batch\": \"default\""));
+        assert!(run.contains("\"load_phase\": \"fixed_concurrency\""));
+        assert!(run.contains("\"service_versions\": null"));
         assert!(run.contains("\"max_virtual_players\": 1"));
         let commit = tool_git_commit();
         assert!(
@@ -568,6 +579,7 @@ mod tests {
                 errors: &errors,
                 auth_metrics: None,
                 calibration: None,
+                service_versions: None,
             },
         )
         .unwrap();
@@ -724,6 +736,7 @@ mod tests {
                 errors: &ErrorBuffer::default(),
                 auth_metrics: Some(&auth_metrics),
                 calibration: None,
+                service_versions: Some(&BTreeMap::from([("game".into(), "v1".into())])),
             },
         )
         .unwrap();

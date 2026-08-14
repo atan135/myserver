@@ -11,7 +11,8 @@ use thiserror::Error;
 use crate::accounts::{AccountLease, AccountLeasePool};
 use crate::fake::{FakeKcpConnection, FakeKcpEvent};
 use crate::game_kcp::{
-    GameConnectionLifecycle, GameKcpError, GameLifecycleEvent, OutboundPacket, ReconnectPolicy,
+    GameConnectionLifecycle, GameKcpError, GameLifecycleEvent, KcpBackpressureMetrics,
+    OutboundPacket, ReconnectPolicy,
 };
 
 pub trait PlayerConnection: Send {}
@@ -112,6 +113,12 @@ impl VirtualPlayerSession {
 
     pub fn pending_requests(&self) -> usize {
         self.game.pending_requests()
+    }
+
+    /// Exposes only fixed-cardinality transport pressure observations to the
+    /// run controller. It carries no account, room, ticket, or packet data.
+    pub fn backpressure_metrics(&self) -> KcpBackpressureMetrics {
+        self.game.backpressure_metrics()
     }
 
     pub fn mark_logged_in(

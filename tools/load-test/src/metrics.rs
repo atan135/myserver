@@ -284,6 +284,7 @@ pub fn is_low_cardinality_key(key: &str) -> bool {
             | "player_match_grpc_status_observation_holes"
             | "player_match_room_create_closed_unobserved"
             | "reconnect_burst_login_actions"
+            | "reconnect_burst_forced_disconnects"
             | "reconnect_burst_new_connections"
             | "reconnect_burst_room_recoveries"
             | "reconnect_burst_backoff_ms"
@@ -321,6 +322,9 @@ pub fn is_low_cardinality_key(key: &str) -> bool {
             | "match_grpc_cancellations"
             | "match_grpc_timeouts"
             | "match_grpc_stream_disconnects"
+            | "match_grpc_backpressure_pending_limit_rejections"
+            | "match_grpc_backpressure_dropped_pending_messages"
+            | "match_grpc_backpressure_stream_disconnects"
             | "match_internal_operations"
             | "match_internal_successes"
             | "match_internal_statuses"
@@ -379,6 +383,9 @@ pub fn is_low_cardinality_key(key: &str) -> bool {
             | "side_mail_push_events"
             | "side_announce_push_events"
             | "side_match_push_events"
+            | "kcp_backpressure_pending_limit_rejections"
+            | "kcp_backpressure_dropped_pending_requests"
+            | "kcp_backpressure_disconnects"
     )
 }
 

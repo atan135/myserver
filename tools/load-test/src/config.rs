@@ -44,6 +44,10 @@ pub struct LoadTestConfig {
     pub account_prepare: AccountPrepareConfig,
     #[serde(default)]
     pub calibration: CalibrationThresholds,
+    /// Reserved only to fail closed if a configuration attempts to request an
+    /// operation outside the public player/read-only diagnostic boundary.
+    #[serde(default)]
+    pub unsafe_operations: Vec<ProhibitedOperation>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -57,6 +61,27 @@ pub struct EnvironmentProfile {
     pub allowed_hosts: BTreeSet<String>,
     #[serde(default)]
     pub allowed_ips: BTreeSet<IpAddr>,
+    /// Remote runs need a bounded, recorded execution window. Local profiles
+    /// deliberately omit it so dry-run development remains lightweight.
+    #[serde(default)]
+    pub test_window: Option<RemoteTestWindow>,
+    /// Named observers are a release-safety contract, not telemetry values.
+    /// They are intentionally not copied into reports.
+    #[serde(default)]
+    pub observers: BTreeSet<String>,
+    #[serde(default)]
+    pub stop_responsible_party: Option<String>,
+    /// A human acknowledgement distinct from the approval that created the
+    /// test window. The CLI confirmation still has to match the profile name.
+    #[serde(default)]
+    pub manual_confirmation_reference: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RemoteTestWindow {
+    pub starts_unix_ms: u64,
+    pub ends_unix_ms: u64,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -66,6 +91,30 @@ pub enum EnvironmentKind {
     Test,
     Staging,
     Production,
+}
+
+/// These operations are intentionally not transport capabilities of the
+/// load-test tool. Keeping the denylist typed makes future configuration or
+/// command additions fail closed rather than accidentally gaining a remote
+/// execution path.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProhibitedOperation {
+    MailGrant,
+    AnnounceCrud,
+    GmOrOpsWrite,
+    FaultInjection,
+    ProcessKill,
+    NetworkBlocking,
+    DatabaseScript,
+    RegistryMutation,
+    DependencyDirectLoad,
+}
+
+pub fn reject_prohibited_operation(operation: ProhibitedOperation) -> Result<(), ConfigError> {
+    Err(ConfigError::Rejected(format!(
+        "operation {operation:?} is prohibited by the load-test safety boundary"
+    )))
 }
 
 impl EnvironmentKind {
@@ -299,6 +348,27 @@ pub enum LoadModel {
     },
 }
 
+impl LoadModel {
+    /// Stable load-phase identity for comparisons. The scenario hash carries
+    /// full configuration; this field makes a phase mismatch legible in the
+    /// report and prevents comparing a soak/staged phase with a simple burst.
+    pub fn phase_identity(&self) -> String {
+        match self {
+            Self::FixedConcurrency { .. } => "fixed_concurrency".into(),
+            Self::ArrivalRate { .. } => "arrival_rate".into(),
+            Self::Burst { .. } => "burst".into(),
+            Self::Staged { stages } => format!(
+                "staged:{}",
+                stages
+                    .iter()
+                    .map(|stage| stage.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join("|")
+            ),
+        }
+    }
+}
+
 pub const MAX_GRACEFUL_SHUTDOWN_MS: u64 = 60_000;
 
 fn default_graceful_shutdown_ms() -> u64 {
@@ -408,6 +478,8 @@ impl LoadTestConfig {
             ));
         }
         self.validate_targets()?;
+        self.validate_remote_execution_contract()?;
+        self.validate_prohibited_operations()?;
         self.validate_budget()?;
         self.validate_scenario()?;
         self.validate_account_prepare()?;
@@ -426,6 +498,16 @@ impl LoadTestConfig {
     }
 
     pub fn validate_access(&self, access: RunAccess<'_>) -> Result<(), ConfigError> {
+        self.validate_access_at(access, current_unix_ms())
+    }
+
+    /// Time is injected for deterministic preflight and controller tests.
+    /// The public `validate_access` wrapper uses the current wall clock.
+    pub fn validate_access_at(
+        &self,
+        access: RunAccess<'_>,
+        now_unix_ms: u64,
+    ) -> Result<(), ConfigError> {
         let targets = self.parsed_targets()?;
         if !self.environment.kind.is_remote() {
             if !targets.iter().all(Endpoint::is_loopback) {
@@ -460,7 +542,75 @@ impl LoadTestConfig {
                 "remote profile requires host and IP allowlists".into(),
             ));
         }
+        self.validate_remote_test_window_at(now_unix_ms)?;
         self.revalidate_targets()?;
+        Ok(())
+    }
+
+    /// Rechecked by every controller health tick. The start is inclusive and
+    /// the end is exclusive so adjacent approved windows cannot overlap.
+    pub fn validate_remote_test_window_at(&self, now_unix_ms: u64) -> Result<(), ConfigError> {
+        if !self.environment.kind.is_remote() {
+            return Ok(());
+        }
+        let window = self.environment.test_window.ok_or_else(|| {
+            ConfigError::Rejected("remote profile requires a bounded test_window".into())
+        })?;
+        if now_unix_ms < window.starts_unix_ms || now_unix_ms >= window.ends_unix_ms {
+            return Err(ConfigError::Rejected(
+                "remote run is outside the approved test_window".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_remote_execution_contract(&self) -> Result<(), ConfigError> {
+        if !self.environment.kind.is_remote() {
+            return Ok(());
+        }
+        let window = self.environment.test_window.ok_or_else(|| {
+            ConfigError::Rejected("remote profile requires a bounded test_window".into())
+        })?;
+        if window.starts_unix_ms >= window.ends_unix_ms {
+            return Err(ConfigError::Rejected(
+                "remote test_window must end after it starts".into(),
+            ));
+        }
+        if self.environment.observers.is_empty()
+            || self
+                .environment
+                .observers
+                .iter()
+                .any(|observer| observer.trim().is_empty())
+        {
+            return Err(ConfigError::Rejected(
+                "remote profile requires at least one non-empty observer".into(),
+            ));
+        }
+        for (label, value) in [
+            (
+                "stop_responsible_party",
+                self.environment.stop_responsible_party.as_deref(),
+            ),
+            (
+                "manual_confirmation_reference",
+                self.environment.manual_confirmation_reference.as_deref(),
+            ),
+            ("stop_file", self.stop_file.as_deref()),
+        ] {
+            if value.is_none_or(|value| value.trim().is_empty()) {
+                return Err(ConfigError::Rejected(format!(
+                    "remote profile requires a non-empty {label}"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_prohibited_operations(&self) -> Result<(), ConfigError> {
+        if let Some(operation) = self.unsafe_operations.first().copied() {
+            return reject_prohibited_operation(operation);
+        }
         Ok(())
     }
 
@@ -813,6 +963,13 @@ impl LoadTestConfig {
     }
 }
 
+fn current_unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
 impl HardBudget {
     pub fn validate(&self) -> Result<(), ConfigError> {
         require_positive(self.max_virtual_players as u64, "max_virtual_players")?;
@@ -923,6 +1080,10 @@ mod tests {
                 approval_reference: None,
                 allowed_hosts: BTreeSet::new(),
                 allowed_ips: BTreeSet::new(),
+                test_window: None,
+                observers: BTreeSet::new(),
+                stop_responsible_party: None,
+                manual_confirmation_reference: None,
             },
             targets: PlayerTargets {
                 auth_http: "http://127.0.0.1:3000".into(),
@@ -968,6 +1129,7 @@ mod tests {
             graceful_shutdown_ms: default_graceful_shutdown_ms(),
             account_prepare: AccountPrepareConfig::default(),
             calibration: CalibrationThresholds::default(),
+            unsafe_operations: Vec::new(),
         }
     }
 
@@ -1023,6 +1185,14 @@ mod tests {
         production.environment.kind = EnvironmentKind::Production;
         production.environment.name = "prod".into();
         production.environment.approval_reference = Some("approved-window".into());
+        production.environment.test_window = Some(RemoteTestWindow {
+            starts_unix_ms: 1,
+            ends_unix_ms: 2,
+        });
+        production.environment.observers.insert("observer-a".into());
+        production.environment.stop_responsible_party = Some("stop-owner".into());
+        production.environment.manual_confirmation_reference = Some("manual-confirm".into());
+        production.stop_file = Some("run.stop".into());
         production
             .environment
             .allowed_hosts
@@ -1129,6 +1299,170 @@ mod tests {
                 .unwrap()
                 .max_virtual_players,
             1
+        );
+    }
+
+    #[test]
+    fn remote_profile_requires_window_observers_stop_owner_confirmation_and_stop_file() {
+        let mut remote = config();
+        remote.environment.kind = EnvironmentKind::Test;
+        remote.environment.name = "test".into();
+        remote.environment.approval_reference = Some("approved".into());
+        remote.environment.allowed_hosts.insert("127.0.0.1".into());
+        remote
+            .environment
+            .allowed_ips
+            .insert("127.0.0.1".parse().unwrap());
+        for expected in [
+            "test_window",
+            "observer",
+            "stop_responsible_party",
+            "manual_confirmation_reference",
+            "stop_file",
+        ] {
+            assert!(
+                remote
+                    .validate_structural()
+                    .unwrap_err()
+                    .to_string()
+                    .contains(expected)
+            );
+            match expected {
+                "test_window" => {
+                    remote.environment.test_window = Some(RemoteTestWindow {
+                        starts_unix_ms: 10,
+                        ends_unix_ms: 20,
+                    });
+                }
+                "observer" => {
+                    remote.environment.observers.insert("observer-a".into());
+                }
+                "stop_responsible_party" => {
+                    remote.environment.stop_responsible_party = Some("operator-a".into());
+                }
+                "manual_confirmation_reference" => {
+                    remote.environment.manual_confirmation_reference = Some("manual-a".into());
+                }
+                "stop_file" => remote.stop_file = Some("test.stop".into()),
+                _ => unreachable!(),
+            }
+        }
+        remote.validate_structural().unwrap();
+        assert!(
+            remote
+                .validate_access_at(
+                    RunAccess {
+                        allow_remote: true,
+                        confirmation: Some("test"),
+                    },
+                    10,
+                )
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn remote_test_window_must_be_ordered_and_prohibited_operations_have_no_execution_path() {
+        let mut remote = config();
+        remote.environment.kind = EnvironmentKind::Staging;
+        remote.environment.test_window = Some(RemoteTestWindow {
+            starts_unix_ms: 20,
+            ends_unix_ms: 20,
+        });
+        assert!(
+            remote
+                .validate_structural()
+                .unwrap_err()
+                .to_string()
+                .contains("end after")
+        );
+        for operation in [
+            ProhibitedOperation::MailGrant,
+            ProhibitedOperation::AnnounceCrud,
+            ProhibitedOperation::GmOrOpsWrite,
+            ProhibitedOperation::FaultInjection,
+            ProhibitedOperation::ProcessKill,
+            ProhibitedOperation::NetworkBlocking,
+            ProhibitedOperation::DatabaseScript,
+            ProhibitedOperation::RegistryMutation,
+            ProhibitedOperation::DependencyDirectLoad,
+        ] {
+            assert!(reject_prohibited_operation(operation).is_err());
+            let mut local = config();
+            local.unsafe_operations = vec![operation];
+            assert!(
+                local
+                    .validate_structural()
+                    .unwrap_err()
+                    .to_string()
+                    .contains("prohibited")
+            );
+        }
+    }
+
+    #[test]
+    fn remote_access_rejects_before_and_after_the_approved_window() {
+        let mut remote = config();
+        remote.environment.kind = EnvironmentKind::Test;
+        remote.environment.name = "test".into();
+        remote.environment.approval_reference = Some("approved".into());
+        remote.environment.test_window = Some(RemoteTestWindow {
+            starts_unix_ms: 100,
+            ends_unix_ms: 200,
+        });
+        remote.environment.observers.insert("observer-a".into());
+        remote.environment.stop_responsible_party = Some("operator-a".into());
+        remote.environment.manual_confirmation_reference = Some("manual-a".into());
+        remote.stop_file = Some("test.stop".into());
+        remote.environment.allowed_hosts.insert("127.0.0.1".into());
+        remote
+            .environment
+            .allowed_ips
+            .insert("127.0.0.1".parse().unwrap());
+        let access = RunAccess {
+            allow_remote: true,
+            confirmation: Some("test"),
+        };
+        for now in [99, 200] {
+            assert!(
+                remote
+                    .validate_access_at(access, now)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("outside")
+            );
+        }
+        remote.validate_access_at(access, 100).unwrap();
+        remote.validate_access_at(access, 199).unwrap();
+    }
+
+    #[test]
+    fn load_phase_identity_separates_staged_waves_from_other_models() {
+        assert_eq!(
+            LoadModel::FixedConcurrency {
+                virtual_players: 1,
+                duration_secs: 1,
+            }
+            .phase_identity(),
+            "fixed_concurrency"
+        );
+        assert_eq!(
+            LoadModel::Staged {
+                stages: vec![
+                    LoadStage {
+                        name: "warmup".into(),
+                        virtual_players: 1,
+                        duration_secs: 1,
+                    },
+                    LoadStage {
+                        name: "steady".into(),
+                        virtual_players: 2,
+                        duration_secs: 1,
+                    },
+                ],
+            }
+            .phase_identity(),
+            "staged:warmup|steady"
         );
     }
 

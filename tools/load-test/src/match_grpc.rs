@@ -12,6 +12,106 @@ use crate::side_services::{
 use futures_util::StreamExt;
 use tonic::transport::Endpoint;
 
+/// Direct gRPC diagnostics never need an unbounded response backlog. The
+/// tracker is also used by streaming consumers so a stalled local consumer is
+/// classified before it can accumulate arbitrary messages in the generator.
+pub const DEFAULT_MAX_MATCH_GRPC_PENDING: usize = 16;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MatchGrpcBackpressureMetrics {
+    pub pending_limit_rejections: u64,
+    pub dropped_pending_messages: u64,
+    pub stream_disconnects: u64,
+}
+
+impl MatchGrpcBackpressureMetrics {
+    pub fn merge_into_metrics(&self, metrics: &mut crate::metrics::Metrics) {
+        for (key, value) in [
+            (
+                "match_grpc_backpressure_pending_limit_rejections",
+                self.pending_limit_rejections,
+            ),
+            (
+                "match_grpc_backpressure_dropped_pending_messages",
+                self.dropped_pending_messages,
+            ),
+            (
+                "match_grpc_backpressure_stream_disconnects",
+                self.stream_disconnects,
+            ),
+        ] {
+            metrics.increment(key, value);
+        }
+    }
+
+    pub fn is_healthy(&self) -> bool {
+        self.pending_limit_rejections == 0
+            && self.dropped_pending_messages == 0
+            && self.stream_disconnects == 0
+    }
+
+    pub fn apply_to_health(&self, health: &mut crate::abort::ContinuousHealthObservation) {
+        health.backpressure_healthy &= self.is_healthy();
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MatchGrpcPending {
+    maximum: usize,
+    pending: usize,
+    metrics: MatchGrpcBackpressureMetrics,
+}
+
+impl MatchGrpcPending {
+    pub fn new(maximum: usize) -> Result<Self, MatchGrpcError> {
+        if maximum == 0 {
+            return Err(MatchGrpcError::InvalidPendingLimit);
+        }
+        Ok(Self {
+            maximum,
+            pending: 0,
+            metrics: MatchGrpcBackpressureMetrics::default(),
+        })
+    }
+
+    pub fn begin(&mut self) -> Result<(), MatchGrpcError> {
+        if self.pending >= self.maximum {
+            self.metrics.pending_limit_rejections =
+                self.metrics.pending_limit_rejections.saturating_add(1);
+            return Err(MatchGrpcError::PendingLimit {
+                maximum: self.maximum,
+            });
+        }
+        self.pending = self.pending.saturating_add(1);
+        Ok(())
+    }
+
+    pub fn complete(&mut self) -> Result<(), MatchGrpcError> {
+        if self.pending == 0 {
+            return Err(MatchGrpcError::PendingUnderflow);
+        }
+        self.pending -= 1;
+        Ok(())
+    }
+
+    pub fn disconnect(&mut self) {
+        self.metrics.stream_disconnects = self.metrics.stream_disconnects.saturating_add(1);
+        self.metrics.dropped_pending_messages = self
+            .metrics
+            .dropped_pending_messages
+            .saturating_add(self.pending as u64);
+        self.pending = 0;
+    }
+
+    pub fn pending(&self) -> usize {
+        self.pending
+    }
+
+    pub fn metrics(&self) -> MatchGrpcBackpressureMetrics {
+        self.metrics
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MatchGrpcOutcome {
     Success,
@@ -38,6 +138,7 @@ pub struct MatchGrpcMetrics {
     pub timeouts: u64,
     pub stream_disconnects: u64,
     pub outcomes: std::collections::BTreeMap<MatchGrpcOutcome, u64>,
+    pub backpressure: MatchGrpcBackpressureMetrics,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -143,6 +244,7 @@ impl MatchGrpcMetrics {
         if self.room_create_closed_observed && self.room_create_closed_ms > 0 {
             metrics.observe_latency("match_grpc_room_create_ms", self.room_create_closed_ms);
         }
+        self.backpressure.merge_into_metrics(metrics);
     }
 }
 
@@ -156,7 +258,27 @@ pub enum MatchGrpcError {
     StreamDisconnected,
     Business(String),
     InvalidPlan,
+    InvalidPendingLimit,
+    PendingLimit {
+        maximum: usize,
+    },
+    PendingUnderflow,
     RoomCreateClosed,
+    ExecutionFailed {
+        source: Box<MatchGrpcError>,
+        backpressure: MatchGrpcBackpressureMetrics,
+    },
+}
+
+impl MatchGrpcError {
+    /// Keeps bounded-pending observations available to the controller even
+    /// when the live RPC fails before it can return normal metrics.
+    pub fn backpressure_metrics(&self) -> Option<MatchGrpcBackpressureMetrics> {
+        match self {
+            Self::ExecutionFailed { backpressure, .. } => Some(*backpressure),
+            _ => None,
+        }
+    }
 }
 
 pub fn character_id_from_credentials<'a>(
@@ -206,106 +328,136 @@ pub async fn execute_live_match_steps(
         .map_err(|error| MatchGrpcError::Grpc(error.to_string()))?;
     let started_at = Instant::now();
     let mut metrics = MatchGrpcMetrics::default();
+    let mut pending = MatchGrpcPending::new(DEFAULT_MAX_MATCH_GRPC_PENDING)?;
     let mut match_id = String::new();
-    for step in steps {
-        if step.think_time_ms > 0 {
-            tokio::time::timeout(
-                Duration::from_millis(timeout_ms.max(1)),
-                tokio::time::sleep(Duration::from_millis(step.think_time_ms)),
-            )
-            .await
-            .map_err(|_| MatchGrpcError::Timeout)?;
-        }
-        admit(false)?;
-        match step.operation {
-            SideServiceOperation::MatchStart => {
-                metrics.match_attempts = metrics.match_attempts.saturating_add(1);
-                let response = bounded(
-                    timeout_ms,
-                    client.match_start(MatchStartReq {
-                        character_id: character_id.into(),
-                        mode: "1v1".into(),
-                        rank_tier: 0,
-                    }),
+    let execution: Result<(), MatchGrpcError> = async {
+        for step in steps {
+            if step.think_time_ms > 0 {
+                tokio::time::timeout(
+                    Duration::from_millis(timeout_ms.max(1)),
+                    tokio::time::sleep(Duration::from_millis(step.think_time_ms)),
                 )
-                .await?
-                .into_inner();
-                if !response.ok {
-                    return Err(MatchGrpcError::Business(response.error_code));
-                }
-                match_id = response.match_id;
-                metrics.queued_ms = started_at.elapsed().as_millis() as u64;
+                .await
+                .map_err(|_| MatchGrpcError::Timeout)?;
             }
-            SideServiceOperation::MatchEventStream => {
-                metrics.event_stream_connections += 1;
-                let response = bounded(
-                    timeout_ms,
-                    client.match_event_stream(MatchEventStreamReq {
-                        character_id: character_id.into(),
-                    }),
-                )
-                .await?;
-                let mut stream = response.into_inner();
-                loop {
-                    let event = tokio::time::timeout(
-                        Duration::from_millis(timeout_ms.max(1)),
-                        stream.next(),
+            admit(false)?;
+            match step.operation {
+                SideServiceOperation::MatchStart => {
+                    metrics.match_attempts = metrics.match_attempts.saturating_add(1);
+                    let response = bounded_pending(
+                        &mut pending,
+                        timeout_ms,
+                        client.match_start(MatchStartReq {
+                            character_id: character_id.into(),
+                            mode: "1v1".into(),
+                            rank_tier: 0,
+                        }),
                     )
-                    .await
-                    .map_err(|_| MatchGrpcError::Timeout)?;
-                    let Some(event) = event else {
-                        metrics.stream_disconnects += 1;
-                        return Err(MatchGrpcError::StreamDisconnected);
-                    };
-                    let event = event.map_err(|status| MatchGrpcError::Grpc(status.to_string()))?;
-                    if event.event == "matched" {
-                        metrics.match_successes += 1;
-                        break;
+                    .await?
+                    .into_inner();
+                    if !response.ok {
+                        return Err(MatchGrpcError::Business(response.error_code));
                     }
-                    if event.event == "match_cancelled" {
-                        metrics.cancellations += 1;
-                        return Err(terminal_event_error(&event));
-                    }
-                    if event.event == "match_failed" {
-                        if event.error_code == "MATCH_TIMEOUT" {
-                            metrics.timeouts += 1;
-                            return Err(MatchGrpcError::Timeout);
+                    match_id = response.match_id;
+                    metrics.queued_ms = started_at.elapsed().as_millis() as u64;
+                }
+                SideServiceOperation::MatchEventStream => {
+                    metrics.event_stream_connections += 1;
+                    let response = bounded_pending(
+                        &mut pending,
+                        timeout_ms,
+                        client.match_event_stream(MatchEventStreamReq {
+                            character_id: character_id.into(),
+                        }),
+                    )
+                    .await?;
+                    let mut stream = response.into_inner();
+                    loop {
+                        let event = match tokio::time::timeout(
+                            Duration::from_millis(timeout_ms.max(1)),
+                            stream.next(),
+                        )
+                        .await
+                        {
+                            Ok(event) => event,
+                            Err(_) => {
+                                pending.disconnect();
+                                return Err(MatchGrpcError::Timeout);
+                            }
+                        };
+                        let Some(event) = event else {
+                            metrics.stream_disconnects += 1;
+                            pending.disconnect();
+                            return Err(MatchGrpcError::StreamDisconnected);
+                        };
+                        let event = match event {
+                            Ok(event) => event,
+                            Err(status) => {
+                                pending.disconnect();
+                                return Err(MatchGrpcError::Grpc(status.to_string()));
+                            }
+                        };
+                        if event.event == "matched" {
+                            metrics.match_successes += 1;
+                            break;
                         }
-                        return Err(terminal_event_error(&event));
+                        if event.event == "match_cancelled" {
+                            metrics.cancellations += 1;
+                            return Err(terminal_event_error(&event));
+                        }
+                        if event.event == "match_failed" {
+                            if event.error_code == "MATCH_TIMEOUT" {
+                                metrics.timeouts += 1;
+                                return Err(MatchGrpcError::Timeout);
+                            }
+                            return Err(terminal_event_error(&event));
+                        }
                     }
                 }
-            }
-            SideServiceOperation::MatchStatus => {
-                let response = bounded(
-                    timeout_ms,
-                    client.match_status(MatchStatusReq {
-                        character_id: character_id.into(),
-                    }),
-                )
-                .await?
-                .into_inner();
-                validate_match_status(&response.status)?;
-                metrics.grpc_statuses += 1;
-            }
-            SideServiceOperation::MatchCancel => {
-                let response = bounded(
-                    timeout_ms,
-                    client.match_cancel(MatchCancelReq {
-                        character_id: character_id.into(),
-                        match_id: match_id.clone(),
-                    }),
-                )
-                .await?
-                .into_inner();
-                if !response.ok {
-                    return Err(MatchGrpcError::Business(response.error_code));
+                SideServiceOperation::MatchStatus => {
+                    let response = bounded_pending(
+                        &mut pending,
+                        timeout_ms,
+                        client.match_status(MatchStatusReq {
+                            character_id: character_id.into(),
+                        }),
+                    )
+                    .await?
+                    .into_inner();
+                    validate_match_status(&response.status)?;
+                    metrics.grpc_statuses += 1;
                 }
-                metrics.cancellations += 1;
+                SideServiceOperation::MatchCancel => {
+                    let response = bounded_pending(
+                        &mut pending,
+                        timeout_ms,
+                        client.match_cancel(MatchCancelReq {
+                            character_id: character_id.into(),
+                            match_id: match_id.clone(),
+                        }),
+                    )
+                    .await?
+                    .into_inner();
+                    if !response.ok {
+                        return Err(MatchGrpcError::Business(response.error_code));
+                    }
+                    metrics.cancellations += 1;
+                }
+                _ => return Err(MatchGrpcError::InvalidPlan),
             }
-            _ => return Err(MatchGrpcError::InvalidPlan),
         }
+        Ok(())
     }
-    Ok(metrics)
+    .await;
+    metrics.backpressure = pending.metrics();
+    let backpressure = metrics.backpressure;
+    match execution {
+        Ok(()) => Ok(metrics),
+        Err(source) => Err(MatchGrpcError::ExecutionFailed {
+            source: Box::new(source),
+            backpressure,
+        }),
+    }
 }
 
 /// Runs the bounded, local/test-only MatchInternal lifecycle used to diagnose
@@ -578,6 +730,24 @@ async fn bounded<T>(
         .map_err(|status| MatchGrpcError::Grpc(status.to_string()))
 }
 
+async fn bounded_pending<T>(
+    pending: &mut MatchGrpcPending,
+    timeout_ms: u64,
+    future: impl std::future::Future<Output = Result<T, tonic::Status>>,
+) -> Result<T, MatchGrpcError> {
+    pending.begin()?;
+    match bounded(timeout_ms, future).await {
+        Ok(response) => {
+            pending.complete()?;
+            Ok(response)
+        }
+        Err(error) => {
+            pending.disconnect();
+            Err(error)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -609,6 +779,50 @@ mod tests {
         assert!(matches!(
             result,
             Err(MatchGrpcError::LiveTransportForbidden)
+        ));
+    }
+
+    #[test]
+    fn grpc_pending_contract_bounds_slow_consumers_and_projects_low_cardinality_metrics() {
+        let mut pending = MatchGrpcPending::new(1).unwrap();
+        pending.begin().unwrap();
+        assert!(matches!(
+            pending.begin(),
+            Err(MatchGrpcError::PendingLimit { maximum: 1 })
+        ));
+        pending.disconnect();
+        assert_eq!(pending.pending(), 0);
+        let metrics = pending.metrics();
+        assert_eq!(metrics.pending_limit_rejections, 1);
+        assert_eq!(metrics.dropped_pending_messages, 1);
+        assert_eq!(metrics.stream_disconnects, 1);
+        assert!(!metrics.is_healthy());
+        let mut projected = crate::metrics::Metrics::default();
+        metrics.merge_into_metrics(&mut projected);
+        let snapshot = projected.snapshot();
+        assert_eq!(
+            snapshot.counters["match_grpc_backpressure_pending_limit_rejections"],
+            1
+        );
+        assert_eq!(
+            snapshot.counters["match_grpc_backpressure_dropped_pending_messages"],
+            1
+        );
+        let mut health = crate::abort::ContinuousHealthObservation::healthy();
+        metrics.apply_to_health(&mut health);
+        assert!(!health.backpressure_healthy);
+    }
+
+    #[test]
+    fn grpc_pending_contract_rejects_zero_limit_and_completion_underflow() {
+        assert!(matches!(
+            MatchGrpcPending::new(0),
+            Err(MatchGrpcError::InvalidPendingLimit)
+        ));
+        let mut pending = MatchGrpcPending::new(1).unwrap();
+        assert!(matches!(
+            pending.complete(),
+            Err(MatchGrpcError::PendingUnderflow)
         ));
     }
 

@@ -16,6 +16,11 @@ pub enum AbortReason {
     GeneratorResource,
     BudgetExceeded,
     ProtectionUnknown,
+    ReadinessHealth,
+    DependencyUnavailable,
+    MetricsStale,
+    SampleGap,
+    Backpressure,
     ControllerAbort,
 }
 
@@ -38,6 +43,81 @@ pub struct ThresholdWindow {
     required_consecutive_windows: u32,
     consecutive_windows: u32,
     last_reason: Option<AbortReason>,
+}
+
+/// A single controller-window sample of conditions that cannot safely be
+/// inferred from client latency alone. Adapters supply booleans from their
+/// read-only health, dependency, metrics, and generator checks; an absent or
+/// stale observation is represented as `false` and therefore fails closed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ContinuousHealthObservation {
+    pub readiness_healthy: bool,
+    pub dependencies_available: bool,
+    pub metrics_fresh: bool,
+    pub sample_continuous: bool,
+    pub generator_healthy: bool,
+    pub backpressure_healthy: bool,
+}
+
+impl ContinuousHealthObservation {
+    pub const fn healthy() -> Self {
+        Self {
+            readiness_healthy: true,
+            dependencies_available: true,
+            metrics_fresh: true,
+            sample_continuous: true,
+            generator_healthy: true,
+            backpressure_healthy: true,
+        }
+    }
+
+    fn violation(self) -> Option<AbortReason> {
+        if !self.readiness_healthy {
+            Some(AbortReason::ReadinessHealth)
+        } else if !self.dependencies_available {
+            Some(AbortReason::DependencyUnavailable)
+        } else if !self.metrics_fresh {
+            Some(AbortReason::MetricsStale)
+        } else if !self.sample_continuous {
+            Some(AbortReason::SampleGap)
+        } else if !self.generator_healthy {
+            Some(AbortReason::GeneratorResource)
+        } else if !self.backpressure_healthy {
+            Some(AbortReason::Backpressure)
+        } else {
+            None
+        }
+    }
+}
+
+/// Keeps the continuous health contract on the same `ThresholdWindow` and
+/// `AbortController` used for latency/error thresholds. This avoids multiple
+/// controllers disagreeing about whether the generator may create sessions.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContinuousHealthEvaluator {
+    window: ThresholdWindow,
+}
+
+impl ContinuousHealthEvaluator {
+    pub fn new(required_consecutive_windows: u32) -> Result<Self, String> {
+        Ok(Self {
+            window: ThresholdWindow::new(required_consecutive_windows)?,
+        })
+    }
+
+    pub fn consecutive_windows(&self) -> u32 {
+        self.window.consecutive_windows()
+    }
+
+    pub fn observe(
+        &mut self,
+        controller: &mut AbortController,
+        observation: ContinuousHealthObservation,
+    ) {
+        if let Some(reason) = self.window.observe(observation.violation()) {
+            controller.request(reason);
+        }
+    }
 }
 
 impl ThresholdWindow {
@@ -310,5 +390,53 @@ mod tests {
             window.observe(Some(AbortReason::ConnectionFailureRate)),
             Some(AbortReason::ConnectionFailureRate)
         );
+    }
+
+    #[test]
+    fn continuous_health_uses_one_window_and_aborts_on_sustained_stale_or_backpressure() {
+        let mut controller = AbortController::default();
+        let mut evaluator = ContinuousHealthEvaluator::new(2).unwrap();
+        let mut stale = ContinuousHealthObservation::healthy();
+        stale.metrics_fresh = false;
+        evaluator.observe(&mut controller, stale);
+        assert_eq!(controller.reason(), None);
+        evaluator.observe(&mut controller, stale);
+        assert_eq!(controller.reason(), Some(&AbortReason::MetricsStale));
+
+        let mut controller = AbortController::default();
+        let mut evaluator = ContinuousHealthEvaluator::new(2).unwrap();
+        let mut pressure = ContinuousHealthObservation::healthy();
+        pressure.backpressure_healthy = false;
+        evaluator.observe(&mut controller, pressure);
+        evaluator.observe(&mut controller, ContinuousHealthObservation::healthy());
+        assert_eq!(evaluator.consecutive_windows(), 0);
+        evaluator.observe(&mut controller, pressure);
+        evaluator.observe(&mut controller, pressure);
+        assert_eq!(controller.reason(), Some(&AbortReason::Backpressure));
+    }
+
+    #[test]
+    fn continuous_health_prioritizes_readiness_then_dependencies_and_keeps_first_abort() {
+        let mut evaluator = ContinuousHealthEvaluator::new(1).unwrap();
+        let mut controller = AbortController::default();
+        let observation = ContinuousHealthObservation {
+            readiness_healthy: false,
+            dependencies_available: false,
+            metrics_fresh: false,
+            sample_continuous: false,
+            generator_healthy: false,
+            backpressure_healthy: false,
+        };
+        evaluator.observe(&mut controller, observation);
+        assert_eq!(controller.reason(), Some(&AbortReason::ReadinessHealth));
+        evaluator.observe(
+            &mut controller,
+            ContinuousHealthObservation {
+                readiness_healthy: true,
+                dependencies_available: false,
+                ..ContinuousHealthObservation::healthy()
+            },
+        );
+        assert_eq!(controller.reason(), Some(&AbortReason::ReadinessHealth));
     }
 }

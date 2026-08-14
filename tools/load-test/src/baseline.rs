@@ -64,6 +64,8 @@ struct RunMetadata {
     scenario_hash: String,
     tool_git_commit: String,
     account_batch: String,
+    #[serde(default)]
+    load_phase: Option<String>,
     started_unix_ms: u64,
     ended_unix_ms: u64,
     #[serde(default)]
@@ -90,6 +92,9 @@ pub struct BaselineMetadata {
     pub scenario_hash: String,
     pub tool_git_commit: String,
     pub account_batch: String,
+    /// Load-model identity recorded by newer reports. Old reports omit this
+    /// and deliberately fail the comparison gate.
+    pub load_phase: Option<String>,
     pub started_unix_ms: u64,
     pub ended_unix_ms: u64,
     pub service_versions: Option<BTreeMap<String, String>>,
@@ -110,6 +115,7 @@ impl BaselineSnapshot {
                 scenario_hash: metadata.scenario_hash,
                 tool_git_commit: metadata.tool_git_commit,
                 account_batch: metadata.account_batch,
+                load_phase: metadata.load_phase,
                 started_unix_ms: metadata.started_unix_ms,
                 ended_unix_ms: metadata.ended_unix_ms,
                 service_versions: metadata.service_versions,
@@ -182,6 +188,16 @@ pub fn compare(
         if left != right {
             reasons.push(format!("{label} differs"));
         }
+    }
+    if let (Some(expected), Some(actual)) = (
+        &baseline.metadata.load_phase,
+        &candidate.metadata.load_phase,
+    ) {
+        if expected != actual {
+            reasons.push("load phase differs".into());
+        }
+    } else {
+        reasons.push("load phase observation is incomplete".into());
     }
     if baseline.metadata.status != "completed" || candidate.metadata.status != "completed" {
         reasons.push("both runs must have completed status".into());
@@ -385,6 +401,7 @@ mod tests {
                 scenario_hash: "scenario".into(),
                 tool_git_commit: "commit".into(),
                 account_batch: "batch".into(),
+                load_phase: Some("fixed_concurrency".into()),
                 started_unix_ms: 0,
                 ended_unix_ms: 10_000,
                 service_versions: Some(BTreeMap::from([(
@@ -440,6 +457,33 @@ mod tests {
     }
 
     #[test]
+    fn baseline_compare_fails_closed_for_missing_or_mismatched_load_phase() {
+        let mut baseline = snapshot("base", 100, 100, 0, 100);
+        baseline.metadata.load_phase = None;
+        let candidate = snapshot("candidate", 100, 100, 0, 100);
+        let result = compare(&baseline, &candidate, BaselineThresholds::default()).unwrap();
+        assert!(!result.comparable);
+        assert!(
+            result
+                .reasons
+                .iter()
+                .any(|reason| reason.contains("load phase observation"))
+        );
+
+        let baseline = snapshot("base", 100, 100, 0, 100);
+        let mut candidate = snapshot("candidate", 100, 100, 0, 100);
+        candidate.metadata.load_phase = Some("burst".into());
+        let result = compare(&baseline, &candidate, BaselineThresholds::default()).unwrap();
+        assert!(!result.comparable);
+        assert!(
+            result
+                .reasons
+                .iter()
+                .any(|reason| reason.contains("load phase differs"))
+        );
+    }
+
+    #[test]
     fn report_snapshot_loads_run_and_metrics_files() {
         let root = std::env::temp_dir().join(format!("loadtest-baseline-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
@@ -455,6 +499,7 @@ mod tests {
                 "scenario_hash": snapshot.metadata.scenario_hash,
                 "tool_git_commit": snapshot.metadata.tool_git_commit,
                 "account_batch": snapshot.metadata.account_batch,
+                "load_phase": snapshot.metadata.load_phase,
                 "started_unix_ms": snapshot.metadata.started_unix_ms,
                 "ended_unix_ms": snapshot.metadata.ended_unix_ms,
                 "generator_resources": snapshot.metadata.generator_resources,

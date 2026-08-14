@@ -147,6 +147,13 @@ impl RuntimeProtection for DryRunProtection<'_> {
     }
 
     fn verify_environment_identity(&self) -> Result<(), String> {
+        let now_unix_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        self.config
+            .validate_remote_test_window_at(now_unix_ms)
+            .map_err(|error| error.to_string())?;
         if self.config.environment.name.trim().is_empty() {
             Err("environment identity is empty".into())
         } else {
@@ -175,6 +182,10 @@ mod tests {
                 approval_reference: None,
                 allowed_hosts: BTreeSet::new(),
                 allowed_ips: BTreeSet::new(),
+                test_window: None,
+                observers: BTreeSet::new(),
+                stop_responsible_party: None,
+                manual_confirmation_reference: None,
             },
             targets: PlayerTargets {
                 auth_http: "http://127.0.0.1:3000".into(),
@@ -213,6 +224,7 @@ mod tests {
             graceful_shutdown_ms: 1,
             account_prepare: AccountPrepareConfig::default(),
             calibration: Default::default(),
+            unsafe_operations: Vec::new(),
         }
     }
 

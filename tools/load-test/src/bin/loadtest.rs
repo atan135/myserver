@@ -1,24 +1,29 @@
+use std::cell::RefCell;
 use std::env;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use loadtest_core::SCHEMA_VERSION;
 use loadtest_core::abort::{
-    AbortController, AbortReason, GracefulShutdown, ShutdownPhase, install_ctrl_c_flag,
+    AbortController, AbortReason, ContinuousHealthEvaluator, ContinuousHealthObservation,
+    GracefulShutdown, ShutdownPhase, install_ctrl_c_flag,
 };
 use loadtest_core::accounts::{
-    AccountLeasePool, EnvironmentSecretProvider, SecretProvider, read_manifest,
+    AccountLease, AccountLeasePool, EnvironmentSecretProvider, SecretProvider, auth_login_name,
+    read_manifest,
 };
 use loadtest_core::auth_budget::{
     LIVE_GAMEPLAY_POTENTIAL_WRITES_PER_MESSAGE, estimate_auth_run, validate_auth_run_budget,
     validate_game_run_budget_for_scenario, validate_staged_auth_windows,
 };
 use loadtest_core::auth_http::{
-    AuthAdmissionError, AuthDispatchAdmission, AuthRunMetrics, FakeAuthHttpService,
-    FakeAuthOutcome, ReqwestAuthHttpTransport, execute_auth_operations, execute_deferred_logout,
-    split_game_auth_operations,
+    AuthAdmissionError, AuthDispatchAdmission, AuthHttpRequest, AuthHttpTransport,
+    AuthResponseBody, AuthRunMetrics, FakeAuthHttpService, FakeAuthOutcome,
+    ReqwestAuthHttpTransport, execute_auth_operations, execute_deferred_logout,
+    send_with_bounded_retry, split_game_auth_operations,
 };
 use loadtest_core::calibration::{
     CalibrationRun, bounded_calibration_duration_ms, bounded_calibration_operations,
@@ -26,23 +31,27 @@ use loadtest_core::calibration::{
 };
 use loadtest_core::chat_wss::execute_live_chat_steps;
 use loadtest_core::config::{
-    BudgetOverride, EnvironmentKind, LiveGameplayCoordination, LoadModel, LoadTestConfig,
-    RunAccess, load_config, load_private_config,
+    AuthOperation, BudgetOverride, EnvironmentKind, LiveGameplayCoordination, LoadModel,
+    LoadTestConfig, RunAccess, load_config, load_private_config,
 };
 use loadtest_core::contracts::{RunPlan, single_process_assignment};
-use loadtest_core::game_kcp::{GameProxyEndpoint, ReconnectPolicy};
+use loadtest_core::game_kcp::{GameProxyEndpoint, KcpBackpressureMetrics, ReconnectPolicy};
 use loadtest_core::game_live::{
-    GameExecutionGate, GameLiveError, GameRunnerCheckpoint, GameSessionRunner, LiveKcpTransport,
+    GameExecutionGate, GameLiveError, GameRunnerCheckpoint, GameSessionRunner, LiveKcpConnection,
+    LiveKcpTransport,
 };
 use loadtest_core::lifecycle::{Lifecycle, RunState};
 use loadtest_core::match_grpc::{
-    MatchInternalAdmission, execute_live_match_internal_steps, execute_live_match_steps,
+    MatchGrpcBackpressureMetrics, MatchInternalAdmission, execute_live_match_internal_steps,
+    execute_live_match_steps,
 };
 use loadtest_core::metrics::Metrics;
 use loadtest_core::preflight::summarize_run;
 use loadtest_core::protection::{DryRunProtection, revalidate_or_abort};
 use loadtest_core::reconnect_burst::{
-    ReconnectBurstSpec, ReconnectBurstStep, plan_reconnect_burst,
+    ReconnectBurstAction, ReconnectBurstAdmission, ReconnectBurstExecutionGate,
+    ReconnectBurstExecutor, ReconnectBurstSpec, ReconnectBurstStep, execute_reconnect_burst,
+    plan_reconnect_burst,
 };
 use loadtest_core::report::{ErrorBuffer, ReportInput, write_report};
 use loadtest_core::resource::ResourceSampler;
@@ -50,6 +59,8 @@ use loadtest_core::scheduler::MonotonicScheduler;
 use loadtest_core::side_http::{SideHttpAdmission, execute_live_mail_announce_steps};
 use loadtest_core::side_services::SideServiceKind;
 use loadtest_core::side_services::execute_side_services_dry;
+use loadtest_core::virtual_player::{VirtualPlayerEvent, VirtualPlayerSession};
+use prost::Message;
 
 static NEXT_MATCH_INTERNAL_DIAGNOSTIC_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -163,6 +174,8 @@ fn run_dry(cli: &Cli) -> Result<(), String> {
     abort.check_deadline(unix_ms(), deadline_unix_ms);
     let protection = DryRunProtection::new(&config);
     let mut protection_error = revalidate_or_abort(&protection, &mut abort);
+    let mut health_evaluator = ContinuousHealthEvaluator::new(2)
+        .map_err(|error| format!("continuous health evaluator rejected: {error}"))?;
 
     let mut scheduler = MonotonicScheduler::new(
         &config.scenario.load,
@@ -186,10 +199,30 @@ fn run_dry(cli: &Cli) -> Result<(), String> {
     );
     metrics.increment("scheduler_queue_depth", tick.queue_depth);
     metrics.increment("metrics_dropped", tick.dropped);
+    observe_controller_health(
+        &mut health_evaluator,
+        &mut abort,
+        protection_error.is_none(),
+        tick.dropped,
+        tick.dropped,
+        tick.queue_depth,
+        budget.max_virtual_players as u64,
+        None,
+    );
     if !abort.should_stop_new_sessions() {
         if let Some(error) = revalidate_or_abort(&protection, &mut abort) {
             protection_error = Some(error);
         }
+        observe_controller_health(
+            &mut health_evaluator,
+            &mut abort,
+            protection_error.is_none(),
+            tick.dropped,
+            tick.dropped,
+            tick.queue_depth,
+            budget.max_virtual_players as u64,
+            None,
+        );
     }
     let auth_metrics = if !abort.should_stop_new_sessions() {
         dry_run_auth_metrics(&config, &protection, &mut abort)?
@@ -217,6 +250,10 @@ fn run_dry(cli: &Cli) -> Result<(), String> {
             )
             .map_err(|error| error.to_string())?;
             metrics.increment("reconnect_burst_login_actions", plan.login_actions);
+            metrics.increment(
+                "reconnect_burst_forced_disconnects",
+                plan.forced_disconnects,
+            );
             metrics.increment("reconnect_burst_new_connections", plan.new_connections);
             metrics.increment(
                 "reconnect_burst_room_recoveries",
@@ -291,6 +328,7 @@ fn run_dry(cli: &Cli) -> Result<(), String> {
             errors: &errors,
             auth_metrics: auth_metrics.as_ref(),
             calibration: None,
+            service_versions: None,
         },
     )
     .map_err(|error| error.to_string())?;
@@ -410,6 +448,7 @@ fn calibrate_dry(cli: &Cli) -> Result<(), String> {
             errors: &errors,
             auth_metrics: None,
             calibration: Some(&calibration),
+            service_versions: None,
         },
     )
     .map_err(|error| error.to_string())?;
@@ -477,6 +516,79 @@ fn record_auth_metrics(metrics: &mut Metrics, auth: &AuthRunMetrics) {
     if auth.latency_ms.count() > 0 {
         metrics.merge_latency("auth_operation_ms", &auth.latency_ms);
     }
+}
+
+/// Accumulates only the fixed-cardinality KCP/gRPC pressure state needed by
+/// the controller. Individual transport sessions can end before the next
+/// controller checkpoint, so a failed observation remains visible for the
+/// rest of the run rather than being replaced by a later empty snapshot.
+#[derive(Debug, Default)]
+struct LiveBackpressureSignals {
+    kcp: KcpBackpressureMetrics,
+    match_grpc: MatchGrpcBackpressureMetrics,
+}
+
+impl LiveBackpressureSignals {
+    fn record_kcp(&mut self, observed: KcpBackpressureMetrics) {
+        self.kcp.pending_limit_rejections = self
+            .kcp
+            .pending_limit_rejections
+            .max(observed.pending_limit_rejections);
+        self.kcp.dropped_pending_requests = self
+            .kcp
+            .dropped_pending_requests
+            .max(observed.dropped_pending_requests);
+        self.kcp.disconnects = self.kcp.disconnects.max(observed.disconnects);
+    }
+
+    fn record_match_grpc(&mut self, observed: MatchGrpcBackpressureMetrics) {
+        self.match_grpc.pending_limit_rejections = self
+            .match_grpc
+            .pending_limit_rejections
+            .max(observed.pending_limit_rejections);
+        self.match_grpc.dropped_pending_messages = self
+            .match_grpc
+            .dropped_pending_messages
+            .max(observed.dropped_pending_messages);
+        self.match_grpc.stream_disconnects = self
+            .match_grpc
+            .stream_disconnects
+            .max(observed.stream_disconnects);
+    }
+
+    fn apply_to_health(&self, health: &mut ContinuousHealthObservation) {
+        self.kcp.apply_to_health(health);
+        self.match_grpc.apply_to_health(health);
+    }
+}
+
+/// Applies the continuous controller health contract on each scheduler tick
+/// and at live transport completion/checkpoint boundaries. The transport
+/// protection result covers readiness and dependencies until a service-specific
+/// read-only observer is available; scheduler and actual KCP/gRPC pressure
+/// observations provide generator/consumer signals.
+fn observe_controller_health(
+    evaluator: &mut ContinuousHealthEvaluator,
+    abort: &mut AbortController,
+    protection_healthy: bool,
+    metrics_dropped: u64,
+    scheduler_dropped: u64,
+    scheduler_queue_depth: u64,
+    max_scheduler_queue_depth: u64,
+    live_backpressure: Option<&LiveBackpressureSignals>,
+) {
+    let mut observation = ContinuousHealthObservation {
+        readiness_healthy: protection_healthy,
+        dependencies_available: protection_healthy,
+        metrics_fresh: metrics_dropped == 0,
+        sample_continuous: scheduler_dropped == 0,
+        generator_healthy: scheduler_queue_depth <= max_scheduler_queue_depth,
+        backpressure_healthy: scheduler_queue_depth <= max_scheduler_queue_depth,
+    };
+    if let Some(signals) = live_backpressure {
+        signals.apply_to_health(&mut observation);
+    }
+    evaluator.observe(abort, observation);
 }
 
 /// Every scheduled action has already performed some auth work before it can
@@ -867,7 +979,8 @@ fn run_live(cli: &Cli) -> Result<(), String> {
         .auth
         .as_ref()
         .ok_or("--execute-auth requires scenario.auth operations")?;
-    if game_mode {
+    let reconnect_burst_mode = config.scenario.reconnect_burst.is_some();
+    if game_mode && !reconnect_burst_mode {
         validate_live_game_load_model(
             &config.scenario.load,
             config
@@ -883,10 +996,13 @@ fn run_live(cli: &Cli) -> Result<(), String> {
     let budget = config
         .effective_budget(&cli.budget_override)
         .map_err(|error| error.to_string())?;
+    if reconnect_burst_mode {
+        validate_live_reconnect_burst_gate(cli, &config, &budget)?;
+    }
     let auth_budget_estimate = estimate_auth_run(&config.scenario, &budget)?;
     validate_staged_auth_windows(&config.scenario, &budget)?;
     validate_auth_run_budget(&auth_budget_estimate, &budget)?;
-    if game_mode {
+    if game_mode && !reconnect_burst_mode {
         validate_game_run_budget_for_scenario(&auth_budget_estimate, &config.scenario, &budget)?;
     }
     let manifest_path = cli
@@ -924,7 +1040,8 @@ fn run_live(cli: &Cli) -> Result<(), String> {
             },
         )
     };
-    let two_player_default_match = game_mode
+    let two_player_default_match = !reconnect_burst_mode
+        && game_mode
         && config
             .scenario
             .live_gameplay
@@ -984,7 +1101,13 @@ fn run_live(cli: &Cli) -> Result<(), String> {
         .ready_accounts()
         .map(|entry| entry.logical_account_id.clone())
         .collect::<Vec<_>>();
-    let requested_players = auth_budget_estimate.virtual_player_slots;
+    let requested_players = config
+        .scenario
+        .reconnect_burst
+        .as_ref()
+        .map_or(auth_budget_estimate.virtual_player_slots, |reconnect| {
+            reconnect.virtual_players
+        });
     let mut account_pool = AccountLeasePool::default();
     let leases = account_pool.assign_players(
         &account_ids,
@@ -1043,16 +1166,134 @@ fn run_live(cli: &Cli) -> Result<(), String> {
     let mut dispatch_admission = AuthDispatchAdmission::new(&budget)?;
     let mut errors = ErrorBuffer::default();
     let mut abort = AbortController::default();
+    let mut health_evaluator = ContinuousHealthEvaluator::new(2)
+        .map_err(|error| format!("continuous health evaluator rejected: {error}"))?;
+    let live_backpressure = Rc::new(RefCell::new(LiveBackpressureSignals::default()));
     let mut failed = false;
 
-    while !scheduler.exhausted() && !abort.should_stop_new_sessions() {
+    if let Some(reconnect) = config.scenario.reconnect_burst.as_ref() {
+        let plan = plan_reconnect_burst(
+            ReconnectBurstSpec {
+                virtual_players: reconnect.virtual_players,
+                reconnect_attempts_per_player: reconnect.reconnect_attempts_per_player,
+                start_ms: 0,
+            },
+            &budget,
+            reconnect.reconnect_policy.into(),
+        )
+        .map_err(|error| format!("live reconnect burst plan rejected: {error}"))?;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_io()
+            .enable_time()
+            .build()
+            .map_err(|_| "could not create guarded reconnect KCP runtime")?;
+        let mut adapter = LiveReconnectBurstAdapter::new(
+            &mut transport,
+            &config,
+            RunAccess {
+                allow_remote: cli.allow_remote,
+                confirmation: cli.confirmation.as_deref(),
+            },
+            endpoint
+                .as_ref()
+                .expect("reconnect gate requires game execution endpoint"),
+            &mut account_pool,
+            &leases,
+            &secret_provider,
+            reconnect.reconnect_policy.into(),
+            monotonic_deadline,
+            runtime,
+            Rc::clone(&live_backpressure),
+        );
+        let execution = execute_reconnect_burst(
+            &plan,
+            &budget,
+            ReconnectBurstExecutionGate {
+                execute_game: cli.execute_game,
+                confirm_game: cli.confirm_game.as_deref(),
+                environment_name: &config.environment.name,
+                environment_kind: config.environment.kind,
+            },
+            &mut dispatch_admission,
+            monotonic_deadline,
+            &mut abort,
+            |controller| {
+                controller.check_ctrl_c(&ctrl_c);
+                controller.check_stop_file(config.stop_file.as_deref().map(Path::new));
+                controller.check_deadline(unix_ms(), deadline_unix_ms);
+                let protection_healthy = revalidate_or_abort(&protection, controller).is_none();
+                observe_controller_health(
+                    &mut health_evaluator,
+                    controller,
+                    protection_healthy,
+                    0,
+                    0,
+                    0,
+                    budget.max_virtual_players as u64,
+                    Some(&live_backpressure.borrow()),
+                );
+                if controller.should_stop_new_sessions() {
+                    return Err("reconnect burst checkpoint stopped".into());
+                }
+                Ok(())
+            },
+            &mut adapter,
+        );
+        let reconnect_auth_metrics = adapter.finish();
+        auth_metrics.merge(&reconnect_auth_metrics);
+        match execution {
+            Ok(execution) => {
+                core_metrics.increment(
+                    "reconnect_burst_forced_disconnects",
+                    execution.forced_disconnects,
+                );
+                core_metrics.increment("reconnect_burst_login_actions", execution.login_actions);
+                core_metrics.increment(
+                    "reconnect_burst_new_connections",
+                    execution.proxy_connections,
+                );
+                core_metrics
+                    .increment("reconnect_burst_room_recoveries", execution.room_recoveries);
+            }
+            Err(error) => {
+                errors.push(
+                    "reconnect_burst_execution_failed",
+                    "live reconnect burst did not complete",
+                    Default::default(),
+                );
+                failed = true;
+                match error {
+                    loadtest_core::reconnect_burst::ReconnectBurstExecutionError::Admission(
+                        AuthAdmissionError::BudgetExceeded(_),
+                    ) => abort.request(AbortReason::BudgetExceeded),
+                    loadtest_core::reconnect_burst::ReconnectBurstExecutionError::Admission(
+                        AuthAdmissionError::DeadlineExceeded,
+                    ) => abort.request(AbortReason::Deadline),
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    while !reconnect_burst_mode && !scheduler.exhausted() && !abort.should_stop_new_sessions() {
         abort.check_ctrl_c(&ctrl_c);
         abort.check_stop_file(config.stop_file.as_deref().map(Path::new));
         abort.check_deadline(unix_ms(), deadline_unix_ms);
         if abort.should_stop_new_sessions() {
             break;
         }
-        if let Some(_) = revalidate_or_abort(&protection, &mut abort) {
+        let protection_healthy = revalidate_or_abort(&protection, &mut abort).is_none();
+        observe_controller_health(
+            &mut health_evaluator,
+            &mut abort,
+            protection_healthy,
+            0,
+            0,
+            0,
+            budget.max_virtual_players as u64,
+            Some(&live_backpressure.borrow()),
+        );
+        if abort.should_stop_new_sessions() {
             break;
         }
         let elapsed_ms = monotonic_started.elapsed().as_millis() as u64;
@@ -1066,6 +1307,19 @@ fn run_live(cli: &Cli) -> Result<(), String> {
         );
         core_metrics.increment("scheduler_queue_depth", tick.queue_depth);
         core_metrics.increment("metrics_dropped", tick.dropped);
+        observe_controller_health(
+            &mut health_evaluator,
+            &mut abort,
+            true,
+            tick.dropped,
+            tick.dropped,
+            tick.queue_depth,
+            budget.max_virtual_players as u64,
+            Some(&live_backpressure.borrow()),
+        );
+        if abort.should_stop_new_sessions() {
+            break;
+        }
 
         for (index, action) in tick.actions.iter().enumerate() {
             if abort.should_stop_new_sessions() {
@@ -1312,11 +1566,32 @@ fn run_live(cli: &Cli) -> Result<(), String> {
                                 player.terminal_state
                                     == loadtest_core::virtual_player::VirtualPlayerSessionState::Closed
                             }) => {
+                                {
+                                    let mut signals = live_backpressure.borrow_mut();
+                                    for player in &result.players {
+                                        signals.record_kcp(player.backpressure);
+                                    }
+                                }
                                 for player in result.players {
                                     if let Some(metrics) = player.gameplay_metrics.as_ref() {
                                         core_metrics.merge_snapshot(metrics);
                                     }
                                     completed_game_sessions += 1;
+                                }
+                                let protection_healthy =
+                                    revalidate_or_abort(&protection, &mut abort).is_none();
+                                observe_controller_health(
+                                    &mut health_evaluator,
+                                    &mut abort,
+                                    protection_healthy,
+                                    0,
+                                    0,
+                                    0,
+                                    budget.max_virtual_players as u64,
+                                    Some(&live_backpressure.borrow()),
+                                );
+                                if abort.should_stop_new_sessions() {
+                                    failed = true;
                                 }
                             }
                             Ok(_) => {
@@ -1639,10 +1914,28 @@ fn run_live(cli: &Cli) -> Result<(), String> {
                                 if result.terminal_state
                                     == loadtest_core::virtual_player::VirtualPlayerSessionState::Closed =>
                             {
+                                live_backpressure
+                                    .borrow_mut()
+                                    .record_kcp(result.backpressure);
                                 if let Some(gameplay_metrics) = result.gameplay_metrics.as_ref() {
                                     core_metrics.merge_snapshot(gameplay_metrics);
                                 }
                                 completed_game_session = true;
+                                let protection_healthy =
+                                    revalidate_or_abort(&protection, &mut abort).is_none();
+                                observe_controller_health(
+                                    &mut health_evaluator,
+                                    &mut abort,
+                                    protection_healthy,
+                                    0,
+                                    0,
+                                    0,
+                                    budget.max_virtual_players as u64,
+                                    Some(&live_backpressure.borrow()),
+                                );
+                                if abort.should_stop_new_sessions() {
+                                    execution_failed = true;
+                                }
                             }
                             Ok(_) => {
                                 errors.push(
@@ -1921,8 +2214,45 @@ fn run_live(cli: &Cli) -> Result<(), String> {
                         })
                     },
                 )) {
-                    Ok(match_metrics) => match_metrics.merge_into_metrics(&mut core_metrics),
+                    Ok(match_metrics) => {
+                        live_backpressure
+                            .borrow_mut()
+                            .record_match_grpc(match_metrics.backpressure);
+                        match_metrics.merge_into_metrics(&mut core_metrics);
+                        let protection_healthy =
+                            revalidate_or_abort(&protection, &mut abort).is_none();
+                        observe_controller_health(
+                            &mut health_evaluator,
+                            &mut abort,
+                            protection_healthy,
+                            0,
+                            0,
+                            0,
+                            budget.max_virtual_players as u64,
+                            Some(&live_backpressure.borrow()),
+                        );
+                        if abort.should_stop_new_sessions() {
+                            execution_failed = true;
+                        }
+                    }
                     Err(error) => {
+                        if let Some(backpressure) = error.backpressure_metrics() {
+                            live_backpressure
+                                .borrow_mut()
+                                .record_match_grpc(backpressure);
+                            let protection_healthy =
+                                revalidate_or_abort(&protection, &mut abort).is_none();
+                            observe_controller_health(
+                                &mut health_evaluator,
+                                &mut abort,
+                                protection_healthy,
+                                0,
+                                0,
+                                0,
+                                budget.max_virtual_players as u64,
+                                Some(&live_backpressure.borrow()),
+                            );
+                        }
                         errors.push(
                             "match_grpc_execution_failed",
                             format!("match gRPC execution failed: {error:?}"),
@@ -2212,6 +2542,7 @@ fn run_live(cli: &Cli) -> Result<(), String> {
             errors: &errors,
             auth_metrics: Some(&auth_metrics),
             calibration: None,
+            service_versions: None,
         },
     )
     .map_err(|error| error.to_string())?;
@@ -2234,6 +2565,436 @@ fn validate_live_auth_load_model(model: &LoadModel) -> Result<(), String> {
             "live auth does not support fixed_concurrency: the synchronous executor cannot maintain declared concurrent flows; use arrival_rate, staged, or burst"
                 .into(),
         ),
+    }
+}
+
+/// Real action adapter used only by the guarded reconnect-burst CLI path.
+/// Opaque credentials remain in this short-lived object and never enter the
+/// plan, metric labels, error buffer, or report.
+struct LiveReconnectBurstAdapter<'a> {
+    auth_transport: &'a mut ReqwestAuthHttpTransport,
+    config: &'a LoadTestConfig,
+    access: RunAccess<'a>,
+    endpoint: &'a GameProxyEndpoint,
+    account_pool: &'a mut AccountLeasePool,
+    leases: &'a [AccountLease],
+    secret_provider: &'a EnvironmentSecretProvider<'a>,
+    reconnect_policy: ReconnectPolicy,
+    deadline: Instant,
+    started: Instant,
+    runtime: tokio::runtime::Runtime,
+    players: Vec<LiveReconnectBurstPlayer>,
+    auth_metrics: AuthRunMetrics,
+    live_backpressure: Rc<RefCell<LiveBackpressureSignals>>,
+}
+
+struct LiveReconnectBurstPlayer {
+    access_token: Option<String>,
+    character_id: Option<String>,
+    ticket: Option<String>,
+    transport: Option<LiveKcpTransport>,
+    session: Option<VirtualPlayerSession>,
+}
+
+impl<'a> LiveReconnectBurstAdapter<'a> {
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        auth_transport: &'a mut ReqwestAuthHttpTransport,
+        config: &'a LoadTestConfig,
+        access: RunAccess<'a>,
+        endpoint: &'a GameProxyEndpoint,
+        account_pool: &'a mut AccountLeasePool,
+        leases: &'a [AccountLease],
+        secret_provider: &'a EnvironmentSecretProvider<'a>,
+        reconnect_policy: ReconnectPolicy,
+        deadline: Instant,
+        runtime: tokio::runtime::Runtime,
+        live_backpressure: Rc<RefCell<LiveBackpressureSignals>>,
+    ) -> Self {
+        Self {
+            auth_transport,
+            config,
+            access,
+            endpoint,
+            account_pool,
+            leases,
+            secret_provider,
+            reconnect_policy,
+            deadline,
+            started: Instant::now(),
+            runtime,
+            players: (0..leases.len())
+                .map(|_| LiveReconnectBurstPlayer {
+                    access_token: None,
+                    character_id: None,
+                    ticket: None,
+                    transport: None,
+                    session: None,
+                })
+                .collect(),
+            auth_metrics: AuthRunMetrics::default(),
+            live_backpressure,
+        }
+    }
+
+    fn finish(mut self) -> AuthRunMetrics {
+        for player in &mut self.players {
+            if let Some(transport) = player.transport.as_mut() {
+                transport.close();
+            }
+            if let Some(session) = player.session.as_mut() {
+                session.close(self.account_pool);
+            }
+        }
+        self.auth_metrics
+    }
+
+    fn player_index(&self, player_slot: u32) -> Result<usize, String> {
+        let player_index = usize::try_from(player_slot)
+            .map_err(|_| "reconnect burst player slot is out of range")?;
+        (player_index < self.players.len())
+            .then_some(player_index)
+            .ok_or_else(|| "reconnect burst player slot is not leased".into())
+    }
+
+    fn record_player_backpressure(&self, player_index: usize) {
+        if let Some(session) = self
+            .players
+            .get(player_index)
+            .and_then(|player| player.session.as_ref())
+        {
+            self.live_backpressure
+                .borrow_mut()
+                .record_kcp(session.backpressure_metrics());
+        }
+    }
+
+    fn wait_for_action(
+        &self,
+        action: ReconnectBurstAction,
+        admission: &mut ReconnectBurstAdmission<'_>,
+    ) -> Result<(), String> {
+        let scheduled = self.started + Duration::from_millis(action.at_ms);
+        loop {
+            admission.revalidate().map_err(|error| error.to_string())?;
+            if admission.should_stop() {
+                return Err("reconnect burst stopped while waiting for scheduled action".into());
+            }
+            let now = Instant::now();
+            if now >= scheduled {
+                return Ok(());
+            }
+            if now >= self.deadline {
+                return Err("reconnect burst action deadline elapsed".into());
+            }
+            std::thread::sleep((scheduled - now).min(Duration::from_millis(25)));
+        }
+    }
+
+    fn send_auth(
+        &mut self,
+        request: AuthHttpRequest,
+        admission: &ReconnectBurstAdmission<'_>,
+    ) -> Result<loadtest_core::auth_http::AuthSuccess, String> {
+        self.auth_transport
+            .set_attempt_timeout(admission.remaining().map_err(|error| error.to_string())?);
+        let mut metrics = AuthRunMetrics::default();
+        let response = send_with_bounded_retry(self.auth_transport, request, 0, &mut metrics);
+        self.auth_metrics.merge(&metrics);
+        match response.body {
+            AuthResponseBody::Success(success)
+                if response.status.is_some_and(|status| status < 400) =>
+            {
+                Ok(success)
+            }
+            _ => Err("reconnect burst auth request did not succeed".into()),
+        }
+    }
+
+    fn login(
+        &mut self,
+        player_index: usize,
+        admission: &mut ReconnectBurstAdmission<'_>,
+    ) -> Result<(), String> {
+        let lease = self
+            .leases
+            .get(player_index)
+            .ok_or("reconnect burst player has no account lease")?;
+        let login_name = auth_login_name(&lease.logical_account_id)?;
+        let password = self
+            .secret_provider
+            .password_for(&lease.logical_account_id)?;
+        let success = self.send_auth(
+            AuthHttpRequest::Login {
+                login_name,
+                password,
+            },
+            admission,
+        )?;
+        let access_token = success
+            .access_token
+            .ok_or("reconnect burst login did not return an access token")?;
+
+        // The primary Login action admission was consumed by the executor.
+        // Character discovery is a distinct public HTTP request and therefore
+        // reserves its own shared hard-budget slot before dispatch.
+        admission
+            .admit_auth_operation(AuthOperation::ListCharacters)
+            .map_err(|error| error.to_string())?;
+        let listed = self.send_auth(
+            AuthHttpRequest::ListCharacters {
+                access_token: access_token.clone(),
+            },
+            admission,
+        )?;
+        let character_id = listed
+            .character_id
+            .ok_or("reconnect burst account has no prepared character")?;
+        let player = self
+            .players
+            .get_mut(player_index)
+            .ok_or("reconnect burst player state is unavailable")?;
+        player.access_token = Some(access_token);
+        player.character_id = Some(character_id);
+        Ok(())
+    }
+
+    fn issue_ticket(
+        &mut self,
+        player_index: usize,
+        admission: &ReconnectBurstAdmission<'_>,
+    ) -> Result<(), String> {
+        let player = self
+            .players
+            .get(player_index)
+            .ok_or("reconnect burst player state is unavailable")?;
+        let access_token = player
+            .access_token
+            .clone()
+            .ok_or("reconnect burst ticket action requires a successful login")?;
+        let character_id = player
+            .character_id
+            .clone()
+            .ok_or("reconnect burst ticket action requires a prepared character")?;
+        let success = self.send_auth(
+            AuthHttpRequest::IssueTicket {
+                access_token,
+                character_id,
+            },
+            admission,
+        )?;
+        let ticket = success
+            .ticket
+            .ok_or("reconnect burst ticket action did not return a ticket")?;
+        self.players[player_index].ticket = Some(ticket);
+        Ok(())
+    }
+
+    fn connect_proxy(&mut self, player_index: usize) -> Result<(), String> {
+        if self.players[player_index].transport.is_some() {
+            return Err("reconnect burst KCP transport is already connected".into());
+        }
+        let mut transport = LiveKcpTransport::new(self.deadline, 1024 * 1024)
+            .map_err(|_| "reconnect burst KCP transport setup failed")?;
+        self.runtime
+            .block_on(transport.connect(self.config, self.access, self.endpoint))
+            .map_err(|_| "reconnect burst KCP connect failed")?;
+        self.players[player_index].transport = Some(transport);
+        Ok(())
+    }
+
+    fn authenticate_proxy(&mut self, player_index: usize) -> Result<(), String> {
+        let lease = self
+            .leases
+            .get(player_index)
+            .cloned()
+            .ok_or("reconnect burst player has no account lease")?;
+        let ticket = self.players[player_index]
+            .ticket
+            .as_deref()
+            .ok_or("reconnect burst KCP auth requires an issued ticket")?
+            .to_string();
+        let mut session = self.players[player_index]
+            .session
+            .take()
+            .unwrap_or_else(|| {
+                VirtualPlayerSession::new(lease, 1024 * 1024, self.reconnect_policy)
+                    .expect("reconnect policy was validated before adapter creation")
+            });
+        if session.state()
+            == loadtest_core::virtual_player::VirtualPlayerSessionState::AccountLeased
+        {
+            session
+                .mark_logged_in(self.account_pool)
+                .map_err(|_| "reconnect burst virtual-player login transition failed")?;
+            session
+                .mark_character_selected(self.account_pool)
+                .map_err(|_| "reconnect burst virtual-player character transition failed")?;
+            session
+                .mark_ticket_issued(self.account_pool)
+                .map_err(|_| "reconnect burst virtual-player ticket transition failed")?;
+        }
+        let auth = session
+            .connect_and_begin_auth(self.account_pool, LiveKcpConnection, &ticket)
+            .map_err(|_| "reconnect burst KCP auth lifecycle setup failed")?;
+        let transport = self.players[player_index]
+            .transport
+            .as_mut()
+            .ok_or("reconnect burst KCP auth requires a connected transport")?;
+        self.runtime
+            .block_on(transport.send(&auth))
+            .map_err(|_| "reconnect burst KCP auth write failed")?;
+        let response = self
+            .runtime
+            .block_on(transport.receive())
+            .map_err(|_| "reconnect burst KCP auth response failed")?;
+        match session
+            .handle_packet(self.account_pool, response)
+            .map_err(|_| "reconnect burst KCP auth lifecycle response failed")?
+        {
+            VirtualPlayerEvent::GameAuthenticated => {
+                session
+                    .activate(self.account_pool)
+                    .map_err(|_| "reconnect burst KCP activation failed")?;
+            }
+            _ => return Err("reconnect burst KCP authentication was rejected".into()),
+        }
+        self.players[player_index].session = Some(session);
+        Ok(())
+    }
+
+    fn recover_room(&mut self, player_index: usize, reconnect_attempt: u32) -> Result<(), String> {
+        let gameplay = self
+            .config
+            .scenario
+            .live_gameplay
+            .as_ref()
+            .expect("reconnect live gate requires an approved single-player room");
+        let (request_type, expected_response, body) = if reconnect_attempt == 0 {
+            (
+                game_protocol::MessageType::RoomJoinReq,
+                game_protocol::MessageType::RoomJoinRes,
+                game_protocol::encode_body(&loadtest_core::pb::RoomJoinReq {
+                    room_id: gameplay.room_id.clone(),
+                    policy_id: gameplay.policy_id.clone(),
+                }),
+            )
+        } else {
+            let cursor = gameplay
+                .reconnect
+                .expect("reconnect live gate requires an explicit reconnect cursor")
+                .last_character_push_sequence;
+            (
+                game_protocol::MessageType::RoomReconnectReq,
+                game_protocol::MessageType::RoomReconnectRes,
+                game_protocol::encode_body(&loadtest_core::pb::RoomReconnectReq {
+                    last_character_push_sequence: cursor,
+                }),
+            )
+        };
+        let player = self
+            .players
+            .get_mut(player_index)
+            .ok_or("reconnect burst player state is unavailable")?;
+        let (session, transport) = match (&mut player.session, &mut player.transport) {
+            (Some(session), Some(transport)) => (session, transport),
+            (None, _) => {
+                return Err(
+                    "reconnect burst room recovery requires an authenticated player".into(),
+                );
+            }
+            (_, None) => {
+                return Err("reconnect burst room recovery requires a connected transport".into());
+            }
+        };
+        let request = session
+            .begin_gameplay_request(self.account_pool, request_type, expected_response, &body)
+            .map_err(|_| "reconnect burst room recovery lifecycle setup failed")?;
+        self.runtime
+            .block_on(transport.send(&request))
+            .map_err(|_| "reconnect burst room recovery write failed")?;
+        let response = self
+            .runtime
+            .block_on(transport.receive())
+            .map_err(|_| "reconnect burst room recovery response failed")?;
+        if response.message_type() != Some(expected_response) {
+            return Err("reconnect burst room recovery returned an unexpected packet".into());
+        }
+        let (ok, room_id) = match reconnect_attempt {
+            0 => {
+                let response = loadtest_core::pb::RoomJoinRes::decode(response.body.as_slice())
+                    .map_err(|_| "reconnect burst room join returned an invalid body")?;
+                (response.ok, response.room_id)
+            }
+            _ => {
+                let response =
+                    loadtest_core::pb::RoomReconnectRes::decode(response.body.as_slice())
+                        .map_err(|_| "reconnect burst room recovery returned an invalid body")?;
+                (response.ok, response.room_id)
+            }
+        };
+        if !ok || room_id != gameplay.room_id {
+            return Err("reconnect burst room recovery left the approved room boundary".into());
+        }
+        match session
+            .handle_packet(self.account_pool, response)
+            .map_err(|_| "reconnect burst room recovery lifecycle response failed")?
+        {
+            VirtualPlayerEvent::Response { message_type, .. }
+                if message_type == expected_response =>
+            {
+                Ok(())
+            }
+            _ => Err("reconnect burst room recovery lifecycle did not complete".into()),
+        }
+    }
+
+    fn force_disconnect(&mut self, player_index: usize, attempt: u32) -> Result<(), String> {
+        let transport = self.players[player_index]
+            .transport
+            .as_mut()
+            .ok_or("reconnect burst forced disconnect requires an active transport")?;
+        transport.close();
+        self.players[player_index].transport = None;
+        let session = self.players[player_index]
+            .session
+            .as_mut()
+            .ok_or("reconnect burst forced disconnect requires an active player")?;
+        match session
+            .handle_disconnect(self.account_pool, 0)
+            .map_err(|_| "reconnect burst forced disconnect lifecycle failed")?
+        {
+            VirtualPlayerEvent::ReconnectScheduled {
+                attempt: scheduled_attempt,
+                ..
+            } if scheduled_attempt == attempt => Ok(()),
+            _ => Err("reconnect burst forced disconnect did not schedule the planned retry".into()),
+        }
+    }
+}
+
+impl ReconnectBurstExecutor for LiveReconnectBurstAdapter<'_> {
+    fn execute(
+        &mut self,
+        action: ReconnectBurstAction,
+        admission: &mut ReconnectBurstAdmission<'_>,
+    ) -> Result<(), String> {
+        self.wait_for_action(action, admission)?;
+        let player_index = self.player_index(action.player_slot)?;
+        let result = match action.step {
+            ReconnectBurstStep::DisconnectExisting => {
+                self.force_disconnect(player_index, action.reconnect_attempt)
+            }
+            ReconnectBurstStep::Login => self.login(player_index, admission),
+            ReconnectBurstStep::IssueTicket => self.issue_ticket(player_index, admission),
+            ReconnectBurstStep::ConnectProxy => self.connect_proxy(player_index),
+            ReconnectBurstStep::AuthenticateProxy => self.authenticate_proxy(player_index),
+            ReconnectBurstStep::RecoverRoom => {
+                self.recover_room(player_index, action.reconnect_attempt)
+            }
+        };
+        self.record_player_backpressure(player_index);
+        result
     }
 }
 
@@ -2274,6 +3035,54 @@ fn validate_game_execution_gate(cli: &Cli, config: &LoadTestConfig) -> Result<()
         private_config_supplied: cli.private_config.is_some(),
     }
     .validate()
+    .map_err(|error| error.to_string())
+}
+
+/// Live reconnect execution is a separate KCP/auth adapter boundary. Validate
+/// its plan and profile gate before constructing any HTTP or KCP client; the
+/// transport adapter receives only this already-bounded plan.
+fn validate_live_reconnect_burst_gate(
+    cli: &Cli,
+    config: &LoadTestConfig,
+    budget: &loadtest_core::config::HardBudget,
+) -> Result<(), String> {
+    let reconnect = config
+        .scenario
+        .reconnect_burst
+        .as_ref()
+        .ok_or("live reconnect burst requires scenario.reconnect_burst")?;
+    ReconnectBurstExecutionGate {
+        execute_game: cli.execute_game,
+        confirm_game: cli.confirm_game.as_deref(),
+        environment_name: &config.environment.name,
+        environment_kind: config.environment.kind,
+    }
+    .validate()
+    .map_err(|error| error.to_string())?;
+    let gameplay = config.scenario.live_gameplay.as_ref().ok_or(
+        "live reconnect burst requires scenario.live_gameplay with an approved room boundary",
+    )?;
+    if gameplay.coordination != LiveGameplayCoordination::SinglePlayer {
+        return Err(
+            "live reconnect burst currently requires single_player room coordination".into(),
+        );
+    }
+    if gameplay.reconnect.is_none() {
+        return Err(
+            "live reconnect burst requires an explicit live_gameplay reconnect cursor and policy"
+                .into(),
+        );
+    }
+    plan_reconnect_burst(
+        ReconnectBurstSpec {
+            virtual_players: reconnect.virtual_players,
+            reconnect_attempts_per_player: reconnect.reconnect_attempts_per_player,
+            start_ms: 0,
+        },
+        budget,
+        reconnect.reconnect_policy.into(),
+    )
+    .map(|_| ())
     .map_err(|error| error.to_string())
 }
 
@@ -2487,6 +3296,203 @@ mod tests {
     use loadtest_core::auth_http::{AuthHttpStatusCategory, AuthOutcomeCategory};
 
     #[test]
+    fn controller_health_tick_aborts_the_shared_controller_before_a_later_session() {
+        let mut evaluator = ContinuousHealthEvaluator::new(2).unwrap();
+        let mut abort = AbortController::default();
+        observe_controller_health(&mut evaluator, &mut abort, true, 1, 1, 0, 1, None);
+        assert!(!abort.should_stop_new_sessions());
+        observe_controller_health(&mut evaluator, &mut abort, true, 1, 1, 0, 1, None);
+        assert_eq!(abort.reason(), Some(&AbortReason::MetricsStale));
+        assert!(abort.should_stop_new_sessions());
+    }
+
+    #[test]
+    fn sustained_transport_backpressure_stops_reconnect_before_a_later_action() {
+        #[derive(Default)]
+        struct RecordingExecutor {
+            actions: Vec<ReconnectBurstAction>,
+        }
+
+        impl ReconnectBurstExecutor for RecordingExecutor {
+            fn execute(
+                &mut self,
+                action: ReconnectBurstAction,
+                _admission: &mut ReconnectBurstAdmission<'_>,
+            ) -> Result<(), String> {
+                self.actions.push(action);
+                Ok(())
+            }
+        }
+
+        let budget = loadtest_core::config::HardBudget {
+            max_virtual_players: 1,
+            max_login_qps: 10.0,
+            max_new_connections_per_second: 10.0,
+            max_business_messages_per_second: 10.0,
+            max_messages_per_connection_per_second: 10.0,
+            max_duration_secs: 10,
+            max_total_operations: 2,
+            max_error_rate: 1.0,
+            max_connection_failure_rate: 1.0,
+            max_p99_ms: 1_000,
+            max_data_writes: 10,
+        };
+        let plan = loadtest_core::reconnect_burst::ReconnectBurstPlan {
+            actions: vec![
+                ReconnectBurstAction {
+                    at_ms: 0,
+                    player_slot: 0,
+                    reconnect_attempt: 0,
+                    step: ReconnectBurstStep::Login,
+                },
+                ReconnectBurstAction {
+                    at_ms: 1,
+                    player_slot: 0,
+                    reconnect_attempt: 0,
+                    step: ReconnectBurstStep::IssueTicket,
+                },
+            ],
+            forced_disconnects: 0,
+            login_actions: 1,
+            new_connections: 0,
+            total_operations: 2,
+            potential_data_writes: 0,
+            total_backoff_ms: 0,
+            latest_action_ms: 1,
+        };
+        let signals = LiveBackpressureSignals {
+            kcp: KcpBackpressureMetrics {
+                pending_limit_rejections: 1,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut evaluator = ContinuousHealthEvaluator::new(2).unwrap();
+        let mut abort = AbortController::default();
+        let mut admission = AuthDispatchAdmission::new(&budget).unwrap();
+        let mut executor = RecordingExecutor::default();
+
+        let outcome = execute_reconnect_burst(
+            &plan,
+            &budget,
+            ReconnectBurstExecutionGate {
+                execute_game: true,
+                confirm_game: Some("local"),
+                environment_name: "local",
+                environment_kind: EnvironmentKind::Local,
+            },
+            &mut admission,
+            Instant::now() + Duration::from_secs(1),
+            &mut abort,
+            |controller| {
+                observe_controller_health(
+                    &mut evaluator,
+                    controller,
+                    true,
+                    0,
+                    0,
+                    0,
+                    1,
+                    Some(&signals),
+                );
+                Ok(())
+            },
+            &mut executor,
+        );
+
+        assert!(matches!(
+            outcome,
+            Err(loadtest_core::reconnect_burst::ReconnectBurstExecutionError::Stopped)
+        ));
+        assert_eq!(abort.reason(), Some(&AbortReason::Backpressure));
+        assert_eq!(executor.actions.len(), 1);
+        assert_eq!(executor.actions[0].step, ReconnectBurstStep::Login);
+    }
+
+    #[test]
+    fn live_backpressure_signals_project_kcp_and_grpc_snapshots() {
+        let mut signals = LiveBackpressureSignals::default();
+        signals.record_kcp(KcpBackpressureMetrics {
+            dropped_pending_requests: 1,
+            ..Default::default()
+        });
+        signals.record_match_grpc(MatchGrpcBackpressureMetrics {
+            dropped_pending_messages: 1,
+            ..Default::default()
+        });
+        let mut observation = ContinuousHealthObservation::healthy();
+
+        signals.apply_to_health(&mut observation);
+
+        assert!(!observation.backpressure_healthy);
+    }
+
+    #[test]
+    fn live_reconnect_burst_preflight_requires_the_game_gate_before_transport_setup() {
+        let config: LoadTestConfig = serde_json::from_value(serde_json::json!({
+            "schema_version": 1,
+            "environment": {"name": "local", "kind": "local"},
+            "targets": {"auth_http": "http://127.0.0.1:3000", "game_proxy": "kcp://127.0.0.1:4000"},
+            "budget": {
+                "max_virtual_players": 1,
+                "max_login_qps": 10.0,
+                "max_new_connections_per_second": 10.0,
+                "max_business_messages_per_second": 10.0,
+                "max_messages_per_connection_per_second": 10.0,
+                "max_duration_secs": 10,
+                "max_total_operations": 9,
+                "max_error_rate": 0.1,
+                "max_connection_failure_rate": 0.1,
+                "max_p99_ms": 100,
+                "max_data_writes": 12
+            },
+            "scenario": {
+                "name": "reconnect",
+                "load": {"type": "fixed_concurrency", "virtual_players": 1, "duration_secs": 1},
+                "writes_data": true,
+                "reconnect_burst": {
+                    "virtual_players": 1,
+                    "reconnect_attempts_per_player": 1,
+                    "reconnect_policy": {"max_attempts": 1, "base_delay_ms": 10, "max_delay_ms": 10}
+                },
+                "live_gameplay": {
+                    "room_id": "approved-room",
+                    "policy_id": "lockstep_sim_demo",
+                    "profile": "normal",
+                    "lockstep_scenario_json": "{}",
+                    "max_frame_inputs": 1,
+                    "reconnect": {
+                        "last_character_push_sequence": 0,
+                        "reconnect_policy": {"max_attempts": 1, "base_delay_ms": 10, "max_delay_ms": 10}
+                    }
+                }
+            },
+            "reports_root": "reports",
+            "prepare_reports_root": "prepare"
+        }))
+        .unwrap();
+        let budget = config.budget.clone();
+        let mut cli = Cli::parse(vec!["run".into(), "--config".into(), "ignored".into()]).unwrap();
+        assert!(
+            validate_live_reconnect_burst_gate(&cli, &config, &budget)
+                .unwrap_err()
+                .contains("--execute-game")
+        );
+        cli.execute_game = true;
+        cli.confirm_game = Some("local".into());
+        validate_live_reconnect_burst_gate(&cli, &config, &budget).unwrap();
+        let mut missing_room = config.clone();
+        missing_room.scenario.live_gameplay = None;
+        assert!(
+            validate_live_reconnect_burst_gate(&cli, &missing_room, &budget)
+                .unwrap_err()
+                .contains("live_gameplay")
+        );
+        cli.confirm_game = Some("other".into());
+        assert!(validate_live_reconnect_burst_gate(&cli, &config, &budget).is_err());
+    }
+
+    #[test]
     fn game_failure_categories_are_closed_and_public_safe() {
         let categorized = GameLiveError::GameplayFailed {
             message: "ignored".into(),
@@ -2558,11 +3564,11 @@ mod tests {
                     "max_business_messages_per_second": 10.0,
                     "max_messages_per_connection_per_second": 10.0,
                     "max_duration_secs": 10,
-                    "max_total_operations": 8,
+                    "max_total_operations": 12,
                     "max_error_rate": 0.1,
                     "max_connection_failure_rate": 0.1,
                     "max_p99_ms": 100,
-                    "max_data_writes": 4
+                    "max_data_writes": 16
                 },
                 "scenario": {
                     "name": "offline-reconnect",
@@ -2600,10 +3606,14 @@ mod tests {
             serde_json::from_slice(&std::fs::read(report_dir.join("metrics.json")).unwrap())
                 .unwrap();
         assert_eq!(metrics.counters["reconnect_burst_login_actions"], 1);
-        assert_eq!(metrics.counters["reconnect_burst_new_connections"], 4);
-        assert_eq!(metrics.counters["reconnect_burst_room_recoveries"], 2);
-        assert_eq!(metrics.counters["reconnect_burst_backoff_ms"], 100);
-        assert_eq!(metrics.counters["reconnect_burst_potential_data_writes"], 4);
+        assert_eq!(metrics.counters["reconnect_burst_forced_disconnects"], 2);
+        assert_eq!(metrics.counters["reconnect_burst_new_connections"], 6);
+        assert_eq!(metrics.counters["reconnect_burst_room_recoveries"], 3);
+        assert_eq!(metrics.counters["reconnect_burst_backoff_ms"], 300);
+        assert_eq!(
+            metrics.counters["reconnect_burst_potential_data_writes"],
+            16
+        );
         std::fs::remove_dir_all(temp_root).unwrap();
     }
 

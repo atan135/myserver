@@ -106,6 +106,10 @@ fn validate_resolved_address(
 }
 
 pub const PLAYER_PACKET_HEADER_LEN: usize = HEADER_LEN;
+/// A player connection is sequential in normal operation. The explicit bound
+/// protects the generator if a peer stops responding while the caller keeps
+/// attempting requests.
+pub const DEFAULT_MAX_KCP_PENDING_REQUESTS: usize = 16;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KcpSessionEvent {
@@ -117,19 +121,69 @@ pub enum KcpSessionEvent {
 #[derive(Debug)]
 pub struct KcpSession {
     max_body_len: usize,
+    max_pending_requests: usize,
     expected_responses: BTreeMap<(u16, u32), ()>,
     push_counts: BTreeMap<u16, u64>,
+    backpressure: KcpBackpressureMetrics,
+}
+
+/// Fixed, low-cardinality KCP backpressure observations. They can be folded
+/// into a controller health sample without exposing packet, account, or room
+/// identifiers as metric dimensions.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct KcpBackpressureMetrics {
+    pub pending_limit_rejections: u64,
+    pub dropped_pending_requests: u64,
+    pub disconnects: u64,
+}
+
+impl KcpBackpressureMetrics {
+    pub fn merge_into_metrics(&self, metrics: &mut crate::metrics::Metrics) {
+        for (key, value) in [
+            (
+                "kcp_backpressure_pending_limit_rejections",
+                self.pending_limit_rejections,
+            ),
+            (
+                "kcp_backpressure_dropped_pending_requests",
+                self.dropped_pending_requests,
+            ),
+            ("kcp_backpressure_disconnects", self.disconnects),
+        ] {
+            metrics.increment(key, value);
+        }
+    }
+
+    pub fn is_healthy(&self) -> bool {
+        self.pending_limit_rejections == 0 && self.dropped_pending_requests == 0
+    }
+
+    pub fn apply_to_health(&self, health: &mut crate::abort::ContinuousHealthObservation) {
+        health.backpressure_healthy &= self.is_healthy();
+    }
 }
 
 impl KcpSession {
     pub fn new(max_body_len: usize) -> Result<Self, GameKcpError> {
+        Self::with_pending_limit(max_body_len, DEFAULT_MAX_KCP_PENDING_REQUESTS)
+    }
+
+    pub fn with_pending_limit(
+        max_body_len: usize,
+        max_pending_requests: usize,
+    ) -> Result<Self, GameKcpError> {
         if max_body_len == 0 {
             return Err(GameKcpError::InvalidBodyLimit);
         }
+        if max_pending_requests == 0 {
+            return Err(GameKcpError::InvalidPendingLimit);
+        }
         Ok(Self {
             max_body_len,
+            max_pending_requests,
             expected_responses: BTreeMap::new(),
             push_counts: BTreeMap::new(),
+            backpressure: KcpBackpressureMetrics::default(),
         })
     }
 
@@ -142,12 +196,20 @@ impl KcpSession {
         seq: u32,
     ) -> Result<(), GameKcpError> {
         let key = (expected_response as u16, seq);
-        if self.expected_responses.insert(key, ()).is_some() {
+        if self.expected_responses.contains_key(&key) {
             return Err(GameKcpError::DuplicateRequest {
                 message_type: expected_response as u16,
                 seq,
             });
         }
+        if self.expected_responses.len() >= self.max_pending_requests {
+            self.backpressure.pending_limit_rejections =
+                self.backpressure.pending_limit_rejections.saturating_add(1);
+            return Err(GameKcpError::PendingRequestLimit {
+                maximum: self.max_pending_requests,
+            });
+        }
+        self.expected_responses.insert(key, ());
         Ok(())
     }
 
@@ -162,7 +224,19 @@ impl KcpSession {
     }
 
     pub fn clear_requests(&mut self) {
+        self.backpressure.dropped_pending_requests = self
+            .backpressure
+            .dropped_pending_requests
+            .saturating_add(self.expected_responses.len() as u64);
         self.expected_responses.clear();
+    }
+
+    pub fn backpressure_metrics(&self) -> KcpBackpressureMetrics {
+        self.backpressure
+    }
+
+    pub fn mark_disconnected(&mut self) {
+        self.backpressure.disconnects = self.backpressure.disconnects.saturating_add(1);
     }
 
     pub fn push_count(&self, message_type: MessageType) -> u64 {
@@ -203,7 +277,10 @@ impl KcpSession {
     {
         match read_packet(reader, self.max_body_len).await? {
             Some(packet) => self.ingest(packet),
-            None => Ok(KcpSessionEvent::Disconnected),
+            None => {
+                self.mark_disconnected();
+                Ok(KcpSessionEvent::Disconnected)
+            }
         }
     }
 }
@@ -385,6 +462,10 @@ impl GameConnectionLifecycle {
         self.session.pending_requests()
     }
 
+    pub fn backpressure_metrics(&self) -> KcpBackpressureMetrics {
+        self.session.backpressure_metrics()
+    }
+
     pub fn begin_connect(&mut self) -> Result<GameLifecycleEvent, GameKcpError> {
         if !matches!(
             self.state,
@@ -554,6 +635,7 @@ impl GameConnectionLifecycle {
         &mut self,
         jitter_sample: u64,
     ) -> Result<GameLifecycleEvent, GameKcpError> {
+        self.session.mark_disconnected();
         self.session.clear_requests();
         if self.state == GameConnectionState::Closed {
             return Ok(GameLifecycleEvent::Closed);
@@ -739,6 +821,8 @@ pub enum GameKcpError {
     Connect(#[source] std::io::Error),
     #[error("KCP session maximum body length must be positive")]
     InvalidBodyLimit,
+    #[error("KCP session maximum pending request count must be positive")]
+    InvalidPendingLimit,
     #[error("unknown player message type {0}")]
     UnknownMessageType(u16),
     #[error("packet body length mismatch: header={advertised}, actual={actual}")]
@@ -750,6 +834,8 @@ pub enum GameKcpError {
     },
     #[error("duplicate in-flight response expectation ({message_type}, {seq})")]
     DuplicateRequest { message_type: u16, seq: u32 },
+    #[error("KCP session pending response limit ({maximum}) exceeded")]
+    PendingRequestLimit { maximum: usize },
     #[error("unexpected response ({message_type}, {seq})")]
     UnexpectedResponse { message_type: u16, seq: u32 },
     #[error("unsupported outbound request type {0}")]
@@ -904,6 +990,46 @@ mod tests {
             }
         );
         assert_eq!(session.pending_requests(), 1);
+    }
+
+    #[test]
+    fn session_bounds_pending_requests_and_projects_fixed_backpressure_metrics() {
+        let mut session = KcpSession::with_pending_limit(32, 1).unwrap();
+        session.begin_request(MessageType::AuthRes, 1).unwrap();
+        assert!(matches!(
+            session.begin_request(MessageType::PingRes, 2),
+            Err(GameKcpError::PendingRequestLimit { maximum: 1 })
+        ));
+        session.mark_disconnected();
+        session.clear_requests();
+        let backpressure = session.backpressure_metrics();
+        assert_eq!(backpressure.pending_limit_rejections, 1);
+        assert_eq!(backpressure.dropped_pending_requests, 1);
+        assert_eq!(backpressure.disconnects, 1);
+        assert!(!backpressure.is_healthy());
+        let mut metrics = crate::metrics::Metrics::default();
+        backpressure.merge_into_metrics(&mut metrics);
+        let projected = metrics.snapshot();
+        assert_eq!(
+            projected.counters["kcp_backpressure_pending_limit_rejections"],
+            1
+        );
+        assert_eq!(
+            projected.counters["kcp_backpressure_dropped_pending_requests"],
+            1
+        );
+        assert_eq!(projected.counters["kcp_backpressure_disconnects"], 1);
+        let mut health = crate::abort::ContinuousHealthObservation::healthy();
+        backpressure.apply_to_health(&mut health);
+        assert!(!health.backpressure_healthy);
+    }
+
+    #[test]
+    fn session_rejects_zero_pending_limit() {
+        assert!(matches!(
+            KcpSession::with_pending_limit(32, 0),
+            Err(GameKcpError::InvalidPendingLimit)
+        ));
     }
 
     #[test]

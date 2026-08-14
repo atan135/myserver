@@ -283,6 +283,30 @@ impl AuthDispatchAdmission {
         )
     }
 
+    /// Reserve an auth operation for an execution plan before its credential
+    /// material is available to the transport. This preserves the same login,
+    /// connection, message, and potential-write accounting as `admit` without
+    /// constructing placeholder secrets solely for admission.
+    pub fn admit_auth_operation<F>(
+        &mut self,
+        operation: AuthOperation,
+        deadline: Instant,
+        checkpoint: F,
+    ) -> Result<Duration, AuthAdmissionError>
+    where
+        F: FnMut() -> Result<(), String>,
+    {
+        self.admit_outbound(
+            operation == AuthOperation::Login,
+            true,
+            true,
+            true,
+            auth_operation_potential_writes(operation),
+            deadline,
+            checkpoint,
+        )
+    }
+
     /// Accounts for a formal KCP connection in the same hard operation and
     /// connection budgets as auth-http. It has no business payload yet.
     pub fn admit_game_connection<F>(
