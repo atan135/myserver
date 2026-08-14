@@ -12,14 +12,17 @@ use loadtest_core::accounts::{
     AccountManifest, AccountPreparationState, CharacterReadiness, EnvironmentSecretProvider,
     SecretProvider, auth_character_name, auth_login_name, read_manifest, write_manifest,
 };
-use loadtest_core::auth_budget::{PrepareCommand, estimate_prepare, validate_prepare_budget};
+use loadtest_core::auth_budget::{
+    PrepareCommand, estimate_prepare_with_guard_probes, validate_prepare_budget,
+};
 use loadtest_core::auth_http::{
     AuthAdmissionError, AuthDispatchAdmission, AuthHttpRequest, AuthHttpResponse,
     AuthHttpTransport, AuthResponseBody, ReqwestAuthHttpTransport,
 };
 use loadtest_core::config::{RunAccess, load_config, load_private_config};
 use loadtest_core::metrics::HistogramSnapshot;
-use loadtest_core::protection::{DryRunProtection, revalidate_or_abort};
+use loadtest_core::protection::{DryRunProtection, LiveAuthProtection, RuntimeProtection};
+use loadtest_core::side_services::AuthServicesPayload;
 use serde::Serialize;
 
 fn main() -> ExitCode {
@@ -63,7 +66,14 @@ fn execute(arguments: Vec<String>) -> Result<(), String> {
             let secret_provider = EnvironmentSecretProvider::new(&private);
             let ctrl_c = install_ctrl_c_flag()
                 .map_err(|error| format!("failed to install Ctrl+C handler: {error}"))?;
-            let protection = DryRunProtection::new(&config);
+            let protection = if config.environment.kind.is_remote() {
+                PrepareRuntimeProtection::Remote(LiveAuthProtection::new(
+                    &config,
+                    Duration::from_secs(5),
+                )?)
+            } else {
+                PrepareRuntimeProtection::Local(DryRunProtection::new(&config))
+            };
             let mut abort = AbortController::default();
             let mut admission = AuthDispatchAdmission::new(&config.budget)?;
             // Every actual attempt receives its remaining deadline via
@@ -131,6 +141,14 @@ fn existing_or_planned_account_count(
     ))
 }
 
+fn estimate_prepare_for_config(
+    config: &loadtest_core::LoadTestConfig,
+    command: PrepareCommand,
+    account_count: u64,
+) -> Result<loadtest_core::auth_budget::PrepareBudgetEstimate, String> {
+    estimate_prepare_with_guard_probes(command, account_count, config.environment.kind.is_remote())
+}
+
 fn default_manifest_path(config: &loadtest_core::LoadTestConfig) -> PathBuf {
     Path::new(&config.prepare_reports_root)
         .join("account-manifests")
@@ -166,8 +184,9 @@ fn read_or_plan(
 fn write_plan(config: &loadtest_core::LoadTestConfig, manifest_path: &Path) -> Result<(), String> {
     let manifest = read_or_plan(config, manifest_path)?;
     let account_count = manifest.accounts.len() as u64;
-    let apply_estimate = estimate_prepare(PrepareCommand::Apply, account_count)?;
-    let verify_estimate = estimate_prepare(PrepareCommand::Verify, account_count)?;
+    let apply_estimate = estimate_prepare_for_config(config, PrepareCommand::Apply, account_count)?;
+    let verify_estimate =
+        estimate_prepare_for_config(config, PrepareCommand::Verify, account_count)?;
     let plan = serde_json::json!({
         "schema_version": SCHEMA_VERSION,
         "environment": config.environment.name,
@@ -178,6 +197,12 @@ fn write_plan(config: &loadtest_core::LoadTestConfig, manifest_path: &Path) -> R
         "prepare_estimates": {
             "apply": &apply_estimate,
             "verify": &verify_estimate,
+        },
+        "remote_guard_probe": {
+            "enabled": config.environment.kind.is_remote(),
+            "per_auth_request": config.environment.kind.is_remote(),
+            "operation": "credential_free_https_healthz",
+            "accounted_in_prepare_estimate": true,
         },
         "hard_budget": {
             "max_total_operations": config.budget.max_total_operations,
@@ -243,6 +268,10 @@ struct PrepareMetrics {
     operation_attempts: BTreeMap<String, u64>,
     operation_successes: BTreeMap<String, u64>,
     operation_latencies_ms: BTreeMap<String, HistogramSnapshot>,
+    guard_probe_attempts: u64,
+    guard_probe_successes: u64,
+    guard_probe_connection_admissions: u64,
+    guard_probe_latencies_ms: HistogramSnapshot,
     registrations_created: u64,
     registrations_resumed: u64,
     characters_created: u64,
@@ -264,13 +293,137 @@ impl PrepareMetrics {
             .or_default()
             .record(started.elapsed().as_millis() as u64);
     }
+
+    fn record_guard_probe(&mut self, started: Instant, success: bool) {
+        self.guard_probe_attempts = self.guard_probe_attempts.saturating_add(1);
+        self.guard_probe_connection_admissions =
+            self.guard_probe_connection_admissions.saturating_add(1);
+        if success {
+            self.guard_probe_successes = self.guard_probe_successes.saturating_add(1);
+        }
+        self.guard_probe_latencies_ms
+            .record(started.elapsed().as_millis() as u64);
+    }
 }
 
 struct PrepareResult {
     metrics: PrepareMetrics,
 }
 
-fn apply_manifest<T: AuthHttpTransport, S: SecretProvider>(
+trait PrepareAuthProtection: RuntimeProtection {
+    /// Called by every rate-admission checkpoint. It must remain local-only
+    /// because admission may poll in short intervals while waiting for a slot.
+    fn revalidate_while_waiting(&self) -> Result<(), String> {
+        self.revalidate()
+    }
+
+    /// Called once after rate admission succeeds and immediately before the
+    /// auth transport dispatch. Remote implementations perform their full
+    /// TLS/health identity probe here.
+    fn revalidate_before_dispatch(&self) -> Result<(), String> {
+        self.revalidate()
+    }
+
+    fn uses_guard_probe(&self) -> bool {
+        false
+    }
+
+    fn observe_auth_services(&self, services: Option<&AuthServicesPayload>) -> Result<(), String>;
+}
+
+impl PrepareAuthProtection for DryRunProtection<'_> {
+    fn observe_auth_services(&self, _services: Option<&AuthServicesPayload>) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+impl PrepareAuthProtection for LiveAuthProtection<'_> {
+    fn revalidate_while_waiting(&self) -> Result<(), String> {
+        LiveAuthProtection::revalidate_while_waiting(self)
+    }
+
+    fn uses_guard_probe(&self) -> bool {
+        true
+    }
+
+    fn observe_auth_services(&self, services: Option<&AuthServicesPayload>) -> Result<(), String> {
+        LiveAuthProtection::observe_auth_services(self, services)
+    }
+}
+
+enum PrepareRuntimeProtection<'a> {
+    Local(DryRunProtection<'a>),
+    Remote(LiveAuthProtection<'a>),
+}
+
+impl RuntimeProtection for PrepareRuntimeProtection<'_> {
+    fn verify_dns(&self) -> Result<(), String> {
+        match self {
+            Self::Local(protection) => protection.verify_dns(),
+            Self::Remote(protection) => protection.verify_dns(),
+        }
+    }
+
+    fn verify_certificate(&self) -> Result<(), String> {
+        match self {
+            Self::Local(protection) => protection.verify_certificate(),
+            Self::Remote(protection) => protection.verify_certificate(),
+        }
+    }
+
+    fn verify_descriptor(&self) -> Result<(), String> {
+        match self {
+            Self::Local(protection) => protection.verify_descriptor(),
+            Self::Remote(protection) => protection.verify_descriptor(),
+        }
+    }
+
+    fn verify_environment_identity(&self) -> Result<(), String> {
+        match self {
+            Self::Local(protection) => protection.verify_environment_identity(),
+            Self::Remote(protection) => protection.verify_environment_identity(),
+        }
+    }
+
+    fn revalidate(&self) -> Result<(), String> {
+        match self {
+            Self::Local(protection) => protection.revalidate(),
+            Self::Remote(protection) => protection.revalidate(),
+        }
+    }
+}
+
+impl PrepareAuthProtection for PrepareRuntimeProtection<'_> {
+    fn revalidate_while_waiting(&self) -> Result<(), String> {
+        match self {
+            Self::Local(protection) => protection.revalidate_while_waiting(),
+            Self::Remote(protection) => protection.revalidate_while_waiting(),
+        }
+    }
+
+    fn revalidate_before_dispatch(&self) -> Result<(), String> {
+        match self {
+            Self::Local(protection) => protection.revalidate_before_dispatch(),
+            Self::Remote(protection) => protection.revalidate_before_dispatch(),
+        }
+    }
+
+    fn uses_guard_probe(&self) -> bool {
+        match self {
+            Self::Local(protection) => protection.uses_guard_probe(),
+            Self::Remote(protection) => protection.uses_guard_probe(),
+        }
+    }
+
+    fn observe_auth_services(&self, services: Option<&AuthServicesPayload>) -> Result<(), String> {
+        match self {
+            Self::Local(protection) => protection.observe_auth_services(services),
+            Self::Remote(protection) => protection.observe_auth_services(services),
+        }
+    }
+}
+
+fn apply_manifest<T: AuthHttpTransport, S: SecretProvider, P: PrepareAuthProtection>(
     transport: &mut T,
     secret_provider: &S,
     mut manifest: AccountManifest,
@@ -280,7 +433,7 @@ fn apply_manifest<T: AuthHttpTransport, S: SecretProvider>(
     deadline: Instant,
     abort: &mut AbortController,
     ctrl_c: &Arc<AtomicBool>,
-    protection: &DryRunProtection<'_>,
+    protection: &P,
     stop_file: Option<&Path>,
 ) -> Result<PrepareResult, String> {
     let mut metrics = PrepareMetrics::default();
@@ -302,6 +455,7 @@ fn apply_manifest<T: AuthHttpTransport, S: SecretProvider>(
             let started = Instant::now();
             let register = dispatch_prepare_request(
                 transport,
+                &mut metrics,
                 AuthHttpRequest::Register {
                     login_name: login_name.clone(),
                     password: password.clone(),
@@ -350,7 +504,7 @@ fn apply_manifest<T: AuthHttpTransport, S: SecretProvider>(
     Ok(PrepareResult { metrics })
 }
 
-fn verify_manifest<T: AuthHttpTransport, S: SecretProvider>(
+fn verify_manifest<T: AuthHttpTransport, S: SecretProvider, P: PrepareAuthProtection>(
     transport: &mut T,
     secret_provider: &S,
     mut manifest: AccountManifest,
@@ -359,7 +513,7 @@ fn verify_manifest<T: AuthHttpTransport, S: SecretProvider>(
     deadline: Instant,
     abort: &mut AbortController,
     ctrl_c: &Arc<AtomicBool>,
-    protection: &DryRunProtection<'_>,
+    protection: &P,
     stop_file: Option<&Path>,
 ) -> Result<PrepareResult, String> {
     let mut metrics = PrepareMetrics::default();
@@ -392,7 +546,7 @@ fn verify_manifest<T: AuthHttpTransport, S: SecretProvider>(
     Ok(PrepareResult { metrics })
 }
 
-fn complete_readiness<T: AuthHttpTransport>(
+fn complete_readiness<T: AuthHttpTransport, P: PrepareAuthProtection>(
     transport: &mut T,
     metrics: &mut PrepareMetrics,
     login_name: &str,
@@ -403,12 +557,13 @@ fn complete_readiness<T: AuthHttpTransport>(
     deadline: Instant,
     abort: &mut AbortController,
     ctrl_c: &Arc<AtomicBool>,
-    protection: &DryRunProtection<'_>,
+    protection: &P,
     stop_file: Option<&Path>,
 ) -> Result<(), String> {
     let started = Instant::now();
     let login = dispatch_prepare_request(
         transport,
+        metrics,
         AuthHttpRequest::Login {
             login_name: login_name.into(),
             password: password.into(),
@@ -421,13 +576,16 @@ fn complete_readiness<T: AuthHttpTransport>(
         stop_file,
     )?;
     metrics.record("login", started, is_success(&login));
-    let access_token = success(&login, "login")?
+    let login_success = success(&login, "login")?;
+    protection.observe_auth_services(login_success.services.as_ref())?;
+    let access_token = login_success
         .access_token
         .ok_or("login response did not provide an access token")?;
 
     let started = Instant::now();
     let listed = dispatch_prepare_request(
         transport,
+        metrics,
         AuthHttpRequest::ListCharacters {
             access_token: access_token.clone(),
         },
@@ -444,6 +602,7 @@ fn complete_readiness<T: AuthHttpTransport>(
         let started = Instant::now();
         let created = dispatch_prepare_request(
             transport,
+            metrics,
             AuthHttpRequest::CreateCharacter {
                 access_token: access_token.clone(),
                 name: character_name.into(),
@@ -464,6 +623,7 @@ fn complete_readiness<T: AuthHttpTransport>(
     let started = Instant::now();
     let selected = dispatch_prepare_request(
         transport,
+        metrics,
         AuthHttpRequest::SelectCharacter {
             access_token: access_token.clone(),
             character_id: character_id.clone(),
@@ -483,6 +643,7 @@ fn complete_readiness<T: AuthHttpTransport>(
     let started = Instant::now();
     let issued = dispatch_prepare_request(
         transport,
+        metrics,
         AuthHttpRequest::IssueTicket {
             access_token,
             character_id,
@@ -501,39 +662,79 @@ fn complete_readiness<T: AuthHttpTransport>(
     Ok(())
 }
 
-fn dispatch_prepare_request<T: AuthHttpTransport>(
+fn dispatch_prepare_request<T: AuthHttpTransport, P: PrepareAuthProtection>(
     transport: &mut T,
+    metrics: &mut PrepareMetrics,
     request: AuthHttpRequest,
     admission: &mut AuthDispatchAdmission,
     deadline: Instant,
     abort: &mut AbortController,
     ctrl_c: &Arc<AtomicBool>,
-    protection: &DryRunProtection<'_>,
+    protection: &P,
     stop_file: Option<&Path>,
 ) -> Result<AuthHttpResponse, String> {
+    let is_guard_probe = protection.uses_guard_probe();
+    if is_guard_probe {
+        admission
+            .admit_guard_probe(deadline, || {
+                prepare_admission_checkpoint(protection, abort, ctrl_c, stop_file)
+            })
+            .map_err(|error| map_prepare_admission_error(error, abort))?;
+        let probe_started = Instant::now();
+        let probe_result = protection.revalidate_before_dispatch();
+        metrics.record_guard_probe(probe_started, probe_result.is_ok());
+        if probe_result.is_err() {
+            abort.check_protection(false);
+            return Err(
+                "account preparation protection check failed before request dispatch".into(),
+            );
+        }
+    }
     let remaining = admission
         .admit(&request, deadline, || {
-            abort.check_ctrl_c(ctrl_c);
-            abort.check_stop_file(stop_file);
-            if revalidate_or_abort(protection, abort).is_some() || abort.should_stop_new_sessions()
-            {
-                return Err("account preparation admission stopped before request dispatch".into());
-            }
-            Ok(())
+            prepare_admission_checkpoint(protection, abort, ctrl_c, stop_file)
         })
-        .map_err(|error| match error {
-            AuthAdmissionError::BudgetExceeded(error) => {
-                abort.request(AbortReason::BudgetExceeded);
-                error
-            }
-            AuthAdmissionError::DeadlineExceeded => {
-                abort.request(AbortReason::Deadline);
-                "account preparation deadline elapsed before request dispatch".into()
-            }
-            AuthAdmissionError::Stopped(error) => error,
-        })?;
+        .map_err(|error| map_prepare_admission_error(error, abort))?;
+    if !is_guard_probe && protection.revalidate_before_dispatch().is_err() {
+        abort.check_protection(false);
+        return Err("account preparation protection check failed before request dispatch".into());
+    }
+    if abort.should_stop_new_sessions() {
+        return Err("account preparation stopped before request dispatch".into());
+    }
     transport.set_attempt_timeout(remaining);
     Ok(transport.send(request))
+}
+
+fn prepare_admission_checkpoint<P: PrepareAuthProtection>(
+    protection: &P,
+    abort: &mut AbortController,
+    ctrl_c: &AtomicBool,
+    stop_file: Option<&Path>,
+) -> Result<(), String> {
+    abort.check_ctrl_c(ctrl_c);
+    abort.check_stop_file(stop_file);
+    if protection.revalidate_while_waiting().is_err() {
+        abort.check_protection(false);
+    }
+    if abort.should_stop_new_sessions() {
+        return Err("account preparation admission stopped before request dispatch".into());
+    }
+    Ok(())
+}
+
+fn map_prepare_admission_error(error: AuthAdmissionError, abort: &mut AbortController) -> String {
+    match error {
+        AuthAdmissionError::BudgetExceeded(error) => {
+            abort.request(AbortReason::BudgetExceeded);
+            error
+        }
+        AuthAdmissionError::DeadlineExceeded => {
+            abort.request(AbortReason::Deadline);
+            "account preparation deadline elapsed before request dispatch".into()
+        }
+        AuthAdmissionError::Stopped(error) => error,
+    }
 }
 
 fn apply_entry_result(
@@ -701,7 +902,7 @@ impl Cli {
         if self.private_config.is_none() {
             return Err("apply and verify require --private-config with secret references".into());
         }
-        let estimate = estimate_prepare(command, account_count)?;
+        let estimate = estimate_prepare_for_config(config, command, account_count)?;
         validate_prepare_budget(&estimate, &config.budget)?;
         config
             .validate_access(RunAccess {
@@ -727,12 +928,90 @@ mod tests {
     use super::*;
     use loadtest_core::auth_http::{FakeAuthHttpService, FakeAuthOutcome};
     use loadtest_core::config::AccountPrepareConfig;
+    use std::cell::Cell;
 
     struct TestSecretProvider;
 
     impl SecretProvider for TestSecretProvider {
         fn password_for(&self, _logical_account_id: &str) -> Result<String, String> {
             Ok("test-password-not-reported".into())
+        }
+    }
+
+    struct RejectingProtection;
+
+    impl RuntimeProtection for RejectingProtection {
+        fn verify_dns(&self) -> Result<(), String> {
+            Err("remote target is no longer approved".into())
+        }
+
+        fn verify_certificate(&self) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn verify_descriptor(&self) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn verify_environment_identity(&self) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    impl PrepareAuthProtection for RejectingProtection {
+        fn observe_auth_services(
+            &self,
+            _services: Option<&AuthServicesPayload>,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    struct CountingRemoteProtection {
+        waiting_checks: Cell<u32>,
+        guard_probes: Cell<u32>,
+    }
+
+    impl RuntimeProtection for CountingRemoteProtection {
+        fn verify_dns(&self) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn verify_certificate(&self) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn verify_descriptor(&self) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn verify_environment_identity(&self) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    impl PrepareAuthProtection for CountingRemoteProtection {
+        fn revalidate_while_waiting(&self) -> Result<(), String> {
+            self.waiting_checks
+                .set(self.waiting_checks.get().saturating_add(1));
+            Ok(())
+        }
+
+        fn revalidate_before_dispatch(&self) -> Result<(), String> {
+            self.guard_probes
+                .set(self.guard_probes.get().saturating_add(1));
+            Ok(())
+        }
+
+        fn uses_guard_probe(&self) -> bool {
+            true
+        }
+
+        fn observe_auth_services(
+            &self,
+            _services: Option<&AuthServicesPayload>,
+        ) -> Result<(), String> {
+            Ok(())
         }
     }
 
@@ -774,6 +1053,98 @@ mod tests {
             "reports_root": "reports",
             "prepare_reports_root": "prepare"
         })).unwrap()
+    }
+
+    #[test]
+    fn protection_refusal_aborts_before_any_auth_request_is_dispatched() {
+        let mut live_config = config();
+        live_config.budget.max_login_qps = 1_000.0;
+        live_config.budget.max_new_connections_per_second = 1_000.0;
+        live_config.budget.max_business_messages_per_second = 1_000.0;
+        live_config.budget.max_messages_per_connection_per_second = 1_000.0;
+        live_config.budget.max_total_operations = 100;
+        live_config.budget.max_data_writes = 100;
+        let mut transport = FakeAuthHttpService::scripted([FakeAuthOutcome::Success]);
+        let mut admission = AuthDispatchAdmission::new(&live_config.budget).unwrap();
+        let mut abort = AbortController::default();
+        let ctrl_c = Arc::new(AtomicBool::new(false));
+        let mut metrics = PrepareMetrics::default();
+
+        let error = match dispatch_prepare_request(
+            &mut transport,
+            &mut metrics,
+            AuthHttpRequest::Login {
+                login_name: "loadtest-account".into(),
+                password: "test-password-not-reported".into(),
+            },
+            &mut admission,
+            Instant::now() + Duration::from_secs(1),
+            &mut abort,
+            &ctrl_c,
+            &RejectingProtection,
+            None,
+        ) {
+            Ok(_) => panic!("protection refusal must prevent auth dispatch"),
+            Err(error) => error,
+        };
+
+        assert!(error.contains("stopped before request dispatch"));
+        assert_eq!(transport.request_count(), 0);
+        assert_eq!(abort.reason(), Some(&AbortReason::ProtectionUnknown));
+    }
+
+    #[test]
+    fn rate_wait_rechecks_lightweight_protection_without_repeating_guard_probe() {
+        let mut live_config = config();
+        live_config.budget.max_login_qps = 10.0;
+        live_config.budget.max_new_connections_per_second = 10.0;
+        live_config.budget.max_business_messages_per_second = 10.0;
+        live_config.budget.max_messages_per_connection_per_second = 10.0;
+        live_config.budget.max_total_operations = 100;
+        live_config.budget.max_data_writes = 100;
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut admission = AuthDispatchAdmission::new(&live_config.budget).unwrap();
+        admission
+            .admit(
+                &AuthHttpRequest::Me {
+                    access_token: "in-memory-token".into(),
+                },
+                deadline,
+                || Ok(()),
+            )
+            .unwrap();
+        let protection = CountingRemoteProtection {
+            waiting_checks: Cell::new(0),
+            guard_probes: Cell::new(0),
+        };
+        let mut transport = FakeAuthHttpService::scripted([FakeAuthOutcome::Success]);
+        let mut metrics = PrepareMetrics::default();
+        let mut abort = AbortController::default();
+        let ctrl_c = Arc::new(AtomicBool::new(false));
+
+        dispatch_prepare_request(
+            &mut transport,
+            &mut metrics,
+            AuthHttpRequest::Login {
+                login_name: "loadtest-account".into(),
+                password: "test-password-not-reported".into(),
+            },
+            &mut admission,
+            deadline,
+            &mut abort,
+            &ctrl_c,
+            &protection,
+            None,
+        )
+        .unwrap();
+
+        assert!(protection.waiting_checks.get() > 1);
+        assert_eq!(protection.guard_probes.get(), 1);
+        assert_eq!(metrics.guard_probe_attempts, 1);
+        assert_eq!(metrics.guard_probe_successes, 1);
+        assert_eq!(metrics.guard_probe_connection_admissions, 1);
+        assert_eq!(admission.used_operations(), 3);
+        assert_eq!(transport.request_count(), 1);
     }
 
     #[test]

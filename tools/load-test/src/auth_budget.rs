@@ -32,6 +32,14 @@ pub enum PrepareCommand {
 pub struct PrepareBudgetEstimate {
     pub command: PrepareCommand,
     pub account_count: u64,
+    /// Auth business calls (register/login/character/ticket), excluding the
+    /// remote identity guard's public health reads.
+    pub auth_http_operations: u64,
+    /// One credential-free HTTPS health probe is required before every auth
+    /// call for a remote account-prepare command.
+    pub guard_probe_operations: u64,
+    /// All outbound HTTP calls, including remote guard probes. This is the
+    /// number compared with max_total_operations.
     pub http_operations: u64,
     pub potential_data_writes: u64,
 }
@@ -247,6 +255,14 @@ pub fn estimate_prepare(
     command: PrepareCommand,
     account_count: u64,
 ) -> Result<PrepareBudgetEstimate, String> {
+    estimate_prepare_with_guard_probes(command, account_count, false)
+}
+
+pub fn estimate_prepare_with_guard_probes(
+    command: PrepareCommand,
+    account_count: u64,
+    include_guard_probes: bool,
+) -> Result<PrepareBudgetEstimate, String> {
     if account_count == 0 {
         return Err("account preparation estimate requires at least one account".into());
     }
@@ -268,12 +284,20 @@ pub fn estimate_prepare(
                 + ISSUE_TICKET_POTENTIAL_WRITES,
         ),
     };
+    let auth_http_operations = account_count
+        .checked_mul(http_per_account)
+        .ok_or("account preparation HTTP operation estimate overflowed")?;
+    let guard_probe_operations = include_guard_probes
+        .then_some(auth_http_operations)
+        .unwrap_or(0);
     Ok(PrepareBudgetEstimate {
         command,
         account_count,
-        http_operations: account_count
-            .checked_mul(http_per_account)
-            .ok_or("account preparation HTTP operation estimate overflowed")?,
+        auth_http_operations,
+        guard_probe_operations,
+        http_operations: auth_http_operations
+            .checked_add(guard_probe_operations)
+            .ok_or("account preparation guard-probe estimate overflowed")?,
         potential_data_writes: account_count
             .checked_mul(writes_per_account)
             .ok_or("account preparation write estimate overflowed")?,
@@ -680,6 +704,25 @@ mod tests {
                 },
             )
             .is_ok()
+        );
+    }
+
+    #[test]
+    fn remote_prepare_estimate_includes_one_guard_probe_per_auth_request() {
+        let remote = estimate_prepare_with_guard_probes(PrepareCommand::Apply, 1, true).unwrap();
+        assert_eq!(remote.auth_http_operations, 6);
+        assert_eq!(remote.guard_probe_operations, 6);
+        assert_eq!(remote.http_operations, 12);
+        assert!(
+            validate_prepare_budget(
+                &remote,
+                &HardBudget {
+                    max_total_operations: 11,
+                    max_data_writes: 12,
+                    ..budget()
+                },
+            )
+            .is_err()
         );
     }
 

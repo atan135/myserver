@@ -284,6 +284,21 @@ impl AuthDispatchAdmission {
         )
     }
 
+    /// Reserves a credential-free remote identity guard request. The guard
+    /// uses `Connection: close`, so it consumes the same conservative HTTP
+    /// connection and message limits as an auth request while reserving no
+    /// mutable data-write budget.
+    pub fn admit_guard_probe<F>(
+        &mut self,
+        deadline: Instant,
+        checkpoint: F,
+    ) -> Result<Duration, AuthAdmissionError>
+    where
+        F: FnMut() -> Result<(), String>,
+    {
+        self.admit_outbound(false, true, true, true, 0, deadline, checkpoint)
+    }
+
     /// Reserve an auth operation for an execution plan before its credential
     /// material is available to the transport. This preserves the same login,
     /// connection, message, and potential-write accounting as `admit` without
@@ -1643,6 +1658,34 @@ mod tests {
             .unwrap_err();
         assert!(matches!(error, AuthAdmissionError::BudgetExceeded(_)));
         assert_eq!(admission.used_operations(), 0);
+    }
+
+    #[test]
+    fn guard_probe_admission_counts_a_connection_and_runtime_operation() {
+        let mut constrained = budget();
+        constrained.max_total_operations = 2;
+        let mut admission = AuthDispatchAdmission::new(&constrained).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        admission.admit_guard_probe(deadline, || Ok(())).unwrap();
+        admission
+            .admit(
+                &AuthHttpRequest::Me {
+                    access_token: "in-memory-only".into(),
+                },
+                deadline,
+                || Ok(()),
+            )
+            .unwrap();
+
+        assert_eq!(admission.used_operations(), 2);
+        assert_eq!(admission.used_data_writes(), 0);
+        assert_eq!(admission.connections.admitted(), 2);
+        assert_eq!(admission.business_messages.admitted(), 2);
+        assert_eq!(admission.messages_per_connection.admitted(), 2);
+        assert!(matches!(
+            admission.admit_guard_probe(deadline, || Ok(())),
+            Err(AuthAdmissionError::BudgetExceeded(_))
+        ));
     }
 
     #[test]
