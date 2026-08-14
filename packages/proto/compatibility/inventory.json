@@ -172,6 +172,40 @@
       "externalConsumers": []
     }
   ],
+  "localProtocols": [
+    {
+      "file": "tools/load-test/proto/loadtest_control.proto",
+      "package": "myserver.loadtest.control",
+      "classification": [
+        "loadtest_private_control"
+      ],
+      "transports": [
+        "private controller/worker mTLS gRPC only"
+      ],
+      "owners": [
+        "tools/load-test"
+      ],
+      "generatedConsumers": [
+        {
+          "path": "tools/load-test/build.rs",
+          "language": "Rust",
+          "generator": "tonic-build private control generation"
+        }
+      ],
+      "handwrittenConsumers": [],
+      "externalConsumers": [],
+      "compatibility": {
+        "baseline": "tools/load-test/proto/compatibility/baseline.json",
+        "currentVersion": 1,
+        "versionField": "protocol_version",
+        "versionConstant": {
+          "path": "tools/load-test/src/control_mtls.rs",
+          "name": "CONTROL_PROTOCOL_VERSION"
+        },
+        "policy": "Private controller/worker control protocol. Its strict local semantic baseline is checked separately from packages/proto release references. Wire-incompatible changes require a reviewed baseline update and an explicit CONTROL_PROTOCOL_VERSION upgrade before coordinated worker rollout."
+      }
+    }
+  ],
   "unconsolidatedDefinitions": [
     {
       "kind": "packet_message_id_mapping",
@@ -195,7 +229,8 @@
     },
     {
       "kind": "local_proto_source",
-      "status": "none found outside packages/proto (excluding historical documentation)",
+      "canonical": "tools/load-test/proto/loadtest_control.proto",
+      "status": "explicitly registered private load-test control protocol; it is excluded from packages/proto release references but has a strict local semantic baseline and protocol_version=1 boundary",
       "driftCheck": "tools/proto-compatibility-baseline.js --check"
     }
   ]

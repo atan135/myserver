@@ -1,0 +1,323 @@
+{
+  "digest": "sha256:645c6aedf30efbeb3af542ad624c0ebaf102b5e603decdeabe874f32a517877a",
+  "files": [
+    {
+      "enums": [],
+      "messages": [
+        {
+          "fields": [
+            {
+              "label": "singular",
+              "name": "present",
+              "number": 1,
+              "oneof": "",
+              "type": "bool"
+            },
+            {
+              "label": "singular",
+              "name": "abort_signal_json",
+              "number": 2,
+              "oneof": "",
+              "type": "bytes"
+            }
+          ],
+          "name": "AbortResponse",
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "fields": [
+            {
+              "label": "singular",
+              "name": "assignment_json",
+              "number": 1,
+              "oneof": "",
+              "type": "bytes"
+            }
+          ],
+          "name": "AssignmentResponse",
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "fields": [
+            {
+              "label": "singular",
+              "name": "session",
+              "number": 1,
+              "oneof": "",
+              "type": "SessionRequest"
+            },
+            {
+              "label": "singular",
+              "name": "heartbeat_json",
+              "number": 2,
+              "oneof": "",
+              "type": "bytes"
+            }
+          ],
+          "name": "HeartbeatRequest",
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "fields": [
+            {
+              "label": "singular",
+              "name": "session",
+              "number": 1,
+              "oneof": "",
+              "type": "SessionRequest"
+            },
+            {
+              "label": "singular",
+              "name": "metric_batch_json",
+              "number": 2,
+              "oneof": "",
+              "type": "bytes"
+            }
+          ],
+          "name": "MetricBatchRequest",
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "fields": [
+            {
+              "label": "singular",
+              "name": "accepted",
+              "number": 1,
+              "oneof": "",
+              "type": "bool"
+            }
+          ],
+          "name": "OperationAck",
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "fields": [
+            {
+              "label": "singular",
+              "name": "protocol_version",
+              "number": 1,
+              "oneof": "",
+              "type": "uint32"
+            },
+            {
+              "label": "singular",
+              "name": "run_id",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "worker_id",
+              "number": 3,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "credential_id",
+              "number": 4,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "registration_nonce",
+              "number": 5,
+              "oneof": "",
+              "type": "bytes"
+            }
+          ],
+          "name": "RegisterWorkerRequest",
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "fields": [
+            {
+              "label": "singular",
+              "name": "session_id",
+              "number": 1,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "credential_expires_unix_ms",
+              "number": 2,
+              "oneof": "",
+              "type": "uint64"
+            },
+            {
+              "label": "singular",
+              "name": "assignment_json",
+              "number": 3,
+              "oneof": "",
+              "type": "bytes"
+            }
+          ],
+          "name": "RegisterWorkerResponse",
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "fields": [
+            {
+              "label": "singular",
+              "name": "protocol_version",
+              "number": 1,
+              "oneof": "",
+              "type": "uint32"
+            },
+            {
+              "label": "singular",
+              "name": "run_id",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "worker_id",
+              "number": 3,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "session_id",
+              "number": 4,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "sequence",
+              "number": 5,
+              "oneof": "",
+              "type": "uint64"
+            }
+          ],
+          "name": "SessionRequest",
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        }
+      ],
+      "package": "myserver.loadtest.control",
+      "path": "tools/load-test/proto/loadtest_control.proto",
+      "services": [
+        {
+          "name": "LoadtestControl",
+          "rpcs": [
+            {
+              "name": "GetAbort",
+              "request": {
+                "stream": false,
+                "type": "SessionRequest"
+              },
+              "response": {
+                "stream": false,
+                "type": "AbortResponse"
+              }
+            },
+            {
+              "name": "GetAssignment",
+              "request": {
+                "stream": false,
+                "type": "SessionRequest"
+              },
+              "response": {
+                "stream": false,
+                "type": "AssignmentResponse"
+              }
+            },
+            {
+              "name": "RegisterWorker",
+              "request": {
+                "stream": false,
+                "type": "RegisterWorkerRequest"
+              },
+              "response": {
+                "stream": false,
+                "type": "RegisterWorkerResponse"
+              }
+            },
+            {
+              "name": "SubmitHeartbeat",
+              "request": {
+                "stream": false,
+                "type": "HeartbeatRequest"
+              },
+              "response": {
+                "stream": false,
+                "type": "OperationAck"
+              }
+            },
+            {
+              "name": "SubmitMetricBatch",
+              "request": {
+                "stream": false,
+                "type": "MetricBatchRequest"
+              },
+              "response": {
+                "stream": false,
+                "type": "OperationAck"
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "format": "myserver.protobuf.compatibility-baseline/v1",
+  "versionBoundary": {
+    "currentVersion": 1,
+    "fields": [
+      {
+        "message": "RegisterWorkerRequest",
+        "number": 1,
+        "type": "uint32"
+      },
+      {
+        "message": "SessionRequest",
+        "number": 1,
+        "type": "uint32"
+      }
+    ],
+    "runtimeConstant": {
+      "name": "CONTROL_PROTOCOL_VERSION",
+      "path": "tools/load-test/src/control_mtls.rs"
+    },
+    "versionField": "protocol_version"
+  },
+  "wireDigest": "sha256:7e6f0570e37ef3fc415c775119ebac8585ba3615233ad5abad6d109e5d916b73"
+}

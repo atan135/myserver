@@ -74,6 +74,18 @@ from debug output. The implemented tests generate certificates in memory and
 exercise mTLS on a local loopback listener. This is not a CLI startup path or
 evidence of a real cross-machine, multi-worker, remote, or production run.
 
+This exact private proto is registered in
+`packages/proto/compatibility/inventory.json` under `localProtocols`. Its
+semantic snapshot is maintained separately at
+`tools/load-test/proto/compatibility/baseline.json`, and is deliberately not
+included in the shared/player `packages/proto` release reference or breaking
+comparison. The v1 boundary is the `protocol_version` field together with
+`CONTROL_PROTOCOL_VERSION`. The inventory records this boundary as
+`currentVersion`, validates the `uint32` field declaration and requires the
+Rust constant to have the same value. A wire-incompatible change must increase
+both versions before `--write` can create a reviewed local baseline; either a
+missing upgrade or an upgraded-but-unwritten boundary fails `--check`.
+
 ## Protocol Sources
 
 The load tool must not keep a hand-written player protocol copy.

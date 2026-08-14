@@ -880,7 +880,7 @@ export function formatRoutingConsistencyReport(result) {
     `- error_code proto fields: ${result.errorCodes.fields.length}; static catalog: ${result.errorCodes.definedCodes.size}; implementation literal codes: ${result.errorCodes.literalCodes.size}`,
     `- undefined static error codes: ${result.errorCodes.undefinedCodes.length}; unused catalog error codes: ${result.errorCodes.unusedCodes.length}`,
     `- dynamic error-code sources: ${result.errorCodes.dynamicSources.length}`,
-    `- local proto ownership: ${result.diagnostics.some((item) => item.rule === "LOCAL_PROTO_DRIFT") ? "drift detected" : "inventory matches shared proto scan"}`,
+    `- local proto ownership: ${result.diagnostics.some((item) => item.rule === "LOCAL_PROTO_DRIFT") ? "drift detected" : "inventory matches registered proto scan"}`,
     `- deferred outbound messages: ${result.packet.deferredOutboundReport.length}`,
     `- routing diagnostics: ${result.diagnostics.length}`
   ];

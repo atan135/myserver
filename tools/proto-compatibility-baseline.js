@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -443,6 +443,64 @@ function inventoryProtoPaths(inventory) {
   return [...paths].sort();
 }
 
+function localProtocolEntries(inventory) {
+  const protocols = inventory.localProtocols ?? [];
+  if (!Array.isArray(protocols)) {
+    fail("protocol inventory localProtocols must be an array");
+  }
+  const files = new Set();
+  for (const protocol of protocols) {
+    const file = protocol?.file;
+    const baseline = protocol?.compatibility?.baseline;
+    const versionField = protocol?.compatibility?.versionField;
+    const currentVersion = protocol?.compatibility?.currentVersion;
+    const versionConstant = protocol?.compatibility?.versionConstant;
+    if (
+      typeof file !== "string"
+      || file.startsWith("packages/proto/")
+      || file.includes("..")
+      || !file.endsWith(".proto")
+      || !file.startsWith("tools/")
+    ) {
+      fail("local protocol inventory contains an invalid proto path");
+    }
+    const expectedBaselinePrefix = `${path.posix.dirname(file)}/compatibility/`;
+    if (
+      typeof baseline !== "string"
+      || baseline.includes("..")
+      || !baseline.startsWith(expectedBaselinePrefix)
+      || !baseline.endsWith(".json")
+    ) {
+      fail(`local protocol ${file} must define a baseline under ${expectedBaselinePrefix}`);
+    }
+    if (
+      typeof versionField !== "string"
+      || versionField.trim().length === 0
+      || !Number.isInteger(currentVersion)
+      || currentVersion <= 0
+      || currentVersion > 0xffff_ffff
+    ) {
+      fail(`local protocol ${file} must define a positive compatibility.currentVersion and versionField`);
+    }
+    if (
+      !versionConstant
+      || typeof versionConstant.path !== "string"
+      || versionConstant.path.includes("..")
+      || !versionConstant.path.startsWith("tools/")
+      || !versionConstant.path.endsWith(".rs")
+      || typeof versionConstant.name !== "string"
+      || !/^[A-Z][A-Z0-9_]*$/.test(versionConstant.name)
+    ) {
+      fail(`local protocol ${file} must define compatibility.versionConstant as a Rust version constant`);
+    }
+    if (files.has(file)) {
+      fail("protocol inventory contains duplicate local proto paths");
+    }
+    files.add(file);
+  }
+  return [...protocols].sort((left, right) => left.file.localeCompare(right.file));
+}
+
 function listProtoFiles(directory, relativeBase = "") {
   const result = [];
   for (const entry of readdirSync(directory, { withFileTypes: true })) {
@@ -475,6 +533,78 @@ export function buildBaseline(inventory, root = rootDir) {
   return { ...projection, digest: digest(projection) };
 }
 
+function localVersionBoundary(protocol, parsed, root) {
+  const compatibility = protocol.compatibility;
+  const fields = parsed.messages.flatMap((message) => message.fields
+    .filter((field) => field.name === compatibility.versionField)
+    .map((field) => ({
+      message: message.name,
+      number: field.number,
+      type: field.type
+    })));
+  if (fields.length === 0) {
+    fail(`local protocol ${protocol.file} does not declare versionField ${compatibility.versionField}`);
+  }
+  if (fields.some((field) => field.type !== "uint32")) {
+    fail(`local protocol ${protocol.file} versionField ${compatibility.versionField} must use uint32`);
+  }
+
+  const constant = compatibility.versionConstant;
+  const constantPath = path.join(root, constant.path);
+  if (!existsSync(constantPath)) {
+    fail(`local protocol ${protocol.file} version constant source does not exist: ${constant.path}`);
+  }
+  const source = readFileSync(constantPath, "utf8");
+  const expression = new RegExp(`\\b(?:pub\\s+)?const\\s+${constant.name}\\s*:\\s*u32\\s*=\\s*(\\d+)\\s*;`);
+  const match = expression.exec(source);
+  if (!match) {
+    fail(`local protocol ${protocol.file} version constant ${constant.name} is not a u32 constant in ${constant.path}`);
+  }
+  if (Number(match[1]) !== compatibility.currentVersion) {
+    fail(`local protocol ${protocol.file} currentVersion=${compatibility.currentVersion} does not match ${constant.name}=${match[1]}`);
+  }
+  return {
+    currentVersion: compatibility.currentVersion,
+    fields,
+    runtimeConstant: {
+      name: constant.name,
+      path: constant.path
+    },
+    versionField: compatibility.versionField
+  };
+}
+
+export function buildLocalBaseline(protocol, root = rootDir) {
+  const sourcePath = path.join(root, protocol.file);
+  if (!existsSync(sourcePath)) {
+    fail(`local protocol does not exist: ${protocol.file}`);
+  }
+  const parsed = parseProto(readFileSync(sourcePath, "utf8"), protocol.file);
+  const files = [{
+    path: protocol.file,
+    ...parsed
+  }];
+  const wireProjection = {
+    files,
+    format: BASELINE_FORMAT
+  };
+  const versionBoundary = localVersionBoundary(protocol, parsed, root);
+  const projection = { ...wireProjection, versionBoundary };
+  return {
+    ...projection,
+    wireDigest: digest(wireProjection),
+    digest: digest(projection)
+  };
+}
+
+function snapshotProjection(snapshot) {
+  const projection = { files: snapshot.files, format: snapshot.format };
+  if (snapshot.versionBoundary !== undefined) {
+    projection.versionBoundary = snapshot.versionBoundary;
+  }
+  return projection;
+}
+
 export function validateBaselineSnapshot(snapshot, label = "compatibility baseline") {
   if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot)) {
     fail(`${label} must be a JSON object`);
@@ -482,7 +612,7 @@ export function validateBaselineSnapshot(snapshot, label = "compatibility baseli
   if (snapshot.format !== BASELINE_FORMAT || !Array.isArray(snapshot.files)) {
     fail(`${label} has an unsupported format or missing files`);
   }
-  const projection = { files: snapshot.files, format: snapshot.format };
+  const projection = snapshotProjection(snapshot);
   if (typeof snapshot.digest !== "string" || snapshot.digest !== digest(projection)) {
     fail(`${label} digest is invalid`);
   }
@@ -506,6 +636,8 @@ function compareText(left, right) {
 
 export function validateInventory(inventory, root = rootDir) {
   const expected = inventoryProtoPaths(inventory);
+  const localProtocols = localProtocolEntries(inventory);
+  const expectedRepositoryProtos = [...expected, ...localProtocols.map((protocol) => protocol.file)].sort();
   const actual = listProtoFiles(path.join(root, "packages", "proto"))
     .filter((filePath) => !filePath.startsWith("compatibility/"))
     .map((filePath) => `packages/proto/${filePath}`)
@@ -517,10 +649,13 @@ export function validateInventory(inventory, root = rootDir) {
   const repositoryProtos = listProtoFiles(root)
     .filter((filePath) => !filePath.startsWith("docs/历史归档/") && !filePath.startsWith("tests/proto/fixtures/"))
     .sort();
-  if (stableJson(repositoryProtos) !== stableJson(expected)) {
-    const extra = repositoryProtos.filter((filePath) => !expected.includes(filePath));
-    const missing = expected.filter((filePath) => !repositoryProtos.includes(filePath));
+  if (stableJson(repositoryProtos) !== stableJson(expectedRepositoryProtos)) {
+    const extra = repositoryProtos.filter((filePath) => !expectedRepositoryProtos.includes(filePath));
+    const missing = expectedRepositoryProtos.filter((filePath) => !repositoryProtos.includes(filePath));
     fail(`untracked local proto definitions: extra=${extra.join(", ") || "none"} missing=${missing.join(", ") || "none"}`);
+  }
+  for (const protocol of localProtocols) {
+    buildLocalBaseline(protocol, root);
   }
 }
 
@@ -530,6 +665,64 @@ function baselineFilePath(inventory, root = rootDir) {
     fail("protocol inventory must define baseline.file under packages/proto/compatibility");
   }
   return path.join(root, relativePath);
+}
+
+function localBaselineFilePath(protocol, root) {
+  return path.join(root, protocol.compatibility.baseline);
+}
+
+function localWireProjection(snapshot) {
+  return { files: snapshot.files, format: snapshot.format };
+}
+
+function validateLocalBaselineSnapshot(snapshot, protocol) {
+  const label = `local protocol baseline ${protocol.compatibility.baseline}`;
+  validateBaselineSnapshot(snapshot, label);
+  const boundary = snapshot.versionBoundary;
+  if (
+    !boundary
+    || !Number.isInteger(boundary.currentVersion)
+    || boundary.currentVersion <= 0
+    || boundary.currentVersion > 0xffff_ffff
+    || boundary.versionField !== protocol.compatibility.versionField
+    || !Array.isArray(boundary.fields)
+    || boundary.fields.length === 0
+    || stableJson(boundary.runtimeConstant) !== stableJson(protocol.compatibility.versionConstant)
+  ) {
+    fail(`${label} has an invalid version boundary`);
+  }
+  if (snapshot.wireDigest !== digest(localWireProjection(snapshot))) {
+    fail(`${label} wire digest is invalid`);
+  }
+  return snapshot;
+}
+
+function checkLocalProtocolVersionTransition(protocol, recorded, current) {
+  const recordedVersion = recorded.versionBoundary.currentVersion;
+  const currentVersion = current.versionBoundary.currentVersion;
+  if (currentVersion < recordedVersion) {
+    fail(`local protocol ${protocol.file} currentVersion=${currentVersion} cannot be lower than recorded version ${recordedVersion}`);
+  }
+  if (current.wireDigest !== recorded.wireDigest && currentVersion <= recordedVersion) {
+    fail(`local protocol ${protocol.file} wire snapshot changed without increasing compatibility.currentVersion above ${recordedVersion}`);
+  }
+}
+
+function checkLocalProtocolBaselines(inventory, root) {
+  for (const protocol of localProtocolEntries(inventory)) {
+    const baselinePath = localBaselineFilePath(protocol, root);
+    if (!existsSync(baselinePath)) {
+      fail(`local protocol baseline does not exist: ${protocol.compatibility.baseline}`);
+    }
+    const recorded = JSON.parse(readFileSync(baselinePath, "utf8"));
+    validateLocalBaselineSnapshot(recorded, protocol);
+    const current = buildLocalBaseline(protocol, root);
+    checkLocalProtocolVersionTransition(protocol, recorded, current);
+    const difference = compareText(stableJson(recorded), stableJson(current));
+    if (difference) {
+      fail(`local protocol baseline is stale for ${protocol.file} (${difference}). Run node tools/proto-compatibility-baseline.js --write --reason <reason> --approved-by <reviewer> after approval.`);
+    }
+  }
 }
 
 export function checkBaseline(inventory = readInventory(), root = rootDir) {
@@ -545,6 +738,7 @@ export function checkBaseline(inventory = readInventory(), root = rootDir) {
   if (difference) {
     fail(`protocol compatibility baseline is stale (${difference}). Run node tools/proto-compatibility-baseline.js --write --reason <reason> --approved-by <reviewer> after approval.`);
   }
+  checkLocalProtocolBaselines(inventory, root);
   return current;
 }
 
@@ -564,9 +758,28 @@ export function writeBaseline(inventory = readInventory(), root = rootDir, metad
   if (!metadata?.reason || !metadata?.approvedBy) {
     fail("writeBaseline requires approval metadata");
   }
+  for (const protocol of localProtocolEntries(inventory)) {
+    const localBaselinePath = localBaselineFilePath(protocol, root);
+    if (!existsSync(localBaselinePath)) {
+      continue;
+    }
+    const recorded = JSON.parse(readFileSync(localBaselinePath, "utf8"));
+    validateLocalBaselineSnapshot(recorded, protocol);
+    checkLocalProtocolVersionTransition(protocol, recorded, buildLocalBaseline(protocol, root));
+  }
   const baselinePath = baselineFilePath(inventory, root);
   const baseline = buildBaseline(inventory, root);
   writeFileSync(baselinePath, `${stableJson(baseline, 2)}\n`, "utf8");
+  for (const protocol of localProtocolEntries(inventory)) {
+    const localBaseline = buildLocalBaseline(protocol, root);
+    const localBaselinePath = localBaselineFilePath(protocol, root);
+    mkdirSync(path.dirname(localBaselinePath), { recursive: true });
+    writeFileSync(
+      localBaselinePath,
+      `${stableJson(localBaseline, 2)}\n`,
+      "utf8"
+    );
+  }
   return baseline;
 }
 
