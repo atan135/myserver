@@ -1,10 +1,52 @@
 # MyServer Load Test
 
 `tools/load-test` is an independent Rust package for the player core path.
-The first two stages implement an offline-safe controller/worker contract,
+The current implementation provides an offline-safe controller/worker contract,
 validation, load scheduling, account manifests, `auth-http` request contracts,
 guardrails, metrics, reports, and deterministic test doubles. The default
 commands deliberately do not connect to an application service.
+
+## Current implementation status
+
+The package is currently an offline-safe framework with explicitly gated local
+diagnostics. The following boundaries are intentional and should be kept in
+mind when interpreting a report:
+
+| Area | Available now | Boundary / not a capacity claim |
+| --- | --- | --- |
+| Player core path | Guarded `auth-http -> game-proxy` KCP flow, optional approved-room gameplay, and the two-account `default_match` ready/start smoke | Requires explicit execution flags, a credential-free manifest plus private secret references, and a pre-provisioned room. It is not a general multiplayer load model. |
+| Chat | Deterministic WSS fake and a bounded live WebSocket runner | Live WebSocket is restricted to an explicit local/test diagnostic gate. Server persistence and push latency require a separately confirmed service smoke. |
+| Match | Deterministic gRPC fake, bounded `MatchInternal` diagnostic, and match event/queue metric projection | Direct gRPC and `MatchInternal` are development/isolated diagnostics only. They do not represent the formal player `game-proxy -> game-server -> match-service -> room` capacity path. |
+| Mail and announcements | Deterministic HTTP fake and bounded live list/detail/read/claim or announcement-read requests | Live HTTP is restricted to local/test. Mail notification delivery, outbox/NATS timing, and announcement writes require a separately approved service test; production writes are rejected. |
+| Calibration, soak and reconnect | Offline generator calibration, bounded soak-window assessment/rolling persistence, and a reconnect-burst planner/fake | No live soak, reconnect storm, resource-leak observation, or service recovery conclusion is implied. |
+| Baseline comparison | Offline report identity/threshold comparison for throughput, P95/P99, errors and generator working set | Reports without aligned service-version observations are non-comparable; no repeated stable-environment acceptance run has been completed. |
+| Distributed execution | Versioned plan, assignment, batch, heartbeat, abort and summary contracts; deterministic slicing, ledger, pending and fail-closed state machines | No mTLS controller/worker transport, short-lived worker registration, or multi-process acceptance run is implemented. |
+
+`side_services` supports per-step `weight` and `think_time_ms`, a composite
+service weight map, and global/per-player operation caps. These controls shape
+deterministic plans and local diagnostics; they do not yet constitute a
+production-validated user-journey model. Service registry discovery, server
+metrics snapshots, PostgreSQL/Redis/NATS telemetry, and host-level observations
+must be supplied by a separately confirmed environment run. Missing or stale
+observations are reported as incomplete and cannot be used to infer capacity.
+
+The default `run` and `calibrate` commands remain transport-free unless their
+explicit execution gates are provided. `report` only reads an existing report
+directory. A successful dry-run or deterministic fake run proves planner,
+budget, protocol-correlation, classification, and redaction behavior; it does
+not prove service availability or end-to-end capacity.
+
+### Distributed metric aggregation
+
+`MetricBatch` carries counters, mergeable HDR V2 histogram payloads, and raw
+time-series samples stamped with the worker monotonic boundary. The controller
+aggregator aligns batches by sequence and rejects boundary drift or samples
+outside their declared window. Repeated batches are ignored by sequence ledger;
+late, out-of-order batches are merged once. Counters and samples are summed at
+the same boundary, while HDR payloads are merged before any P50/P95/P99 is
+calculated. Percentile values are not accepted on the wire and are never
+averaged across workers. A missing sequence or worker leaves the final report
+incomplete, so remaining observations must not be extrapolated.
 
 ## Protocol Sources
 
