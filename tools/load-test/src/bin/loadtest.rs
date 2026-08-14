@@ -1,6 +1,7 @@
 use std::env;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use loadtest_core::SCHEMA_VERSION;
@@ -34,7 +35,9 @@ use loadtest_core::game_live::{
     GameExecutionGate, GameLiveError, GameRunnerCheckpoint, GameSessionRunner, LiveKcpTransport,
 };
 use loadtest_core::lifecycle::{Lifecycle, RunState};
-use loadtest_core::match_grpc::execute_live_match_steps;
+use loadtest_core::match_grpc::{
+    MatchInternalAdmission, execute_live_match_internal_steps, execute_live_match_steps,
+};
 use loadtest_core::metrics::Metrics;
 use loadtest_core::preflight::summarize_run;
 use loadtest_core::protection::{DryRunProtection, revalidate_or_abort};
@@ -47,6 +50,8 @@ use loadtest_core::scheduler::MonotonicScheduler;
 use loadtest_core::side_http::{SideHttpAdmission, execute_live_mail_announce_steps};
 use loadtest_core::side_services::SideServiceKind;
 use loadtest_core::side_services::execute_side_services_dry;
+
+static NEXT_MATCH_INTERNAL_DIAGNOSTIC_ID: AtomicU64 = AtomicU64::new(1);
 
 fn main() -> ExitCode {
     match execute(env::args().skip(1).collect()) {
@@ -587,6 +592,12 @@ fn run_live(cli: &Cli) -> Result<(), String> {
         .as_ref()
         .and_then(|side| side.r#match.as_ref())
         .is_some_and(|matcher| matcher.live_grpc);
+    let live_match_internal = config
+        .scenario
+        .side_services
+        .as_ref()
+        .and_then(|side| side.r#match.as_ref())
+        .is_some_and(|matcher| matcher.live_internal);
     let live_http = config.scenario.side_services.as_ref().is_some_and(|side| {
         side.mail.as_ref().is_some_and(|mail| mail.live_http)
             || side
@@ -594,7 +605,7 @@ fn run_live(cli: &Cli) -> Result<(), String> {
                 .as_ref()
                 .is_some_and(|announce| announce.live_http)
     });
-    if (live_chat || live_match || live_http) && game_mode {
+    if (live_chat || live_match || live_match_internal || live_http) && game_mode {
         return Err(
             "live side-service HTTP/WSS/gRPC diagnostics cannot be combined with --execute-game until a ticket-sharing flow is explicitly configured".into(),
         );
@@ -650,12 +661,12 @@ fn run_live(cli: &Cli) -> Result<(), String> {
         split_game_auth_operations(&auth.operations)?
     } else {
         (
-            if live_chat || live_match || live_http {
+            if live_chat || live_match || live_match_internal || live_http {
                 loadtest_core::auth_http::split_game_auth_operations(&auth.operations)?.0
             } else {
                 auth.operations.clone()
             },
-            if live_chat || live_match || live_http {
+            if live_chat || live_match || live_match_internal || live_http {
                 auth.operations.last().is_some_and(|operation| {
                     matches!(operation, loadtest_core::config::AuthOperation::Logout)
                 })
@@ -1160,12 +1171,14 @@ fn run_live(cli: &Cli) -> Result<(), String> {
             );
             let mut execution_failed = execution.error.is_some();
             let pre_game_auth_completed = !execution_failed;
-            let mut side_credentials =
-                if !execution_failed && !game_mode && (live_chat || live_http) {
-                    execution.take_game_credentials()
-                } else {
-                    None
-                };
+            let mut side_credentials = if !execution_failed
+                && !game_mode
+                && (live_chat || live_match || live_match_internal || live_http)
+            {
+                execution.take_game_credentials()
+            } else {
+                None
+            };
             if execution_failed {
                 errors.push(
                     "auth_operation_failed",
@@ -1436,7 +1449,7 @@ fn run_live(cli: &Cli) -> Result<(), String> {
                     .expect("live chat configuration exists")
                     .executable_plan(&budget)
                     .map_err(|error| format!("live chat plan rejected: {error}"))?;
-                let Some((ticket, _)) = side_credentials.clone() else {
+                let Some((ticket, character_id)) = side_credentials.clone() else {
                     errors.push(
                         "chat_ticket_missing",
                         "auth completed without a transferable chat ticket",
@@ -1509,7 +1522,7 @@ fn run_live(cli: &Cli) -> Result<(), String> {
                         config.environment.kind,
                         chat.live_websocket,
                         ticket,
-                        &lease.logical_account_id,
+                        &character_id,
                         &chat_steps,
                         chat_deadline.as_millis() as u64,
                         ReconnectPolicy {
@@ -1543,6 +1556,17 @@ fn run_live(cli: &Cli) -> Result<(), String> {
                     .descriptor
                     .as_ref()
                     .ok_or("live match requires an explicit descriptor")?;
+                let Some((_, character_id)) = side_credentials.as_ref() else {
+                    errors.push(
+                        "match_character_id_missing",
+                        "auth completed without a transferable character identity",
+                        Default::default(),
+                    );
+                    failed = true;
+                    execution_failed = true;
+                    finish_live_action(&mut auth_metrics, &execution.metrics, &mut abort, &budget);
+                    continue;
+                };
                 let plan = config
                     .scenario
                     .side_services
@@ -1565,7 +1589,7 @@ fn run_live(cli: &Cli) -> Result<(), String> {
                     descriptor,
                     config.environment.kind,
                     matcher.live_grpc,
-                    &lease.logical_account_id,
+                    character_id,
                     &match_steps,
                     action_deadline
                         .saturating_duration_since(Instant::now())
@@ -1606,6 +1630,103 @@ fn run_live(cli: &Cli) -> Result<(), String> {
                         errors.push(
                             "match_grpc_execution_failed",
                             format!("match gRPC execution failed: {error:?}"),
+                            Default::default(),
+                        );
+                        failed = true;
+                        execution_failed = true;
+                    }
+                }
+            }
+            if !execution_failed && live_match_internal {
+                let matcher = config
+                    .scenario
+                    .side_services
+                    .as_ref()
+                    .and_then(|side| side.r#match.as_ref())
+                    .ok_or("live MatchInternal configuration disappeared after validation")?;
+                let descriptor = matcher
+                    .descriptor
+                    .as_ref()
+                    .ok_or("live MatchInternal requires an explicit descriptor")?;
+                let Some((_, character_id)) = side_credentials.as_ref() else {
+                    errors.push(
+                        "match_internal_character_id_missing",
+                        "auth completed without a transferable character identity",
+                        Default::default(),
+                    );
+                    failed = true;
+                    execution_failed = true;
+                    finish_live_action(&mut auth_metrics, &execution.metrics, &mut abort, &budget);
+                    continue;
+                };
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_io()
+                    .enable_time()
+                    .build()
+                    .map_err(|_| "could not create guarded MatchInternal runtime")?;
+                let roles = vec![character_id.clone()];
+                let diagnostic_id =
+                    NEXT_MATCH_INTERNAL_DIAGNOSTIC_ID.fetch_add(1, Ordering::Relaxed);
+                let match_id = format!("loadtest-internal-match-{diagnostic_id}");
+                let room_id = format!("loadtest-internal-room-{diagnostic_id}");
+                match runtime.block_on(execute_live_match_internal_steps(
+                    descriptor,
+                    config.environment.kind,
+                    matcher.live_internal,
+                    &roles,
+                    &match_id,
+                    &room_id,
+                    action_deadline
+                        .saturating_duration_since(Instant::now())
+                        .as_millis() as u64,
+                    |admission| match admission {
+                        MatchInternalAdmission::Connection => dispatch_admission
+                            .admit_side_connection(action_deadline, || {
+                                abort.check_ctrl_c(&ctrl_c);
+                                abort.check_stop_file(config.stop_file.as_deref().map(Path::new));
+                                abort.check_deadline(unix_ms(), deadline_unix_ms);
+                                if abort.should_stop_new_sessions()
+                                    || revalidate_or_abort(&protection, &mut abort).is_some()
+                                {
+                                    return Err("MatchInternal connection admission stopped".into());
+                                }
+                                Ok(())
+                            })
+                            .map(|_| ())
+                            .map_err(|error| {
+                                loadtest_core::match_grpc::MatchGrpcError::Grpc(error.to_string())
+                            }),
+                        MatchInternalAdmission::Message { writes } => dispatch_admission
+                            .admit_side_message_with_writes(
+                                u64::from(writes),
+                                action_deadline,
+                                || {
+                                    abort.check_ctrl_c(&ctrl_c);
+                                    abort.check_stop_file(
+                                        config.stop_file.as_deref().map(Path::new),
+                                    );
+                                    abort.check_deadline(unix_ms(), deadline_unix_ms);
+                                    if abort.should_stop_new_sessions()
+                                        || revalidate_or_abort(&protection, &mut abort).is_some()
+                                    {
+                                        return Err(
+                                            "MatchInternal message admission stopped".into()
+                                        );
+                                    }
+                                    Ok(())
+                                },
+                            )
+                            .map(|_| ())
+                            .map_err(|error| {
+                                loadtest_core::match_grpc::MatchGrpcError::Grpc(error.to_string())
+                            }),
+                    },
+                )) {
+                    Ok(internal_metrics) => internal_metrics.merge_into_metrics(&mut core_metrics),
+                    Err(error) => {
+                        errors.push(
+                            "match_internal_execution_failed",
+                            format!("MatchInternal diagnostic failed: {error:?}"),
                             Default::default(),
                         );
                         failed = true;
@@ -1710,7 +1831,9 @@ fn run_live(cli: &Cli) -> Result<(), String> {
                 }
                 side_credentials = None;
             }
-            if (live_chat || live_match || live_http) && deferred_logout && pre_game_auth_completed
+            if (live_chat || live_match || live_match_internal || live_http)
+                && deferred_logout
+                && pre_game_auth_completed
             {
                 if !can_attempt_deferred_logout(deferred_logout, pre_game_auth_completed, &abort) {
                     errors.push(

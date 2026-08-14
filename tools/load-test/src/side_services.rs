@@ -266,6 +266,11 @@ pub enum SideServiceOperation {
     MatchCancel,
     MatchStatus,
     MatchEventStream,
+    MatchInternalCreateRoomAndJoin,
+    MatchInternalPlayerJoined,
+    MatchInternalStatus,
+    MatchInternalPlayerLeft,
+    MatchInternalEnd,
     AnnounceList,
     AnnounceDetail,
     AnnounceBurstRead,
@@ -285,6 +290,10 @@ impl SideServiceOperation {
                 | Self::MailNotify
                 | Self::MatchStart
                 | Self::MatchCancel
+                | Self::MatchInternalCreateRoomAndJoin
+                | Self::MatchInternalPlayerJoined
+                | Self::MatchInternalPlayerLeft
+                | Self::MatchInternalEnd
                 | Self::AnnounceCreate
                 | Self::AnnounceUpdate
                 | Self::AnnounceDelete
@@ -322,6 +331,9 @@ pub struct SideServiceConfig {
     pub live_websocket: bool,
     #[serde(default)]
     pub live_grpc: bool,
+    /// Explicit local/test gate for bounded MatchInternal diagnostics.
+    #[serde(default, alias = "live_match_internal")]
+    pub live_internal: bool,
     /// Explicit local/test gate for bounded live HTTP diagnostics.
     #[serde(default)]
     pub live_http: bool,
@@ -444,6 +456,17 @@ impl SideServicesScenario {
             if matcher.live_grpc && !matches!(kind, EnvironmentKind::Local | EnvironmentKind::Test)
             {
                 return Err("live match gRPC is restricted to local/test diagnostics".into());
+            }
+            if matcher.live_internal && matcher.descriptor.is_none() {
+                return Err("live MatchInternal diagnostics require an explicit descriptor".into());
+            }
+            if matcher.live_internal
+                && !matches!(kind, EnvironmentKind::Local | EnvironmentKind::Test)
+            {
+                return Err(
+                    "live MatchInternal diagnostics are restricted to local/test diagnostics"
+                        .into(),
+                );
             }
         }
         for (service, config) in [
@@ -920,6 +943,7 @@ mod tests {
                 writes: false,
                 live_websocket: false,
                 live_grpc: false,
+                live_internal: false,
                 live_http: false,
                 write_batch: None,
             }),
@@ -1024,6 +1048,7 @@ mod tests {
                 writes: true,
                 live_websocket: false,
                 live_grpc: false,
+                live_internal: false,
                 live_http: false,
                 write_batch: None,
             }),
@@ -1047,6 +1072,7 @@ mod tests {
             writes: true,
             live_websocket: false,
             live_grpc: false,
+            live_internal: false,
             live_http: false,
             write_batch: None,
         });

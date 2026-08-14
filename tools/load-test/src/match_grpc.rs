@@ -2,13 +2,15 @@ use std::time::{Duration, Instant};
 
 use crate::config::EnvironmentKind;
 use crate::match_pb::{
-    MatchCancelReq, MatchEvent, MatchEventStreamReq, MatchStartReq, MatchStatusReq,
-    match_service_client::MatchServiceClient,
+    CreateRoomAndJoinReq, MatchCancelReq, MatchEndReq, MatchEvent, MatchEventStreamReq,
+    MatchStartReq, MatchStatusReq, PlayerJoinedReq, PlayerLeftReq,
+    match_internal_client::MatchInternalClient, match_service_client::MatchServiceClient,
 };
 use crate::side_services::{
     PlannedSideServiceStep, ServiceDescriptor, SideServiceKind, SideServiceOperation,
 };
 use futures_util::StreamExt;
+use tonic::transport::Endpoint;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MatchGrpcOutcome {
@@ -31,6 +33,78 @@ pub struct MatchGrpcMetrics {
     pub timeouts: u64,
     pub stream_disconnects: u64,
     pub outcomes: std::collections::BTreeMap<MatchGrpcOutcome, u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MatchInternalAdmission {
+    Connection,
+    Message { writes: bool },
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MatchInternalMetrics {
+    pub operations: u64,
+    pub successes: u64,
+    pub statuses: u64,
+    pub connections: u64,
+    pub messages: u64,
+    pub writes: u64,
+    pub timeouts: u64,
+    pub grpc_errors: u64,
+    pub business_errors: u64,
+    pub latency_ms: u64,
+    /// MatchInternal has no server-side room-create timestamp. Keep this
+    /// explicit instead of fabricating a duration from client observations.
+    pub room_create_closed_observed: bool,
+}
+
+pub fn match_internal_admission_plan(
+    role_count: usize,
+) -> Result<Vec<MatchInternalAdmission>, MatchGrpcError> {
+    if !(1..=2).contains(&role_count) {
+        return Err(MatchGrpcError::Business(
+            "match_internal_roles_invalid".into(),
+        ));
+    }
+    let mut plan = vec![
+        MatchInternalAdmission::Connection,
+        MatchInternalAdmission::Message { writes: true },
+    ];
+    plan.extend(std::iter::repeat_n(
+        MatchInternalAdmission::Message { writes: true },
+        role_count,
+    ));
+    plan.push(MatchInternalAdmission::Message { writes: false });
+    plan.extend(std::iter::repeat_n(
+        MatchInternalAdmission::Message { writes: true },
+        role_count,
+    ));
+    plan.push(MatchInternalAdmission::Message { writes: true });
+    plan.push(MatchInternalAdmission::Message { writes: false });
+    Ok(plan)
+}
+
+impl MatchInternalMetrics {
+    pub fn merge_into_metrics(&self, metrics: &mut crate::metrics::Metrics) {
+        for (key, value) in [
+            ("match_internal_operations", self.operations),
+            ("match_internal_successes", self.successes),
+            ("match_internal_statuses", self.statuses),
+            ("match_internal_connections", self.connections),
+            ("match_internal_messages", self.messages),
+            ("match_internal_writes", self.writes),
+            ("match_internal_timeouts", self.timeouts),
+            ("match_internal_grpc_errors", self.grpc_errors),
+            ("match_internal_business_errors", self.business_errors),
+            (
+                "match_internal_room_create_closed_unobserved",
+                u64::from(!self.room_create_closed_observed),
+            ),
+        ] {
+            metrics.increment(key, value);
+        }
+        metrics.observe_latency("match_internal_ms", self.latency_ms);
+    }
 }
 
 impl MatchGrpcMetrics {
@@ -67,6 +141,16 @@ pub enum MatchGrpcError {
     Business(String),
     InvalidPlan,
     RoomCreateClosed,
+}
+
+pub fn character_id_from_credentials<'a>(
+    credentials: Option<&'a (String, String)>,
+) -> Result<&'a str, MatchGrpcError> {
+    let character_id = credentials
+        .map(|(_, character_id)| character_id.as_str())
+        .filter(|character_id| !character_id.is_empty())
+        .ok_or_else(|| MatchGrpcError::Business("character_id_missing".into()))?;
+    Ok(character_id)
 }
 
 impl std::fmt::Display for MatchGrpcError {
@@ -199,6 +283,249 @@ pub async fn execute_live_match_steps(
     Ok(metrics)
 }
 
+/// Runs the bounded, local/test-only MatchInternal lifecycle used to diagnose
+/// the game-server callback contract. It intentionally accepts at most two
+/// authenticated role identities and never invents room-create timing.
+pub async fn execute_live_match_internal_steps(
+    descriptor: &ServiceDescriptor,
+    environment: EnvironmentKind,
+    live_internal: bool,
+    roles: &[String],
+    match_id: &str,
+    room_id: &str,
+    timeout_ms: u64,
+    mut admit: impl FnMut(MatchInternalAdmission) -> Result<(), MatchGrpcError>,
+) -> Result<MatchInternalMetrics, MatchGrpcError> {
+    if !matches!(environment, EnvironmentKind::Local | EnvironmentKind::Test) {
+        return Err(MatchGrpcError::LiveTransportForbidden);
+    }
+    if !live_internal {
+        return Err(MatchGrpcError::LiveTransportNotEnabled);
+    }
+    if descriptor.protocol != crate::side_services::SideTransportKind::Grpc {
+        return Err(MatchGrpcError::DescriptorRejected);
+    }
+    if roles.is_empty() || roles.len() > 2 || roles.iter().any(|role| role.is_empty()) {
+        return Err(MatchGrpcError::Business(
+            "match_internal_roles_invalid".into(),
+        ));
+    }
+    let mut unique_roles = std::collections::BTreeSet::new();
+    if roles.iter().any(|role| !unique_roles.insert(role)) {
+        return Err(MatchGrpcError::Business(
+            "match_internal_duplicate_role".into(),
+        ));
+    }
+    if match_id.is_empty() || room_id.is_empty() {
+        return Err(MatchGrpcError::Business(
+            "match_internal_room_identity_missing".into(),
+        ));
+    }
+
+    admit(MatchInternalAdmission::Connection)?;
+    let mut metrics = MatchInternalMetrics {
+        connections: 1,
+        ..Default::default()
+    };
+    let started_at = Instant::now();
+    let endpoint = format!("http://{}:{}", descriptor.host, descriptor.port);
+    let channel = tokio::time::timeout(
+        Duration::from_millis(timeout_ms.max(1)),
+        Endpoint::from_shared(endpoint)
+            .map_err(|error| MatchGrpcError::Grpc(error.to_string()))?
+            .connect(),
+    )
+    .await
+    .map_err(|_| MatchGrpcError::Timeout)?
+    .map_err(|error| MatchGrpcError::Grpc(error.to_string()))?;
+    let mut internal = MatchInternalClient::new(channel.clone());
+    let mut service = MatchServiceClient::new(channel);
+
+    let mut admit_message = |writes| -> Result<(), MatchGrpcError> {
+        admit(MatchInternalAdmission::Message { writes })?;
+        metrics.messages = metrics.messages.saturating_add(1);
+        metrics.operations = metrics.operations.saturating_add(1);
+        if writes {
+            metrics.writes = metrics.writes.saturating_add(1);
+        }
+        Ok(())
+    };
+    let mut record_error = |error: &MatchGrpcError| match error {
+        MatchGrpcError::Timeout => metrics.timeouts = metrics.timeouts.saturating_add(1),
+        MatchGrpcError::Grpc(_) | MatchGrpcError::StreamDisconnected => {
+            metrics.grpc_errors = metrics.grpc_errors.saturating_add(1)
+        }
+        MatchGrpcError::Business(_) => {
+            metrics.business_errors = metrics.business_errors.saturating_add(1)
+        }
+        _ => {}
+    };
+
+    admit_message(true)?;
+    let response = match bounded(
+        timeout_ms,
+        internal.create_room_and_join(CreateRoomAndJoinReq {
+            match_id: match_id.into(),
+            room_id: room_id.into(),
+            character_ids: roles.to_vec(),
+            mode: "1v1".into(),
+        }),
+    )
+    .await
+    {
+        Ok(response) => response.into_inner(),
+        Err(error) => {
+            record_error(&error);
+            return Err(error);
+        }
+    };
+    if !response.ok {
+        let error = MatchGrpcError::Business(if response.error_code.is_empty() {
+            "match_internal_create_room_failed".into()
+        } else {
+            response.error_code
+        });
+        record_error(&error);
+        return Err(error);
+    }
+    metrics.successes = metrics.successes.saturating_add(1);
+
+    for role in roles {
+        admit_message(true)?;
+        let response = match bounded(
+            timeout_ms,
+            internal.player_joined(PlayerJoinedReq {
+                match_id: match_id.into(),
+                character_id: role.clone(),
+                room_id: room_id.into(),
+            }),
+        )
+        .await
+        {
+            Ok(response) => response.into_inner(),
+            Err(error) => {
+                record_error(&error);
+                return Err(error);
+            }
+        };
+        if !response.ok {
+            let error = MatchGrpcError::Business(if response.error_code.is_empty() {
+                "match_internal_player_joined_failed".into()
+            } else {
+                response.error_code
+            });
+            record_error(&error);
+            return Err(error);
+        }
+        metrics.successes = metrics.successes.saturating_add(1);
+    }
+
+    admit_message(false)?;
+    let status = match bounded(
+        timeout_ms,
+        service.match_status(MatchStatusReq {
+            character_id: roles[0].clone(),
+        }),
+    )
+    .await
+    {
+        Ok(response) => response.into_inner(),
+        Err(error) => {
+            record_error(&error);
+            return Err(error);
+        }
+    };
+    metrics.statuses = metrics.statuses.saturating_add(1);
+    if status.status != "in_room" {
+        let error = MatchGrpcError::Business("match_internal_status_not_in_room".into());
+        record_error(&error);
+        return Err(error);
+    }
+
+    for role in roles {
+        admit_message(true)?;
+        let response = match bounded(
+            timeout_ms,
+            internal.player_left(PlayerLeftReq {
+                match_id: match_id.into(),
+                character_id: role.clone(),
+                reason: "normal".into(),
+            }),
+        )
+        .await
+        {
+            Ok(response) => response.into_inner(),
+            Err(error) => {
+                record_error(&error);
+                return Err(error);
+            }
+        };
+        if !response.ok {
+            let error = MatchGrpcError::Business(if response.error_code.is_empty() {
+                "match_internal_player_left_failed".into()
+            } else {
+                response.error_code
+            });
+            record_error(&error);
+            return Err(error);
+        }
+        metrics.successes = metrics.successes.saturating_add(1);
+    }
+
+    admit_message(true)?;
+    let response = match bounded(
+        timeout_ms,
+        internal.match_end(MatchEndReq {
+            match_id: match_id.into(),
+            room_id: room_id.into(),
+            reason: "game_over".into(),
+        }),
+    )
+    .await
+    {
+        Ok(response) => response.into_inner(),
+        Err(error) => {
+            record_error(&error);
+            return Err(error);
+        }
+    };
+    if !response.ok {
+        let error = MatchGrpcError::Business(if response.error_code.is_empty() {
+            "match_internal_end_failed".into()
+        } else {
+            response.error_code
+        });
+        record_error(&error);
+        return Err(error);
+    }
+    metrics.successes = metrics.successes.saturating_add(1);
+
+    admit_message(false)?;
+    let status = match bounded(
+        timeout_ms,
+        service.match_status(MatchStatusReq {
+            character_id: roles[0].clone(),
+        }),
+    )
+    .await
+    {
+        Ok(response) => response.into_inner(),
+        Err(error) => {
+            record_error(&error);
+            return Err(error);
+        }
+    };
+    metrics.statuses = metrics.statuses.saturating_add(1);
+    if status.status != "idle" {
+        let error = MatchGrpcError::Business("match_internal_status_not_idle".into());
+        record_error(&error);
+        return Err(error);
+    }
+    metrics.successes = metrics.successes.saturating_add(1);
+    metrics.latency_ms = started_at.elapsed().as_millis() as u64;
+    Ok(metrics)
+}
+
 fn validate_match_status(status: &str) -> Result<(), MatchGrpcError> {
     match status {
         "idle" | "matching" | "matched" | "in_room" => Ok(()),
@@ -328,5 +655,98 @@ mod tests {
         assert!(
             matches!(error, MatchGrpcError::Business(code) if code == "match_status:server_error")
         );
+    }
+
+    #[test]
+    fn side_credentials_preserve_character_identity_for_match_runner() {
+        let credentials = Some(("ticket-only-in-memory".into(), "character-real-42".into()));
+        assert_eq!(
+            character_id_from_credentials(credentials.as_ref()).unwrap(),
+            "character-real-42"
+        );
+        assert!(matches!(
+            character_id_from_credentials(None),
+            Err(MatchGrpcError::Business(code)) if code == "character_id_missing"
+        ));
+    }
+
+    #[test]
+    fn match_internal_metrics_mark_room_create_timing_unobserved() {
+        let metrics = MatchInternalMetrics {
+            operations: 8,
+            successes: 8,
+            statuses: 2,
+            connections: 1,
+            messages: 8,
+            writes: 6,
+            ..Default::default()
+        };
+        let mut projected = crate::metrics::Metrics::default();
+        metrics.merge_into_metrics(&mut projected);
+        let snapshot = projected.snapshot();
+        assert_eq!(snapshot.counters["match_internal_operations"], 8);
+        assert_eq!(snapshot.counters["match_internal_writes"], 6);
+        assert_eq!(
+            snapshot.counters["match_internal_room_create_closed_unobserved"],
+            1
+        );
+        assert_eq!(snapshot.histograms["match_internal_ms"].count(), 1);
+    }
+
+    #[test]
+    fn match_internal_gate_rejects_remote_and_invalid_roles_without_network() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        let roles = vec!["character-a".into(), "character-b".into()];
+        let result = runtime.block_on(execute_live_match_internal_steps(
+            &descriptor(SideTransportKind::Grpc),
+            EnvironmentKind::Production,
+            true,
+            &roles,
+            "match-id",
+            "room-id",
+            1,
+            |_| Ok(()),
+        ));
+        assert!(matches!(
+            result,
+            Err(MatchGrpcError::LiveTransportForbidden)
+        ));
+
+        let result = runtime.block_on(execute_live_match_internal_steps(
+            &descriptor(SideTransportKind::Grpc),
+            EnvironmentKind::Local,
+            true,
+            &[],
+            "match-id",
+            "room-id",
+            1,
+            |_| panic!("invalid roles must fail before admission"),
+        ));
+        assert!(matches!(
+            result,
+            Err(MatchGrpcError::Business(code)) if code == "match_internal_roles_invalid"
+        ));
+    }
+
+    #[test]
+    fn match_internal_admission_plan_supports_two_roles_and_write_budget() {
+        let plan = match_internal_admission_plan(2).unwrap();
+        assert_eq!(plan.len(), 9);
+        assert_eq!(plan[0], MatchInternalAdmission::Connection);
+        assert_eq!(
+            plan.iter()
+                .filter(|admission| {
+                    matches!(admission, MatchInternalAdmission::Message { writes: true })
+                })
+                .count(),
+            6
+        );
+        assert!(matches!(
+            match_internal_admission_plan(3),
+            Err(MatchGrpcError::Business(code)) if code == "match_internal_roles_invalid"
+        ));
     }
 }
