@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -64,7 +64,9 @@ use loadtest_core::registry_observation::{
 use loadtest_core::report::{ErrorBuffer, ReportInput, write_report};
 use loadtest_core::resource::ResourceSampler;
 use loadtest_core::scheduler::MonotonicScheduler;
-use loadtest_core::side_http::{SideHttpAdmission, execute_live_mail_announce_steps};
+use loadtest_core::side_http::{
+    MailClaimFailure, SideHttpAdmission, SideHttpError, execute_live_mail_announce_steps,
+};
 use loadtest_core::side_services::{
     AuthServicesPayload, DescriptorChangeTracker, SideServiceKind, SideServiceOperation,
     SideServicesScenario, execute_side_services_dry, resolve_auth_service_descriptors,
@@ -1332,6 +1334,77 @@ fn resolve_live_side_services(
     Ok(resolved)
 }
 
+#[derive(Debug)]
+enum LiveGameSideServiceError {
+    MailClaim(MailClaimFailure),
+    Other,
+}
+
+impl From<()> for LiveGameSideServiceError {
+    fn from(_: ()) -> Self {
+        Self::Other
+    }
+}
+
+impl LiveGameSideServiceError {
+    fn from_side_http(error: SideHttpError) -> Self {
+        match error {
+            SideHttpError::MailClaimFailed(failure) => Self::MailClaim(failure),
+            _ => Self::Other,
+        }
+    }
+
+    fn report_details(&self) -> (&'static str, &'static str, BTreeMap<String, String>) {
+        match self {
+            Self::MailClaim(failure) => {
+                let (category, message) = match failure.claim_status.as_str() {
+                    "processing" => (
+                        "online_mail_claim_processing",
+                        "online mail claim is still processing",
+                    ),
+                    "reconciliation_pending" => (
+                        "online_mail_claim_reconciliation_pending",
+                        "online mail claim is pending reconciliation",
+                    ),
+                    "retryable_failure" => (
+                        "online_mail_claim_retryable_failure",
+                        "online mail claim needs a retry",
+                    ),
+                    "blocked_capacity" => (
+                        "online_mail_claim_blocked_capacity",
+                        "online mail claim is blocked by inventory capacity",
+                    ),
+                    "permanent_failure" => (
+                        "online_mail_claim_permanent_failure",
+                        "online mail claim failed permanently",
+                    ),
+                    "manual_review" => (
+                        "online_mail_claim_manual_review",
+                        "online mail claim requires manual review",
+                    ),
+                    _ => (
+                        "online_mail_claim_rejected",
+                        "online mail claim was not accepted",
+                    ),
+                };
+                let mut context = BTreeMap::from([
+                    ("claim_status".to_string(), failure.claim_status.clone()),
+                    ("http_status".to_string(), failure.http_status.to_string()),
+                ]);
+                if let Some(error) = &failure.error {
+                    context.insert("error".to_string(), error.clone());
+                }
+                (category, message, context)
+            }
+            Self::Other => (
+                "online_mail_claim_execution_failed",
+                "online mail claim did not complete",
+                BTreeMap::new(),
+            ),
+        }
+    }
+}
+
 /// Execute public side-service diagnostics for one authenticated player while
 /// the caller holds the lifecycle phase required by that operation. Tickets
 /// never cross account boundaries and the synchronous controller retains one
@@ -1350,28 +1423,29 @@ fn execute_live_game_side_services<P: RuntimeProtection>(
     abort: &mut AbortController,
     ctrl_c: &AtomicBool,
     protection: &P,
-) -> Result<loadtest_core::metrics::MetricsSnapshot, String> {
+) -> Result<loadtest_core::metrics::MetricsSnapshot, LiveGameSideServiceError> {
     let configured_side = config
         .scenario
         .side_services
         .as_ref()
-        .ok_or("live game-side composite requires side_services")?;
+        .ok_or(LiveGameSideServiceError::Other)?;
     let mut metrics = Metrics::default();
     let side = resolve_live_side_services(
         configured_side,
         auth_services,
         descriptor_tracker,
         &mut metrics,
-    )?;
+    )
+    .map_err(|_| LiveGameSideServiceError::Other)?;
     let plan = side
         .executable_plan(budget)
-        .map_err(|error| format!("live composite side-service plan rejected: {error}"))?;
+        .map_err(|_| LiveGameSideServiceError::Other)?;
 
     if let Some(chat) = side.chat.as_ref().filter(|chat| chat.live_websocket) {
         let descriptor = chat
             .descriptor
             .as_ref()
-            .ok_or("live composite chat requires an explicit descriptor")?;
+            .ok_or(LiveGameSideServiceError::Other)?;
         let chat_steps = plan
             .steps
             .iter()
@@ -1388,11 +1462,13 @@ fn execute_live_game_side_services<P: RuntimeProtection>(
                     abort,
                 )
             })
-            .map_err(|error| map_auth_admission_to_string(abort, error))?;
+            .map_err(|_| LiveGameSideServiceError::Other)?;
         // The concrete chat runner applies every configured think_time before
         // sending that operation. Private/group sends conservatively reserve
         // one potential write before their frame can be dispatched.
-        for writes in composite_chat_admission_writes(&chat_steps)? {
+        for writes in composite_chat_admission_writes(&chat_steps)
+            .map_err(|_| LiveGameSideServiceError::Other)?
+        {
             dispatch_admission
                 .admit_side_message_with_writes(writes, action_deadline, || {
                     check_live_composite_side_controller(
@@ -1403,13 +1479,13 @@ fn execute_live_game_side_services<P: RuntimeProtection>(
                         abort,
                     )
                 })
-                .map_err(|error| map_auth_admission_to_string(abort, error))?;
+                .map_err(|_| LiveGameSideServiceError::Other)?;
         }
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_io()
             .enable_time()
             .build()
-            .map_err(|_| "could not create guarded composite chat runtime")?;
+            .map_err(|_| LiveGameSideServiceError::Other)?;
         let chat_metrics = runtime
             .block_on(execute_live_chat_steps(
                 descriptor,
@@ -1428,7 +1504,7 @@ fn execute_live_game_side_services<P: RuntimeProtection>(
                     max_jitter_ms: 50,
                 },
             ))
-            .map_err(|error| format!("composite chat WebSocket execution failed: {error:?}"))?;
+            .map_err(|_| LiveGameSideServiceError::Other)?;
         chat_metrics.merge_into_metrics(&mut metrics);
     }
 
@@ -1488,7 +1564,7 @@ fn execute_live_game_side_services<P: RuntimeProtection>(
                     }),
             },
         )
-        .map_err(|error| format!("composite mail/announce HTTP execution failed: {error:?}"))?;
+        .map_err(LiveGameSideServiceError::from_side_http)?;
         http_metrics.merge_into_metrics(&mut metrics);
     }
 
@@ -1499,13 +1575,14 @@ fn execute_live_game_side_services<P: RuntimeProtection>(
 /// clients may own a Tokio runtime internally, whose destructor must not run
 /// from that async context. Run a bounded side-service phase on a scoped OS
 /// thread and synchronously join it before the KCP runner advances.
-fn run_scoped_blocking_side_work<T>(work: impl FnOnce() -> Result<T, ()> + Send) -> Result<T, ()>
+fn run_scoped_blocking_side_work<T, E>(work: impl FnOnce() -> Result<T, E> + Send) -> Result<T, E>
 where
     T: Send,
+    E: Send + From<()>,
 {
     std::thread::scope(|scope| match scope.spawn(work).join() {
         Ok(result) => result,
-        Err(_) => Err(()),
+        Err(_) => Err(E::from(())),
     })
 }
 
@@ -2335,6 +2412,7 @@ fn run_live(cli: &Cli) -> Result<(), String> {
                     }
                     if !failed && tickets.len() == 2 {
                         let remaining = action_deadline.saturating_duration_since(Instant::now());
+                        let mut online_mail_claim_error_reported = false;
                         let game_result = match (
                             LiveKcpTransport::new(
                                 Instant::now() + remaining,
@@ -2373,57 +2451,60 @@ fn run_live(cli: &Cli) -> Result<(), String> {
                                             == GameRunnerCheckpoint::OnlinePairReadyStarted
                                         {
                                             if online_default_match_mail_claim_phase {
-                                                let online_result =
-                                                    run_scoped_blocking_side_work(|| {
-                                                        check_live_composite_side_controller(
-                                                            &config,
-                                                            deadline_unix_ms,
-                                                            &ctrl_c,
-                                                            &protection,
-                                                            &mut abort,
-                                                        )
-                                                        .map_err(|_| ())?;
-                                                        let mut snapshots = Vec::with_capacity(
-                                                            side_credentials.len(),
+                                                let online_result: Result<
+                                                    Vec<loadtest_core::metrics::MetricsSnapshot>,
+                                                    LiveGameSideServiceError,
+                                                > = run_scoped_blocking_side_work(|| {
+                                                    check_live_composite_side_controller(
+                                                        &config,
+                                                        deadline_unix_ms,
+                                                        &ctrl_c,
+                                                        &protection,
+                                                        &mut abort,
+                                                    )
+                                                    .map_err(|_| LiveGameSideServiceError::Other)?;
+                                                    let mut snapshots =
+                                                        Vec::with_capacity(side_credentials.len());
+                                                    for (ticket, character_id, auth_services) in
+                                                        &side_credentials
+                                                    {
+                                                        snapshots.push(
+                                                            execute_live_game_side_services(
+                                                                &config,
+                                                                &budget,
+                                                                ticket,
+                                                                character_id,
+                                                                auth_services.as_ref(),
+                                                                &mut descriptor_tracker,
+                                                                action_deadline,
+                                                                deadline_unix_ms,
+                                                                &mut dispatch_admission,
+                                                                &mut abort,
+                                                                &ctrl_c,
+                                                                &protection,
+                                                            )?,
                                                         );
-                                                        for (ticket, character_id, auth_services) in
-                                                            &side_credentials
-                                                        {
-                                                            snapshots.push(
-                                                                execute_live_game_side_services(
-                                                                    &config,
-                                                                    &budget,
-                                                                    ticket,
-                                                                    character_id,
-                                                                    auth_services.as_ref(),
-                                                                    &mut descriptor_tracker,
-                                                                    action_deadline,
-                                                                    deadline_unix_ms,
-                                                                    &mut dispatch_admission,
-                                                                    &mut abort,
-                                                                    &ctrl_c,
-                                                                    &protection,
-                                                                )
-                                                                .map_err(|_| ())?,
-                                                            );
-                                                        }
-                                                        Ok(snapshots)
-                                                    });
+                                                    }
+                                                    Ok(snapshots)
+                                                });
                                                 match online_result {
                                                     Ok(snapshots) => {
                                                         for metrics in snapshots {
                                                             core_metrics.merge_snapshot(&metrics);
                                                         }
                                                     }
-                                                    Err(()) => {
-                                                        errors.push(
-                                                            "online_mail_claim_execution_failed",
-                                                            "online mail claim did not complete",
-                                                            Default::default(),
+                                                    Err(error) => {
+                                                        let (category, message, context) =
+                                                            error.report_details();
+                                                        errors.push(category, message, context);
+                                                        online_mail_claim_error_reported = true;
+                                                        return Err(
+                                                            GameLiveError::GameplayFailed {
+                                                                message: message.to_string(),
+                                                                metrics: Default::default(),
+                                                                failure_category: Some(category),
+                                                            },
                                                         );
-                                                        return Err(GameLiveError::Transport(
-                                                            "online mail-claim phase failed",
-                                                        ));
                                                     }
                                                 }
                                             }
@@ -2542,11 +2623,13 @@ fn run_live(cli: &Cli) -> Result<(), String> {
                                 if let Some(metrics) = error.gameplay_metrics() {
                                     core_metrics.merge_snapshot(metrics);
                                 }
-                                errors.push(
-                                    game_failure_category(&error),
-                                    "two-player KCP game session did not complete",
-                                    Default::default(),
-                                );
+                                if !online_mail_claim_error_reported {
+                                    errors.push(
+                                        game_failure_category(&error),
+                                        "two-player KCP game session did not complete",
+                                        Default::default(),
+                                    );
+                                }
                                 failed = true;
                             }
                         }
@@ -4737,6 +4820,38 @@ mod tests {
     }
 
     #[test]
+    fn online_mail_claim_failures_keep_public_contract_context_and_fixed_categories() {
+        for (http_status, claim_status, error, category) in [
+            (
+                409,
+                "manual_review",
+                Some("MAIL_CLAIM_ROUTE_UNAVAILABLE"),
+                "online_mail_claim_manual_review",
+            ),
+            (202, "processing", None, "online_mail_claim_processing"),
+            (
+                202,
+                "reconciliation_pending",
+                Some("MAIL_CLAIM_RECONCILIATION_PENDING"),
+                "online_mail_claim_reconciliation_pending",
+            ),
+        ] {
+            let failure = LiveGameSideServiceError::from_side_http(SideHttpError::MailClaimFailed(
+                MailClaimFailure {
+                    http_status,
+                    claim_status: claim_status.into(),
+                    error: error.map(str::to_owned),
+                },
+            ));
+            let (actual_category, _message, context) = failure.report_details();
+            assert_eq!(actual_category, category);
+            assert_eq!(context.get("http_status"), Some(&http_status.to_string()));
+            assert_eq!(context.get("claim_status"), Some(&claim_status.to_string()));
+            assert_eq!(context.get("error").map(String::as_str), error);
+        }
+    }
+
+    #[test]
     fn dry_run_reconnect_burst_writes_offline_plan_metrics_without_transport() {
         let temp_root = std::env::temp_dir().join(format!(
             "loadtest-reconnect-dry-{}-{}",
@@ -5018,7 +5133,7 @@ mod tests {
                         .map_err(|_| ())?;
                     side_runtime.block_on(async {});
                     drop(side_runtime);
-                    Ok(std::thread::current().id())
+                    Ok::<_, ()>(std::thread::current().id())
                 })
             })
             .unwrap();

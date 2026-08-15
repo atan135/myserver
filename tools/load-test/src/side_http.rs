@@ -29,7 +29,17 @@ pub enum SideHttpError {
     RateLimited,
     HttpStatus(u16),
     Business(String),
+    MailClaimFailed(MailClaimFailure),
     Admission(String),
+}
+
+/// Public mail-claim result semantics retained when a claim is not complete.
+/// These fields intentionally mirror only the player-safe HTTP contract.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MailClaimFailure {
+    pub http_status: u16,
+    pub claim_status: String,
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -152,10 +162,45 @@ impl ReqwestSideHttpTransport {
         path: &str,
         body: Option<Value>,
     ) -> Result<HttpResponse, SideHttpError> {
-        self.send_with_extra_header(method, path, body, None)
+        let response = self.send_response(method, path, body, None)?;
+        if !(200..300).contains(&response.status) {
+            return Err(SideHttpError::Business(error_code(
+                &response.body,
+                response.status,
+            )));
+        }
+        Ok(response)
     }
 
     fn send_with_extra_header(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<Value>,
+        extra_header: Option<(&str, &str)>,
+    ) -> Result<HttpResponse, SideHttpError> {
+        let response = self.send_response(method, path, body, extra_header)?;
+        if !(200..300).contains(&response.status) {
+            return Err(SideHttpError::Business(error_code(
+                &response.body,
+                response.status,
+            )));
+        }
+        Ok(response)
+    }
+
+    /// Mail-claim results use structured HTTP bodies for both completed and
+    /// incomplete workflows. Keep those public semantics available to the
+    /// caller instead of collapsing a 409/422/503 into a generic code.
+    fn send_mail_claim(
+        &self,
+        path: &str,
+        body: Option<Value>,
+    ) -> Result<HttpResponse, SideHttpError> {
+        self.send_response(reqwest::Method::POST, path, body, None)
+    }
+
+    fn send_response(
         &self,
         method: reqwest::Method,
         path: &str,
@@ -190,9 +235,6 @@ impl ReqwestSideHttpTransport {
         }
         if status == 408 || status == 504 {
             return Err(SideHttpError::Timeout);
-        }
-        if !(200..300).contains(&status) {
-            return Err(SideHttpError::Business(error_code(&body, status)));
         }
         Ok(HttpResponse { status, body })
     }
@@ -346,6 +388,51 @@ fn record_mail_claim_result(metrics: &mut SideHttpMetrics, body: &Value) {
         .saturating_add(1);
 }
 
+fn mail_claim_failure(response: &HttpResponse) -> Option<MailClaimFailure> {
+    let claim_status = response
+        .body
+        .get("claim_status")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("unknown")
+        .to_owned();
+    if (200..300).contains(&response.status) && claim_status == "claimed" {
+        return None;
+    }
+    let error = response
+        .body
+        .get("error")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .or_else(|| {
+            response
+                .body
+                .get("error_code")
+                .or_else(|| response.body.get("code"))
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+        });
+    Some(MailClaimFailure {
+        http_status: response.status,
+        claim_status,
+        error,
+    })
+}
+
+fn mail_claim_failure_metric_code(failure: &MailClaimFailure) -> &'static str {
+    match failure.claim_status.as_str() {
+        "processing" => "mail_claim_processing",
+        "reconciliation_pending" => "mail_claim_reconciliation_pending",
+        "retryable_failure" => "mail_claim_retryable_failure",
+        "blocked_capacity" => "mail_claim_blocked_capacity",
+        "permanent_failure" => "mail_claim_permanent_failure",
+        "manual_review" => "mail_claim_manual_review",
+        _ => "mail_claim_rejected",
+    }
+}
+
 fn record_success(
     metrics: &mut SideHttpMetrics,
     step: &PlannedSideServiceStep,
@@ -386,6 +473,9 @@ fn record_error(
         SideHttpError::Timeout => SideFakeOutcome::Timeout,
         SideHttpError::Disconnect => SideFakeOutcome::Disconnect,
         SideHttpError::Business(code) => SideFakeOutcome::BusinessError(code.clone()),
+        SideHttpError::MailClaimFailed(failure) => {
+            SideFakeOutcome::BusinessError(mail_claim_failure_metric_code(failure).into())
+        }
         _ => SideFakeOutcome::BusinessError("request_rejected".into()),
     };
     metrics.side.record(step, outcome);
@@ -539,8 +629,7 @@ fn execute_live_mail_announce_steps_with_mail_notification_token(
                 ),
                 Some(serde_json::json!({})),
             ),
-            SideServiceOperation::MailClaim => transport.send(
-                reqwest::Method::POST,
+            SideServiceOperation::MailClaim => transport.send_mail_claim(
                 &format!(
                     "/api/v1/mails/{}/claim",
                     mail_id
@@ -586,6 +675,11 @@ fn execute_live_mail_announce_steps_with_mail_notification_token(
                 }
                 if step.operation == SideServiceOperation::MailClaim {
                     record_mail_claim_result(&mut metrics, &response.body);
+                    if let Some(failure) = mail_claim_failure(&response) {
+                        let error = SideHttpError::MailClaimFailed(failure);
+                        record_error(&mut metrics, step, started, &error);
+                        return Err(error);
+                    }
                 }
                 if step.operation == SideServiceOperation::MailNotify {
                     let observed_mail_id = mail_notification_from(&response.body)?;
@@ -755,22 +849,28 @@ mod tests {
     }
 
     fn spawn_json_server(responses: Vec<&'static str>) -> (u16, thread::JoinHandle<()>) {
+        spawn_json_server_with_status(responses.into_iter().map(|body| (200, body)).collect())
+    }
+
+    fn spawn_json_server_with_status(
+        responses: Vec<(u16, &'static str)>,
+    ) -> (u16, thread::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind test HTTP listener");
         let port = listener.local_addr().expect("listener address").port();
         let handle = thread::spawn(move || {
-            for body in responses {
+            for (status, body) in responses {
                 let (mut stream, _) = listener.accept().expect("accept test HTTP request");
-                respond_json(&mut stream, body);
+                respond_json(&mut stream, status, body);
             }
         });
         (port, handle)
     }
 
-    fn respond_json(stream: &mut TcpStream, body: &str) {
+    fn respond_json(stream: &mut TcpStream, status: u16, body: &str) {
         let mut request = [0_u8; 4096];
         let _ = stream.read(&mut request);
         let response = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            "HTTP/1.1 {status} Test\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
             body.len(),
             body
         );
@@ -839,6 +939,87 @@ mod tests {
             snapshot.counters["side_mail_notification_observation_holes"],
             5
         );
+    }
+
+    #[test]
+    fn live_mail_claim_preserves_incomplete_public_contracts() {
+        for (status, body, expected) in [
+            (
+                409,
+                r#"{"claim_status":"manual_review","error":"MAIL_CLAIM_ROUTE_UNAVAILABLE"}"#,
+                MailClaimFailure {
+                    http_status: 409,
+                    claim_status: "manual_review".into(),
+                    error: Some("MAIL_CLAIM_ROUTE_UNAVAILABLE".into()),
+                },
+            ),
+            (
+                202,
+                r#"{"claim_status":"processing"}"#,
+                MailClaimFailure {
+                    http_status: 202,
+                    claim_status: "processing".into(),
+                    error: None,
+                },
+            ),
+            (
+                202,
+                r#"{"claim_status":"reconciliation_pending","error":"MAIL_CLAIM_RECONCILIATION_PENDING"}"#,
+                MailClaimFailure {
+                    http_status: 202,
+                    claim_status: "reconciliation_pending".into(),
+                    error: Some("MAIL_CLAIM_RECONCILIATION_PENDING".into()),
+                },
+            ),
+        ] {
+            let (port, server) = spawn_json_server_with_status(vec![
+                (200, r#"{"mails":[{"mail_id":"mail-1"}]}"#),
+                (status, body),
+            ]);
+            let scenario = scenario_with_port(true, port);
+            let result = execute_live_mail_announce_steps(
+                &scenario,
+                EnvironmentKind::Local,
+                "loadtest-local",
+                "ticket",
+                &[
+                    step(SideServiceKind::Mail, SideServiceOperation::MailList),
+                    step(SideServiceKind::Mail, SideServiceOperation::MailClaim),
+                ],
+                1_000,
+                |_| Ok(()),
+            );
+            assert_eq!(result, Err(SideHttpError::MailClaimFailed(expected)));
+            server.join().expect("test HTTP server thread");
+        }
+    }
+
+    #[test]
+    fn live_mail_claim_accepts_claimed_and_only_counts_claimed_replay_as_idempotent() {
+        let (port, server) = spawn_json_server(vec![
+            r#"{"mails":[{"mail_id":"mail-1"}]}"#,
+            r#"{"claim_status":"claimed","already_claimed":false}"#,
+            r#"{"claim_status":"claimed","already_claimed":true}"#,
+        ]);
+        let scenario = scenario_with_port(true, port);
+        let metrics = execute_live_mail_announce_steps(
+            &scenario,
+            EnvironmentKind::Local,
+            "loadtest-local",
+            "ticket",
+            &[
+                step(SideServiceKind::Mail, SideServiceOperation::MailList),
+                step(SideServiceKind::Mail, SideServiceOperation::MailClaim),
+                step(SideServiceKind::Mail, SideServiceOperation::MailClaim),
+            ],
+            1_000,
+            |_| Ok(()),
+        )
+        .expect("claimed responses should complete the mail-claim phase");
+        assert_eq!(metrics.mail_claim_successes, 1);
+        assert_eq!(metrics.mail_claim_idempotent_replays, 1);
+        assert_eq!(metrics.writes, 2);
+        server.join().expect("test HTTP server thread");
     }
 
     #[test]
