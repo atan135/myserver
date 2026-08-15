@@ -108,6 +108,55 @@ impl RegistryRedisErrorClass {
     }
 }
 
+/// Safe connection-stage classes. These intentionally have no command or
+/// server detail because a connection failure cannot be attributed to a
+/// read-only adapter command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RegistryRedisConnectionErrorClass {
+    AuthenticationFailed,
+    Io,
+    Client,
+    Retryable,
+    ClusterUnavailable,
+    Other,
+}
+
+impl RegistryRedisConnectionErrorClass {
+    fn from_redis_error(error: &RedisError) -> Option<Self> {
+        match error.kind() {
+            RedisErrorKind::AuthenticationFailed => Some(Self::AuthenticationFailed),
+            RedisErrorKind::IoError => Some(Self::Io),
+            RedisErrorKind::InvalidClientConfig | RedisErrorKind::ClientError => Some(Self::Client),
+            RedisErrorKind::BusyLoadingError
+            | RedisErrorKind::TryAgain
+            | RedisErrorKind::Moved
+            | RedisErrorKind::Ask => Some(Self::Retryable),
+            RedisErrorKind::ClusterDown
+            | RedisErrorKind::MasterDown
+            | RedisErrorKind::ClusterConnectionNotFound
+            | RedisErrorKind::MasterNameNotFoundBySentinel
+            | RedisErrorKind::NoValidReplicasFoundBySentinel => Some(Self::ClusterUnavailable),
+            // A Redis server response at connection setup has no adapter
+            // command attribution. Keep the existing generic transport class.
+            RedisErrorKind::ResponseError
+            | RedisErrorKind::ExtensionError
+            | RedisErrorKind::TypeError => None,
+            _ => Some(Self::Other),
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::AuthenticationFailed => "authentication_failed",
+            Self::Io => "io",
+            Self::Client => "client",
+            Self::Retryable => "retryable",
+            Self::ClusterUnavailable => "cluster_unavailable",
+            Self::Other => "other",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(rename_all = "kebab-case")]
 pub enum ObservedService {
@@ -346,7 +395,7 @@ impl RedisReadonlyRegistryTransport {
             .client
             .get_multiplexed_async_connection()
             .await
-            .map_err(|_| RegistryObservationError::TransportUnavailable)?;
+            .map_err(registry_redis_connection_error)?;
         let mut instances = Vec::new();
         let mut stale_cleanups = Vec::new();
         let mut instance_metrics = Vec::new();
@@ -1033,6 +1082,9 @@ pub enum RegistryObservationError {
     InvalidRequest,
     InvalidRuntimeConfiguration,
     TransportUnavailable,
+    RedisConnectionFailed {
+        class: RegistryRedisConnectionErrorClass,
+    },
     RedisCommandRejected {
         command: RegistryRedisCommand,
     },
@@ -1054,6 +1106,7 @@ impl RegistryObservationError {
             Self::InvalidRequest => "registry_observation_invalid_request",
             Self::InvalidRuntimeConfiguration => "registry_observation_invalid_runtime",
             Self::TransportUnavailable => "registry_observation_transport_unavailable",
+            Self::RedisConnectionFailed { .. } => "registry_redis_connection_failed",
             Self::RedisCommandRejected { .. } => "registry_redis_command_rejected",
             Self::RedisCommandFailed { .. } => "registry_redis_command_failed",
             Self::InconsistentWindow => "registry_observation_inconsistent_window",
@@ -1070,6 +1123,7 @@ impl RegistryObservationError {
                 "read-only registry observer runtime configuration is invalid"
             }
             Self::TransportUnavailable => "read-only registry transport could not be established",
+            Self::RedisConnectionFailed { .. } => "read-only registry Redis connection failed",
             Self::RedisCommandRejected { .. } => {
                 "read-only registry Redis command was rejected by its access policy"
             }
@@ -1092,6 +1146,9 @@ impl RegistryObservationError {
     pub fn report_context(&self) -> BTreeMap<String, String> {
         let mut context = BTreeMap::new();
         match self {
+            Self::RedisConnectionFailed { class } => {
+                context.insert("redis_connection_error_class".into(), class.as_str().into());
+            }
             Self::RedisCommandRejected { command } => {
                 context.insert("redis_command".into(), command.as_str().into());
                 context.insert("redis_error_class".into(), "permission_denied".into());
@@ -1104,6 +1161,12 @@ impl RegistryObservationError {
         }
         context
     }
+}
+
+fn registry_redis_connection_error(error: RedisError) -> RegistryObservationError {
+    RegistryRedisConnectionErrorClass::from_redis_error(&error)
+        .map(|class| RegistryObservationError::RedisConnectionFailed { class })
+        .unwrap_or(RegistryObservationError::TransportUnavailable)
 }
 
 fn registry_redis_command_error(
@@ -1126,6 +1189,7 @@ impl std::fmt::Display for RegistryObservationError {
                 "registry observer runtime configuration is invalid"
             }
             Self::TransportUnavailable => "registry read-only transport is unavailable",
+            Self::RedisConnectionFailed { .. } => "registry read-only Redis connection failed",
             Self::RedisCommandRejected { .. } => "registry read-only Redis command was rejected",
             Self::RedisCommandFailed { .. } => "registry read-only Redis command failed",
             Self::InconsistentWindow => "registry observation run_id or window is inconsistent",
@@ -1319,6 +1383,89 @@ mod tests {
             "redis://",
             "WRONGTYPE",
         ] {
+            assert!(!report_text.contains(forbidden));
+        }
+    }
+
+    #[test]
+    fn redis_connection_errors_are_classified_without_command_or_details() {
+        let cases = [
+            (
+                RedisErrorKind::AuthenticationFailed,
+                RegistryRedisConnectionErrorClass::AuthenticationFailed,
+            ),
+            (
+                RedisErrorKind::IoError,
+                RegistryRedisConnectionErrorClass::Io,
+            ),
+            (
+                RedisErrorKind::ClientError,
+                RegistryRedisConnectionErrorClass::Client,
+            ),
+            (
+                RedisErrorKind::BusyLoadingError,
+                RegistryRedisConnectionErrorClass::Retryable,
+            ),
+            (
+                RedisErrorKind::ClusterDown,
+                RegistryRedisConnectionErrorClass::ClusterUnavailable,
+            ),
+            (
+                RedisErrorKind::ReadOnly,
+                RegistryRedisConnectionErrorClass::Other,
+            ),
+        ];
+
+        for (kind, class) in cases {
+            let error = registry_redis_connection_error(RedisError::from((
+                kind,
+                "connection failed",
+                "redis://observer:secret@host token=top-secret key=service:private".to_string(),
+            )));
+            assert_eq!(
+                error,
+                RegistryObservationError::RedisConnectionFailed { class }
+            );
+            assert_eq!(
+                error.report_context(),
+                BTreeMap::from([("redis_connection_error_class".into(), class.as_str().into(),)])
+            );
+
+            let report_text = serde_json::to_string(&serde_json::json!({
+                "category": error.report_category(),
+                "message": error.report_message(),
+                "context": error.report_context(),
+            }))
+            .unwrap();
+            assert!(report_text.contains("registry_redis_connection_failed"));
+            assert!(report_text.contains(class.as_str()));
+            assert!(!report_text.contains("redis_command"));
+            for forbidden in ["redis://", "top-secret", "service:private", "token="] {
+                assert!(!report_text.contains(forbidden));
+            }
+        }
+    }
+
+    #[test]
+    fn unattributable_connection_responses_keep_transport_generic() {
+        let error = registry_redis_connection_error(RedisError::from((
+            RedisErrorKind::ResponseError,
+            "server error",
+            "NOPERM key=service:private password=top-secret".to_string(),
+        )));
+        assert_eq!(error, RegistryObservationError::TransportUnavailable);
+        assert_eq!(
+            error.report_category(),
+            "registry_observation_transport_unavailable"
+        );
+        assert!(error.report_context().is_empty());
+        let report_text = serde_json::to_string(&serde_json::json!({
+            "category": error.report_category(),
+            "message": error.report_message(),
+            "context": error.report_context(),
+        }))
+        .unwrap();
+        for forbidden in ["NOPERM", "service:private", "top-secret"] {
             assert!(!report_text.contains(forbidden));
         }
     }

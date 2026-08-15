@@ -4526,6 +4526,33 @@ mod tests {
         let mut abort = AbortController::default();
         let mut failed = false;
         record_registry_observation_result(
+            Err(RegistryObservationError::RedisConnectionFailed {
+                class: loadtest_core::registry_observation::RegistryRedisConnectionErrorClass::Io,
+            }),
+            &mut latest,
+            &mut metrics,
+            &mut errors,
+            &mut abort,
+            &mut failed,
+        );
+        assert!(latest.is_none());
+        assert!(failed);
+        assert_eq!(
+            errors.samples()[0].category,
+            "registry_redis_connection_failed"
+        );
+        assert_eq!(
+            errors.samples()[0].context,
+            BTreeMap::from([("redis_connection_error_class".into(), "io".into())])
+        );
+        assert!(!errors.samples()[0].context.contains_key("redis_command"));
+
+        let mut latest = None;
+        let mut metrics = Metrics::default();
+        let mut errors = ErrorBuffer::default();
+        let mut abort = AbortController::default();
+        let mut failed = false;
+        record_registry_observation_result(
             Err(RegistryObservationError::RedisCommandRejected {
                 command: loadtest_core::registry_observation::RegistryRedisCommand::Zrange,
             }),
@@ -4551,7 +4578,7 @@ mod tests {
     }
 
     #[test]
-    fn registry_observation_failure_report_keeps_redis_error_details_redacted() {
+    fn registry_observation_failure_report_keeps_redis_connection_details_redacted() {
         let root = std::env::temp_dir().join(format!(
             "loadtest-registry-error-report-{}-{}",
             std::process::id(),
@@ -4563,9 +4590,9 @@ mod tests {
         let mut config = registry_observer_config();
         config.reports_root = root.to_string_lossy().into_owned();
         let budget = config.effective_budget(&BudgetOverride::default()).unwrap();
-        let error = RegistryObservationError::RedisCommandFailed {
-            command: loadtest_core::registry_observation::RegistryRedisCommand::Hgetall,
-            class: loadtest_core::registry_observation::RegistryRedisErrorClass::TypeError,
+        let error = RegistryObservationError::RedisConnectionFailed {
+            class:
+                loadtest_core::registry_observation::RegistryRedisConnectionErrorClass::AuthenticationFailed,
         };
 
         assert!(
@@ -4599,12 +4626,13 @@ mod tests {
         .collect::<Vec<_>>()
         .join("\n");
 
-        assert!(artifacts.contains("registry_redis_command_failed"));
-        assert!(artifacts.contains("\"redis_command\":\"hgetall\""));
-        assert!(artifacts.contains("\"redis_error_class\":\"type_error\""));
+        assert!(artifacts.contains("registry_redis_connection_failed"));
+        assert!(artifacts.contains("\"redis_connection_error_class\":\"authentication_failed\""));
+        assert!(!artifacts.contains("redis_command"));
         for forbidden in [
             "redis://observer:secret@host",
             "top-secret",
+            "observer-user",
             "service:private",
             "metrics:v2:latest:private",
             "WRONGTYPE",
