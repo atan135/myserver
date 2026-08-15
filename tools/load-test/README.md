@@ -166,6 +166,14 @@ only, never account IDs, character IDs, or ticket values. The deterministic
 fake exercises lifecycle transitions and backoff; it does not validate a real
 session, Redis ticket owner, proxy routing, or game-server room recovery.
 
+Each planned room reconnect also reserves one conditional handoff-retry slot:
+the adapter waits 25ms with controller revalidation, then resends the same
+ticket-bound reconnect request only after the one documented temporary
+not-yet-offline rejection. The slot is included in operation, message, and
+potential-write limits before transport setup even when no retry is eventually
+sent. Other room business failures, error packets, boundary failures, and
+unexpected responses remain fail-closed.
+
 ### Opt-in live room gameplay
 
 The normal scenario leaves `scenario.live_gameplay` absent, so a guarded live

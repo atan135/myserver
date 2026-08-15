@@ -55,9 +55,10 @@ use loadtest_core::protection::{
     DryRunProtection, LiveAuthProtection, RuntimeProtection, revalidate_or_abort,
 };
 use loadtest_core::reconnect_burst::{
-    ReconnectBurstAction, ReconnectBurstAdmission, ReconnectBurstExecutionGate,
-    ReconnectBurstExecutor, ReconnectBurstSpec, ReconnectBurstStep, estimate_live_reconnect_burst,
-    execute_reconnect_burst, plan_reconnect_burst, validate_live_reconnect_burst_budget,
+    ROOM_HANDOFF_RETRY_BACKOFF_MS, ReconnectBurstAction, ReconnectBurstAdmission,
+    ReconnectBurstExecutionGate, ReconnectBurstExecutor, ReconnectBurstSpec, ReconnectBurstStep,
+    estimate_live_reconnect_burst, execute_reconnect_burst, plan_reconnect_burst,
+    validate_live_reconnect_burst_budget,
 };
 use loadtest_core::registry_observation::{
     RegistryObservationError, RegistryObservationReport, RegistryObservationRequest,
@@ -605,6 +606,13 @@ fn run_dry(cli: &Cli) -> Result<(), String> {
                     .filter(|action| action.step == ReconnectBurstStep::RecoverRoom)
                     .count() as u64,
             );
+            metrics.increment(
+                "reconnect_burst_room_recovery_retry_slots",
+                plan.actions
+                    .iter()
+                    .filter(|action| action.step == ReconnectBurstStep::RetryRecoverRoom)
+                    .count() as u64,
+            );
             metrics.increment("reconnect_burst_backoff_ms", plan.total_backoff_ms);
             metrics.increment(
                 "reconnect_burst_potential_data_writes",
@@ -1137,6 +1145,7 @@ fn game_failure_category(error: &GameLiveError) -> &'static str {
 
 const MAX_ROOM_RECOVERY_ASYNC_PUSHES: usize = 16;
 const RECONNECT_FAILURE_PREFIX: &str = "reconnect_failure:";
+const TEMPORARY_ROOM_HANDOFF_ERROR_CODE: &str = "PLAYER_NOT_OFFLINE";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ReconnectFailureCategory {
@@ -1150,6 +1159,7 @@ enum ReconnectFailureCategory {
     RoomServerBusinessError,
     RoomBoundaryRejected,
     RoomAsyncPushLimit,
+    RoomHandoffRetryExhausted,
     TransportFailed,
     ExecutionFailed,
 }
@@ -1167,6 +1177,7 @@ impl ReconnectFailureCategory {
             Self::RoomServerBusinessError => "reconnect_burst_room_server_business_error",
             Self::RoomBoundaryRejected => "reconnect_burst_room_boundary_rejected",
             Self::RoomAsyncPushLimit => "reconnect_burst_room_async_push_limit",
+            Self::RoomHandoffRetryExhausted => "reconnect_burst_room_handoff_retry_exhausted",
             Self::TransportFailed => "reconnect_burst_transport_failed",
             Self::ExecutionFailed => "reconnect_burst_execution_failed",
         }
@@ -1194,6 +1205,9 @@ impl ReconnectFailureCategory {
             Self::RoomAsyncPushLimit => {
                 "live reconnect burst room recovery exceeded the async push limit"
             }
+            Self::RoomHandoffRetryExhausted => {
+                "live reconnect burst room handoff retry did not converge"
+            }
             Self::TransportFailed => "live reconnect burst transport failed",
             Self::ExecutionFailed => "live reconnect burst did not complete",
         }
@@ -1211,6 +1225,9 @@ impl ReconnectFailureCategory {
                 "reconnect_burst_room_server_business_error" => Some(Self::RoomServerBusinessError),
                 "reconnect_burst_room_boundary_rejected" => Some(Self::RoomBoundaryRejected),
                 "reconnect_burst_room_async_push_limit" => Some(Self::RoomAsyncPushLimit),
+                "reconnect_burst_room_handoff_retry_exhausted" => {
+                    Some(Self::RoomHandoffRetryExhausted)
+                }
                 "reconnect_burst_transport_failed" => Some(Self::TransportFailed),
                 _ => None,
             };
@@ -1318,30 +1335,39 @@ where
     }
 }
 
-fn validate_room_recovery_response(
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RoomRecoveryResponse {
+    Recovered,
+    TemporaryHandoffRejected,
+}
+
+fn classify_room_recovery_response(
     response: &Packet,
     reconnect_attempt: u32,
     approved_room_id: &str,
-) -> Result<(), ReconnectFailureCategory> {
-    let (ok, room_id) = match reconnect_attempt {
+) -> Result<RoomRecoveryResponse, ReconnectFailureCategory> {
+    let (ok, room_id, error_code) = match reconnect_attempt {
         0 => {
             let response = loadtest_core::pb::RoomJoinRes::decode(response.body.as_slice())
                 .map_err(|_| ReconnectFailureCategory::RoomUnexpectedPacket)?;
-            (response.ok, response.room_id)
+            (response.ok, response.room_id, response.error_code)
         }
         _ => {
             let response = loadtest_core::pb::RoomReconnectRes::decode(response.body.as_slice())
                 .map_err(|_| ReconnectFailureCategory::RoomUnexpectedPacket)?;
-            (response.ok, response.room_id)
+            (response.ok, response.room_id, response.error_code)
         }
     };
     if !ok {
+        if reconnect_attempt > 0 && error_code == TEMPORARY_ROOM_HANDOFF_ERROR_CODE {
+            return Ok(RoomRecoveryResponse::TemporaryHandoffRejected);
+        }
         return Err(ReconnectFailureCategory::RoomServerBusinessError);
     }
     if room_id != approved_room_id {
         return Err(ReconnectFailureCategory::RoomBoundaryRejected);
     }
-    Ok(())
+    Ok(RoomRecoveryResponse::Recovered)
 }
 
 fn reconnect_room_receive_failure_category(error: GameLiveError) -> ReconnectFailureCategory {
@@ -1351,6 +1377,29 @@ fn reconnect_room_receive_failure_category(error: GameLiveError) -> ReconnectFai
             ReconnectFailureCategory::RoomResponseTimeout
         }
         _ => ReconnectFailureCategory::TransportFailed,
+    }
+}
+
+fn wait_for_reconnect_action<R, S>(
+    scheduled: Instant,
+    deadline: Instant,
+    mut revalidate: R,
+    mut sleep: S,
+) -> Result<(), ReconnectFailureCategory>
+where
+    R: FnMut() -> Result<(), ReconnectFailureCategory>,
+    S: FnMut(Duration),
+{
+    loop {
+        revalidate()?;
+        let now = Instant::now();
+        if now >= deadline {
+            return Err(ReconnectFailureCategory::DeadlineExceeded);
+        }
+        if now >= scheduled {
+            return Ok(());
+        }
+        sleep((scheduled - now).min(Duration::from_millis(25)));
     }
 }
 
@@ -2419,8 +2468,24 @@ fn run_live(cli: &Cli) -> Result<(), String> {
             },
             &mut adapter,
         );
-        let reconnect_auth_metrics = adapter.finish();
-        auth_metrics.merge(&reconnect_auth_metrics);
+        let reconnect_finish = adapter.finish();
+        auth_metrics.merge(&reconnect_finish.auth_metrics);
+        core_metrics.increment(
+            "reconnect_burst_room_handoff_temporary_rejections",
+            reconnect_finish.handoff_retry_metrics.temporary_rejections,
+        );
+        core_metrics.increment(
+            "reconnect_burst_room_handoff_retries_dispatched",
+            reconnect_finish.handoff_retry_metrics.retries_dispatched,
+        );
+        core_metrics.increment(
+            "reconnect_burst_room_handoff_retry_successes",
+            reconnect_finish.handoff_retry_metrics.retry_successes,
+        );
+        core_metrics.increment(
+            "reconnect_burst_room_handoff_retry_exhausted",
+            reconnect_finish.handoff_retry_metrics.retry_exhausted,
+        );
         match execution {
             Ok(execution) => {
                 core_metrics.increment(
@@ -2434,6 +2499,10 @@ fn run_live(cli: &Cli) -> Result<(), String> {
                 );
                 core_metrics
                     .increment("reconnect_burst_room_recoveries", execution.room_recoveries);
+                core_metrics.increment(
+                    "reconnect_burst_room_recovery_retry_slots",
+                    execution.room_recovery_retry_slots,
+                );
             }
             Err(error) => {
                 record_reconnect_execution_failure(&mut errors, &error);
@@ -3955,6 +4024,7 @@ struct LiveReconnectBurstAdapter<'a> {
     runtime: tokio::runtime::Runtime,
     players: Vec<LiveReconnectBurstPlayer>,
     auth_metrics: AuthRunMetrics,
+    handoff_retry_metrics: RoomHandoffRetryMetrics,
     live_backpressure: Rc<RefCell<LiveBackpressureSignals>>,
 }
 
@@ -3964,6 +4034,26 @@ struct LiveReconnectBurstPlayer {
     ticket: Option<String>,
     transport: Option<LiveKcpTransport>,
     session: Option<VirtualPlayerSession>,
+    pending_room_handoff_retry: Option<PendingRoomHandoffRetry>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PendingRoomHandoffRetry {
+    reconnect_attempt: u32,
+    observed_at: Instant,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct RoomHandoffRetryMetrics {
+    temporary_rejections: u64,
+    retries_dispatched: u64,
+    retry_successes: u64,
+    retry_exhausted: u64,
+}
+
+struct LiveReconnectBurstFinish {
+    auth_metrics: AuthRunMetrics,
+    handoff_retry_metrics: RoomHandoffRetryMetrics,
 }
 
 impl<'a> LiveReconnectBurstAdapter<'a> {
@@ -4002,14 +4092,16 @@ impl<'a> LiveReconnectBurstAdapter<'a> {
                     ticket: None,
                     transport: None,
                     session: None,
+                    pending_room_handoff_retry: None,
                 })
                 .collect(),
             auth_metrics: AuthRunMetrics::default(),
+            handoff_retry_metrics: RoomHandoffRetryMetrics::default(),
             live_backpressure,
         }
     }
 
-    fn finish(mut self) -> AuthRunMetrics {
+    fn finish(mut self) -> LiveReconnectBurstFinish {
         for player in &mut self.players {
             if let Some(transport) = player.transport.as_mut() {
                 transport.close();
@@ -4018,7 +4110,10 @@ impl<'a> LiveReconnectBurstAdapter<'a> {
                 session.close(self.account_pool);
             }
         }
-        self.auth_metrics
+        LiveReconnectBurstFinish {
+            auth_metrics: self.auth_metrics,
+            handoff_retry_metrics: self.handoff_retry_metrics,
+        }
     }
 
     fn player_index(&self, player_slot: u32) -> Result<usize, String> {
@@ -4046,21 +4141,35 @@ impl<'a> LiveReconnectBurstAdapter<'a> {
         action: ReconnectBurstAction,
         admission: &mut ReconnectBurstAdmission<'_>,
     ) -> Result<(), String> {
-        let scheduled = self.started + Duration::from_millis(action.at_ms);
-        loop {
-            admission.revalidate().map_err(|error| error.to_string())?;
-            if admission.should_stop() {
-                return Err("reconnect burst stopped while waiting for scheduled action".into());
-            }
-            let now = Instant::now();
-            if now >= scheduled {
-                return Ok(());
-            }
-            if now >= self.deadline {
-                return Err("reconnect burst action deadline elapsed".into());
-            }
-            std::thread::sleep((scheduled - now).min(Duration::from_millis(25)));
-        }
+        self.wait_until(
+            self.started + Duration::from_millis(action.at_ms),
+            admission,
+        )
+    }
+
+    /// Waits only for a pre-planned action boundary. Every short wait returns
+    /// to the shared controller so stop, deadline, and target checks remain
+    /// authoritative while a server-side session handoff settles.
+    fn wait_until(
+        &self,
+        scheduled: Instant,
+        admission: &mut ReconnectBurstAdmission<'_>,
+    ) -> Result<(), String> {
+        wait_for_reconnect_action(
+            scheduled,
+            self.deadline,
+            || {
+                admission
+                    .revalidate()
+                    .map_err(|error| reconnect_execution_failure_category(&error))?;
+                if admission.should_stop() {
+                    return Err(ReconnectFailureCategory::Stopped);
+                }
+                Ok(())
+            },
+            std::thread::sleep,
+        )
+        .map_err(ReconnectFailureCategory::executor_error)
     }
 
     fn send_auth(
@@ -4239,7 +4348,11 @@ impl<'a> LiveReconnectBurstAdapter<'a> {
         Ok(())
     }
 
-    fn recover_room(&mut self, player_index: usize, reconnect_attempt: u32) -> Result<(), String> {
+    fn recover_room(
+        &mut self,
+        player_index: usize,
+        reconnect_attempt: u32,
+    ) -> Result<RoomRecoveryResponse, String> {
         let gameplay = self
             .config
             .scenario
@@ -4306,8 +4419,9 @@ impl<'a> LiveReconnectBurstAdapter<'a> {
             expected_response,
         )
         .map_err(ReconnectFailureCategory::executor_error)?;
-        validate_room_recovery_response(&response, reconnect_attempt, &gameplay.room_id)
-            .map_err(ReconnectFailureCategory::executor_error)?;
+        let recovery =
+            classify_room_recovery_response(&response, reconnect_attempt, &gameplay.room_id)
+                .map_err(ReconnectFailureCategory::executor_error)?;
         match session
             .handle_packet(self.account_pool, response)
             .map_err(|_| ReconnectFailureCategory::RoomUnexpectedPacket.executor_error())?
@@ -4315,9 +4429,76 @@ impl<'a> LiveReconnectBurstAdapter<'a> {
             VirtualPlayerEvent::Response { message_type, .. }
                 if message_type == expected_response =>
             {
-                Ok(())
+                Ok(recovery)
             }
             _ => Err(ReconnectFailureCategory::RoomUnexpectedPacket.executor_error()),
+        }
+    }
+
+    fn recover_room_step(
+        &mut self,
+        player_index: usize,
+        reconnect_attempt: u32,
+    ) -> Result<(), String> {
+        match self.recover_room(player_index, reconnect_attempt)? {
+            RoomRecoveryResponse::Recovered => Ok(()),
+            RoomRecoveryResponse::TemporaryHandoffRejected => {
+                let player = self
+                    .players
+                    .get_mut(player_index)
+                    .ok_or("reconnect burst player state is unavailable")?;
+                player.pending_room_handoff_retry = Some(PendingRoomHandoffRetry {
+                    reconnect_attempt,
+                    observed_at: Instant::now(),
+                });
+                self.handoff_retry_metrics.temporary_rejections = self
+                    .handoff_retry_metrics
+                    .temporary_rejections
+                    .saturating_add(1);
+                Ok(())
+            }
+        }
+    }
+
+    fn retry_room_recovery(
+        &mut self,
+        player_index: usize,
+        reconnect_attempt: u32,
+        admission: &mut ReconnectBurstAdmission<'_>,
+    ) -> Result<(), String> {
+        let pending = self
+            .players
+            .get(player_index)
+            .ok_or("reconnect burst player state is unavailable")?
+            .pending_room_handoff_retry;
+        let Some(pending) = pending else {
+            return Ok(());
+        };
+        if pending.reconnect_attempt != reconnect_attempt {
+            return Err(ReconnectFailureCategory::RoomUnexpectedPacket.executor_error());
+        }
+
+        self.wait_until(
+            pending.observed_at + Duration::from_millis(ROOM_HANDOFF_RETRY_BACKOFF_MS),
+            admission,
+        )?;
+        self.handoff_retry_metrics.retries_dispatched = self
+            .handoff_retry_metrics
+            .retries_dispatched
+            .saturating_add(1);
+        match self.recover_room(player_index, reconnect_attempt)? {
+            RoomRecoveryResponse::Recovered => {
+                self.players[player_index].pending_room_handoff_retry = None;
+                self.handoff_retry_metrics.retry_successes =
+                    self.handoff_retry_metrics.retry_successes.saturating_add(1);
+                Ok(())
+            }
+            RoomRecoveryResponse::TemporaryHandoffRejected => {
+                self.players[player_index].pending_room_handoff_retry = None;
+                self.handoff_retry_metrics.retry_exhausted =
+                    self.handoff_retry_metrics.retry_exhausted.saturating_add(1);
+                Err(ReconnectFailureCategory::RoomHandoffRetryExhausted.executor_error())
+            }
         }
     }
 
@@ -4362,7 +4543,10 @@ impl ReconnectBurstExecutor for LiveReconnectBurstAdapter<'_> {
             ReconnectBurstStep::ConnectProxy => self.connect_proxy(player_index),
             ReconnectBurstStep::AuthenticateProxy => self.authenticate_proxy(player_index),
             ReconnectBurstStep::RecoverRoom => {
-                self.recover_room(player_index, action.reconnect_attempt)
+                self.recover_room_step(player_index, action.reconnect_attempt)
+            }
+            ReconnectBurstStep::RetryRecoverRoom => {
+                self.retry_room_recovery(player_index, action.reconnect_attempt, admission)
             }
         };
         self.record_player_backpressure(player_index);
@@ -5129,11 +5313,11 @@ mod tests {
                 "max_business_messages_per_second": 10.0,
                 "max_messages_per_connection_per_second": 10.0,
                 "max_duration_secs": 10,
-                "max_total_operations": 9,
+                "max_total_operations": 10,
                 "max_error_rate": 0.1,
                 "max_connection_failure_rate": 0.1,
                 "max_p99_ms": 100,
-                "max_data_writes": 12
+                "max_data_writes": 16
             },
             "scenario": {
                 "name": "reconnect",
@@ -5620,7 +5804,7 @@ mod tests {
             }),
         );
         assert_eq!(
-            validate_room_recovery_response(&rejected_join, 0, "approved-room"),
+            classify_room_recovery_response(&rejected_join, 0, "approved-room"),
             Err(ReconnectFailureCategory::RoomServerBusinessError)
         );
 
@@ -5634,9 +5818,107 @@ mod tests {
             }),
         );
         assert_eq!(
-            validate_room_recovery_response(&wrong_room, 0, "approved-room"),
+            classify_room_recovery_response(&wrong_room, 0, "approved-room"),
             Err(ReconnectFailureCategory::RoomBoundaryRejected)
         );
+    }
+
+    #[test]
+    fn room_handoff_retry_is_limited_to_the_known_temporary_reconnect_rejection() {
+        let temporary_rejection = room_recovery_packet(
+            MessageType::RoomReconnectRes,
+            1,
+            game_protocol::encode_body(&loadtest_core::pb::RoomReconnectRes {
+                ok: false,
+                room_id: String::new(),
+                error_code: TEMPORARY_ROOM_HANDOFF_ERROR_CODE.into(),
+                snapshot: None,
+                ..Default::default()
+            }),
+        );
+        assert_eq!(
+            classify_room_recovery_response(&temporary_rejection, 1, "approved-room"),
+            Ok(RoomRecoveryResponse::TemporaryHandoffRejected)
+        );
+
+        let retry_success = room_recovery_packet(
+            MessageType::RoomReconnectRes,
+            2,
+            game_protocol::encode_body(&loadtest_core::pb::RoomReconnectRes {
+                ok: true,
+                room_id: "approved-room".into(),
+                error_code: String::new(),
+                snapshot: None,
+                ..Default::default()
+            }),
+        );
+        assert_eq!(
+            classify_room_recovery_response(&retry_success, 1, "approved-room"),
+            Ok(RoomRecoveryResponse::Recovered)
+        );
+
+        let non_temporary_rejection = room_recovery_packet(
+            MessageType::RoomReconnectRes,
+            3,
+            game_protocol::encode_body(&loadtest_core::pb::RoomReconnectRes {
+                ok: false,
+                room_id: String::new(),
+                error_code: "ROOM_NOT_FOUND".into(),
+                snapshot: None,
+                ..Default::default()
+            }),
+        );
+        assert_eq!(
+            classify_room_recovery_response(&non_temporary_rejection, 1, "approved-room"),
+            Err(ReconnectFailureCategory::RoomServerBusinessError)
+        );
+
+        let join_rejection = room_recovery_packet(
+            MessageType::RoomJoinRes,
+            4,
+            game_protocol::encode_body(&loadtest_core::pb::RoomJoinRes {
+                ok: false,
+                room_id: String::new(),
+                error_code: TEMPORARY_ROOM_HANDOFF_ERROR_CODE.into(),
+            }),
+        );
+        assert_eq!(
+            classify_room_recovery_response(&join_rejection, 0, "approved-room"),
+            Err(ReconnectFailureCategory::RoomServerBusinessError)
+        );
+
+        let error = loadtest_core::reconnect_burst::ReconnectBurstExecutionError::Executor(
+            ReconnectFailureCategory::RoomHandoffRetryExhausted.executor_error(),
+        );
+        let mut errors = ErrorBuffer::default();
+        record_reconnect_execution_failure(&mut errors, &error);
+        let sample = errors.samples().first().expect("handoff failure sample");
+        assert_eq!(
+            sample.category,
+            "reconnect_burst_room_handoff_retry_exhausted"
+        );
+        assert!(!sample.message.contains(TEMPORARY_ROOM_HANDOFF_ERROR_CODE));
+        assert!(sample.context.is_empty());
+    }
+
+    #[test]
+    fn room_handoff_wait_stops_or_expires_before_retry_dispatch() {
+        let now = Instant::now();
+        let stopped = wait_for_reconnect_action(
+            now + Duration::from_secs(1),
+            now + Duration::from_secs(2),
+            || Err(ReconnectFailureCategory::Stopped),
+            |_| panic!("stopped retry must not sleep or dispatch"),
+        );
+        assert_eq!(stopped, Err(ReconnectFailureCategory::Stopped));
+
+        let expired = wait_for_reconnect_action(
+            now + Duration::from_secs(1),
+            now.checked_sub(Duration::from_millis(1)).unwrap(),
+            || Ok(()),
+            |_| panic!("expired retry must not sleep or dispatch"),
+        );
+        assert_eq!(expired, Err(ReconnectFailureCategory::DeadlineExceeded));
     }
 
     #[test]
@@ -5708,6 +5990,12 @@ mod tests {
                 ),
                 ReconnectFailureCategory::ProtectionOrCheckpointFailed,
             ),
+            (
+                ReconnectBurstExecutionError::Executor(
+                    ReconnectFailureCategory::RoomHandoffRetryExhausted.executor_error(),
+                ),
+                ReconnectFailureCategory::RoomHandoffRetryExhausted,
+            ),
         ];
 
         for (error, expected) in cases {
@@ -5776,11 +6064,11 @@ mod tests {
                     "max_business_messages_per_second": 10.0,
                     "max_messages_per_connection_per_second": 10.0,
                     "max_duration_secs": 10,
-                    "max_total_operations": 12,
+                    "max_total_operations": 14,
                     "max_error_rate": 0.1,
                     "max_connection_failure_rate": 0.1,
                     "max_p99_ms": 100,
-                    "max_data_writes": 16
+                    "max_data_writes": 24
                 },
                 "scenario": {
                     "name": "offline-reconnect",
@@ -5821,10 +6109,14 @@ mod tests {
         assert_eq!(metrics.counters["reconnect_burst_forced_disconnects"], 2);
         assert_eq!(metrics.counters["reconnect_burst_new_connections"], 6);
         assert_eq!(metrics.counters["reconnect_burst_room_recoveries"], 3);
+        assert_eq!(
+            metrics.counters["reconnect_burst_room_recovery_retry_slots"],
+            2
+        );
         assert_eq!(metrics.counters["reconnect_burst_backoff_ms"], 300);
         assert_eq!(
             metrics.counters["reconnect_burst_potential_data_writes"],
-            16
+            24
         );
         std::fs::remove_dir_all(temp_root).unwrap();
     }

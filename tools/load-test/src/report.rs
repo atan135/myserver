@@ -39,7 +39,7 @@ const SIDE_LATENCY_KEYS: [(&str, &str); 5] = [
     ("side_match_ms", "Match"),
 ];
 
-const FLOW_COUNTER_KEYS: [(&str, &str); 15] = [
+const FLOW_COUNTER_KEYS: [(&str, &str); 20] = [
     ("connections_opened", "Connections opened"),
     ("connections_active", "Connections active"),
     ("frame_inputs_sent", "Frame inputs sent"),
@@ -52,6 +52,26 @@ const FLOW_COUNTER_KEYS: [(&str, &str); 15] = [
     ("frame_late_response", "Frame late responses"),
     ("frame_out_of_order", "Frame out of order"),
     ("gameplay_business_errors", "Gameplay business errors"),
+    (
+        "reconnect_burst_room_recovery_retry_slots",
+        "Reconnect handoff retry slots",
+    ),
+    (
+        "reconnect_burst_room_handoff_temporary_rejections",
+        "Reconnect temporary handoff rejections",
+    ),
+    (
+        "reconnect_burst_room_handoff_retries_dispatched",
+        "Reconnect handoff retries dispatched",
+    ),
+    (
+        "reconnect_burst_room_handoff_retry_successes",
+        "Reconnect handoff retry successes",
+    ),
+    (
+        "reconnect_burst_room_handoff_retry_exhausted",
+        "Reconnect handoff retries exhausted",
+    ),
     ("side_mail_internal_writes", "Internal mail writes"),
     (
         "side_mail_notification_outbox_published",

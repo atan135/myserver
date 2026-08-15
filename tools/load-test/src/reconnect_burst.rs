@@ -15,6 +15,13 @@ use crate::auth_http::{AuthAdmissionError, AuthDispatchAdmission};
 use crate::config::{AuthOperation, EnvironmentKind, HardBudget};
 use crate::game_kcp::{GameKcpError, ReconnectPolicy};
 
+/// A single bounded retry gives the old KCP session's asynchronous disconnect
+/// cleanup a chance to settle before the replacement session asks to recover
+/// the approved room. The retry is planned and budgeted even when it is not
+/// dispatched, so a temporary server rejection cannot increase live traffic.
+pub const ROOM_HANDOFF_RETRY_BACKOFF_MS: u64 = 25;
+pub const MAX_ROOM_HANDOFF_RETRY_ATTEMPTS: u32 = 1;
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ReconnectBurstSpec {
     pub virtual_players: u32,
@@ -31,6 +38,7 @@ pub enum ReconnectBurstStep {
     ConnectProxy,
     AuthenticateProxy,
     RecoverRoom,
+    RetryRecoverRoom,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -305,6 +313,7 @@ pub struct ReconnectBurstExecutionMetrics {
     pub proxy_connections: u64,
     pub proxy_authentications: u64,
     pub room_recoveries: u64,
+    pub room_recovery_retry_slots: u64,
 }
 
 /// Executes an already budget-validated reconnect plan through a caller-owned
@@ -366,6 +375,11 @@ where
                 action_admission.admit_gameplay_message()?;
                 metrics.room_recoveries = metrics.room_recoveries.saturating_add(1);
             }
+            ReconnectBurstStep::RetryRecoverRoom => {
+                action_admission.admit_gameplay_message()?;
+                metrics.room_recovery_retry_slots =
+                    metrics.room_recovery_retry_slots.saturating_add(1);
+            }
         }
         executor
             .execute(*action, &mut action_admission)
@@ -425,6 +439,9 @@ pub fn plan_reconnect_burst(
     let forced_disconnects = u64::from(spec.virtual_players)
         .checked_mul(u64::from(spec.reconnect_attempts_per_player))
         .ok_or(ReconnectBurstPlanError::Overflow)?;
+    let room_handoff_retry_actions = forced_disconnects
+        .checked_mul(u64::from(MAX_ROOM_HANDOFF_RETRY_ATTEMPTS))
+        .ok_or(ReconnectBurstPlanError::Overflow)?;
     // Auth dispatch uses `Connection: close`. A Login action also performs
     // one public character-list read to resolve the prepared identity, so it
     // reserves three HTTP connection slots per player (login/list/ticket) in
@@ -436,11 +453,19 @@ pub fn plan_reconnect_burst(
     let total_operations = login_actions
         .checked_mul(3)
         .and_then(|count| count.checked_add(proxy_connections.saturating_mul(3)))
+        .and_then(|count| count.checked_add(room_handoff_retry_actions))
         .ok_or(ReconnectBurstPlanError::Overflow)?;
     // Establishing the approved room and every RoomReconnectReq can mutate
     // room membership or route state, so reserve the same conservative write
     // bound used by the live gameplay runner.
-    let room_recovery_writes = connections_per_player
+    let room_recovery_requests_per_player = connections_per_player
+        .checked_add(
+            u64::from(spec.reconnect_attempts_per_player)
+                .checked_mul(u64::from(MAX_ROOM_HANDOFF_RETRY_ATTEMPTS))
+                .ok_or(ReconnectBurstPlanError::Overflow)?,
+        )
+        .ok_or(ReconnectBurstPlanError::Overflow)?;
+    let room_recovery_writes = room_recovery_requests_per_player
         .checked_mul(LIVE_GAMEPLAY_POTENTIAL_WRITES_PER_MESSAGE)
         .ok_or(ReconnectBurstPlanError::Overflow)?;
     let potential_writes_per_player = auth_operation_potential_writes(AuthOperation::Login)
@@ -582,7 +607,18 @@ pub fn plan_reconnect_burst(
                 reconnect_attempt,
                 step: ReconnectBurstStep::RecoverRoom,
             });
-            reconnect_at_ms = recover_at_ms;
+            let retry_recover_at_ms = reserve_business(
+                recover_at_ms.saturating_add(ROOM_HANDOFF_RETRY_BACKOFF_MS),
+                &mut next_business_ms,
+                business_spacing_ms,
+            );
+            actions.push(ReconnectBurstAction {
+                at_ms: retry_recover_at_ms,
+                player_slot,
+                reconnect_attempt,
+                step: ReconnectBurstStep::RetryRecoverRoom,
+            });
+            reconnect_at_ms = retry_recover_at_ms;
         }
     }
     actions.sort_by_key(|action| (action.at_ms, action.player_slot, action.reconnect_attempt));
@@ -673,11 +709,11 @@ mod tests {
             max_business_messages_per_second: 10.0,
             max_messages_per_connection_per_second: 10.0,
             max_duration_secs: 10,
-            max_total_operations: 24,
+            max_total_operations: 28,
             max_error_rate: 0.1,
             max_connection_failure_rate: 0.1,
             max_p99_ms: 1_000,
-            max_data_writes: 40,
+            max_data_writes: 48,
         }
     }
 
@@ -705,8 +741,8 @@ mod tests {
         assert_eq!(plan.login_actions, 2);
         assert_eq!(plan.forced_disconnects, 4);
         assert_eq!(plan.new_connections, 12);
-        assert_eq!(plan.total_operations, 24);
-        assert_eq!(plan.potential_data_writes, 32);
+        assert_eq!(plan.total_operations, 28);
+        assert_eq!(plan.potential_data_writes, 48);
         assert_eq!(plan.total_backoff_ms, 600);
         let logins = plan
             .actions
@@ -735,6 +771,13 @@ mod tests {
                 && action.reconnect_attempt == 0
                 && action.step == ReconnectBurstStep::RecoverRoom
         }));
+        assert_eq!(
+            plan.actions
+                .iter()
+                .filter(|action| action.step == ReconnectBurstStep::RetryRecoverRoom)
+                .count(),
+            4
+        );
         for slot in 0..2 {
             let ticket = plan
                 .actions
@@ -776,20 +819,20 @@ mod tests {
 
         let local = estimate_live_reconnect_burst(&plan, &budget(), false).unwrap();
         assert_eq!(local.guard_probe_operations, 0);
-        assert_eq!(local.total_operations, 9);
+        assert_eq!(local.total_operations, 10);
         assert_eq!(local.new_connections, 5);
-        assert_eq!(local.business_messages, 7);
+        assert_eq!(local.business_messages, 8);
 
         let remote = estimate_live_reconnect_burst(&plan, &budget(), true).unwrap();
         assert_eq!(remote.guard_probe_operations, 3);
-        assert_eq!(remote.total_operations, 12);
+        assert_eq!(remote.total_operations, 13);
         assert_eq!(remote.new_connections, 8);
-        assert_eq!(remote.business_messages, 10);
-        assert_eq!(remote.potential_data_writes, 12);
+        assert_eq!(remote.business_messages, 11);
+        assert_eq!(remote.potential_data_writes, 16);
         assert!(remote.projected_duration_ms > plan.latest_action_ms);
 
         let constrained = HardBudget {
-            max_total_operations: 11,
+            max_total_operations: 12,
             ..budget()
         };
         assert!(
@@ -846,6 +889,55 @@ mod tests {
     }
 
     #[test]
+    fn handoff_retry_budget_rejects_before_executor_transport() {
+        let planned_budget = HardBudget {
+            max_virtual_players: 1,
+            max_total_operations: 10,
+            max_data_writes: 16,
+            ..budget()
+        };
+        let plan = plan_reconnect_burst(
+            ReconnectBurstSpec {
+                virtual_players: 1,
+                reconnect_attempts_per_player: 1,
+                start_ms: 0,
+            },
+            &planned_budget,
+            policy(),
+        )
+        .unwrap();
+        let constrained_budget = HardBudget {
+            max_total_operations: 9,
+            ..planned_budget
+        };
+        let mut admission = AuthDispatchAdmission::new(&constrained_budget).unwrap();
+        let mut abort = AbortController::default();
+        let mut executor = RecordingExecutor::default();
+
+        let result = execute_reconnect_burst(
+            &plan,
+            &constrained_budget,
+            ReconnectBurstExecutionGate {
+                execute_game: true,
+                confirm_game: Some("test"),
+                environment_name: "test",
+                environment_kind: EnvironmentKind::Test,
+            },
+            &mut admission,
+            Instant::now() + std::time::Duration::from_secs(1),
+            &mut abort,
+            |_| Ok(()),
+            &mut executor,
+        );
+
+        assert!(matches!(
+            result,
+            Err(ReconnectBurstExecutionError::BudgetMismatch)
+        ));
+        assert!(executor.actions.is_empty());
+    }
+
+    #[test]
     fn reconnect_burst_serializes_business_and_connection_messages_under_hard_rates() {
         let plan = plan_reconnect_burst(
             ReconnectBurstSpec {
@@ -871,6 +963,7 @@ mod tests {
                         | ReconnectBurstStep::IssueTicket
                         | ReconnectBurstStep::AuthenticateProxy
                         | ReconnectBurstStep::RecoverRoom
+                        | ReconnectBurstStep::RetryRecoverRoom
                 )
             })
             .collect::<Vec<_>>();
@@ -943,11 +1036,11 @@ mod tests {
             max_business_messages_per_second: 10_000.0,
             max_messages_per_connection_per_second: 10_000.0,
             max_duration_secs: 10,
-            max_total_operations: 9,
+            max_total_operations: 10,
             max_error_rate: 0.1,
             max_connection_failure_rate: 0.1,
             max_p99_ms: 1_000,
-            max_data_writes: 12,
+            max_data_writes: 16,
         };
         let plan = plan_reconnect_burst(
             ReconnectBurstSpec {
@@ -959,7 +1052,7 @@ mod tests {
             policy(),
         )
         .unwrap();
-        assert_eq!(plan.total_operations, 9);
+        assert_eq!(plan.total_operations, 10);
         let mut admission = AuthDispatchAdmission::new(&fast_budget).unwrap();
         let mut abort = AbortController::default();
         let mut adapter = CharacterLookupAdapter::default();
@@ -992,11 +1085,11 @@ mod tests {
             max_business_messages_per_second: 10_000.0,
             max_messages_per_connection_per_second: 10_000.0,
             max_duration_secs: 10,
-            max_total_operations: 9,
+            max_total_operations: 10,
             max_error_rate: 0.1,
             max_connection_failure_rate: 0.1,
             max_p99_ms: 1_000,
-            max_data_writes: 12,
+            max_data_writes: 16,
         };
         let plan = plan_reconnect_burst(
             ReconnectBurstSpec {
@@ -1033,6 +1126,7 @@ mod tests {
         assert_eq!(metrics.proxy_connections, 2);
         assert_eq!(metrics.proxy_authentications, 2);
         assert_eq!(metrics.room_recoveries, 2);
+        assert_eq!(metrics.room_recovery_retry_slots, 1);
         assert_eq!(executor.actions, plan.actions);
 
         let mut executor = RecordingExecutor::default();
@@ -1061,7 +1155,7 @@ mod tests {
     fn deterministic_executor_stops_before_transport_when_abort_is_requested() {
         let mut tiny = budget();
         tiny.max_virtual_players = 1;
-        tiny.max_total_operations = 9;
+        tiny.max_total_operations = 10;
         let plan = plan_reconnect_burst(
             ReconnectBurstSpec {
                 virtual_players: 1,
