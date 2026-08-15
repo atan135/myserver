@@ -413,6 +413,7 @@ services:
       CADDY_ADMIN_HOST: ${CADDY_ADMIN_HOST:?set CADDY_ADMIN_HOST}
       CADDY_CHAT_HOST: ${CADDY_CHAT_HOST:?set CADDY_CHAT_HOST}
       CADDY_EMAIL: ${CADDY_EMAIL:?set CADDY_EMAIL}
+      MYSERVER_RUNTIME_ENV: ${MYSERVER_RUNTIME_ENV:?set MYSERVER_RUNTIME_ENV to production or test}
     networks:
       - edge
       - internal

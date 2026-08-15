@@ -19,7 +19,7 @@ test("auth Caddy site sends only the four player mail routes to mail-service", a
   assert.match(allowedRoute[1], /method\('GET'\).*\^\/api\/v1\/mails\/\[A-Za-z0-9:_-\]\{1,64\}\$/);
   assert.match(allowedRoute[1], /method\('PUT'\).*\/read\$/);
   assert.match(allowedRoute[1], /method\('POST'\).*\/claim\$/);
-  assert.equal((site.match(/reverse_proxy mail-service:9003/g) || []).length, 1);
+  assert.equal((site.match(/reverse_proxy mail-service:9003/g) || []).length, 2);
 
   const mailRouteIndex = site.indexOf("@mail_namespace path /api/v1/mails*");
   const authProxyIndex = site.indexOf("reverse_proxy auth-http:3000");
@@ -28,6 +28,38 @@ test("auth Caddy site sends only the four player mail routes to mail-service", a
   assert.match(site, /respond @mail_known_path_wrong_method 405/);
   assert.match(site, /@mail_unknown_path expression/);
   assert.match(site, /respond @mail_unknown_path 404/);
+});
+
+test("mail Caddy diagnostic is an exact test-only route with isolated token forwarding", async () => {
+  const [caddyfile, compose] = await Promise.all([
+    read("deploy/docker/caddy/Caddyfile"),
+    read("deploy/docker/compose.production.yml")
+  ]);
+  const site = authSite(caddyfile);
+  const caddy = compose.match(/\r?\n  caddy:\r?\n([\s\S]*?)\r?\n  migration-runner:/)?.[1];
+  const diagnostic = site.match(/handle @mail_load_test_route \{([\s\S]*?)\n\s*\}\n\s*# Classify the route before credentials/);
+
+  assert.ok(caddy, "caddy service must exist");
+  assert.ok(diagnostic, "diagnostic path must have an isolated handler");
+  assert.match(site, /@mail_load_test_disabled expression `path_regexp\('\^\/api\/v1\/mails\/load-test\/notification\$'\) && "\{\$MYSERVER_RUNTIME_ENV:production\}" != "test"`/);
+  assert.match(site, /respond @mail_load_test_disabled 404/);
+  assert.match(site, /@mail_load_test_wrong_method expression `path_regexp\('\^\/api\/v1\/mails\/load-test\/notification\$'\) && !method\('POST'\)`/);
+  assert.match(site, /respond @mail_load_test_wrong_method 404/);
+  assert.match(site, /@mail_load_test_route expression `path_regexp\('\^\/api\/v1\/mails\/load-test\/notification\$'\) && method\('POST'\)`/);
+  assert.match(diagnostic[1], /@mail_load_test_repeated_singletons expression .*X-Mail-Load-Test-Token.*contains\(","\)/);
+  assert.match(diagnostic[1], /@mail_load_test_missing_token expression `size\(\{http\.request\.header\.X-Mail-Load-Test-Token\}\) == 0`/);
+  assert.match(diagnostic[1], /@mail_load_test_invalid_token expression `size\(\{http\.request\.header\.X-Mail-Load-Test-Token\}\) < 16 \|\| size\(\{http\.request\.header\.X-Mail-Load-Test-Token\}\) > 512`/);
+  assert.match(diagnostic[1], /@mail_load_test_conflicting_credentials expression .*X-Mail-Operations-Token.*X-Mail-High-Risk-Token/);
+  assert.match(diagnostic[1], /request_body\s*\{\s*max_size 1024\s*\}/);
+  assert.match(diagnostic[1], /header_up X-Forwarded-For \{http\.request\.remote\.host\}/);
+  assert.match(diagnostic[1], /header_up X-Request-ID \{http\.request\.uuid\}/);
+  assert.match(diagnostic[1], /header_up X-Mail-Load-Test-Token \{http\.request\.header\.X-Mail-Load-Test-Token\}/);
+  assert.match(diagnostic[1], /header_down Cache-Control "private, no-store"/);
+  assert.match(site, /@mail_load_test_token_on_player_route header X-Mail-Load-Test-Token \*/);
+  assert.match(site, /respond @mail_load_test_token_on_player_route 400/);
+  assert.match(site, /header_up -X-Mail-Load-Test-Token/);
+  assert.match(site, /request>headers>X-Mail-Load-Test-Token delete/);
+  assert.match(caddy, /^      MYSERVER_RUNTIME_ENV: \$\{MYSERVER_RUNTIME_ENV:\?set MYSERVER_RUNTIME_ENV to production or test\}$/m);
 });
 
 test("mail Caddy route rejects control-plane paths and request bypasses before proxying", async () => {
@@ -97,7 +129,8 @@ test("mail Caddy access logs remove request URI and credentials, and production 
     "X-Service-Token",
     "X-Admin-Token",
     "X-Mail-Operations-Token",
-    "X-Mail-High-Risk-Token"
+    "X-Mail-High-Risk-Token",
+    "X-Mail-Load-Test-Token"
   ]) {
     assert.match(site, new RegExp(`request>headers>${header} delete`));
   }

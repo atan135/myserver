@@ -55,6 +55,7 @@
                 request>headers>X-Admin-Token delete
                 request>headers>X-Mail-Operations-Token delete
                 request>headers>X-Mail-High-Risk-Token delete
+                request>headers>X-Mail-Load-Test-Token delete
             }
         }
     }
@@ -86,6 +87,52 @@
                 @mail_query_method_override query _method=*
                 respond @mail_query_method_override 404
 
+                # This path is a deliberately isolated test diagnostic, not
+                # part of the ordinary player-mail API. Caddy substitutes the
+                # release runtime identity at config load; absent or non-test
+                # values must fail closed at the edge.
+                @mail_load_test_disabled expression `path_regexp('^/api/v1/mails/load-test/notification$') && "{$MYSERVER_RUNTIME_ENV:production}" != "test"`
+                respond @mail_load_test_disabled 404
+                @mail_load_test_wrong_method expression `path_regexp('^/api/v1/mails/load-test/notification$') && !method('POST')`
+                respond @mail_load_test_wrong_method 404
+                @mail_load_test_route expression `path_regexp('^/api/v1/mails/load-test/notification$') && method('POST')`
+                handle @mail_load_test_route {
+                    @mail_load_test_transfer_encoding header Transfer-Encoding *
+                    respond @mail_load_test_transfer_encoding 400
+                    @mail_load_test_repeated_singletons expression `{http.request.header.Content-Length}.contains(",") || {http.request.header.X-Request-ID}.contains(",") || {http.request.header.X-Forwarded-For}.contains(",") || {http.request.header.X-Forwarded-Proto}.contains(",") || {http.request.header.X-Forwarded-Host}.contains(",") || {http.request.header.X-Real-IP}.contains(",") || {http.request.header.X-Mail-Load-Test-Token}.contains(",")`
+                    respond @mail_load_test_repeated_singletons 400
+                    @mail_load_test_missing_token expression `size({http.request.header.X-Mail-Load-Test-Token}) == 0`
+                    respond @mail_load_test_missing_token 401
+                    @mail_load_test_invalid_token expression `size({http.request.header.X-Mail-Load-Test-Token}) < 16 || size({http.request.header.X-Mail-Load-Test-Token}) > 512`
+                    respond @mail_load_test_invalid_token 400
+
+                    @mail_load_test_missing_ticket expression `size({http.request.header.X-Game-Ticket}) == 0`
+                    respond @mail_load_test_missing_ticket 401
+                    @mail_load_test_invalid_ticket expression `size({http.request.header.X-Game-Ticket}) > 4096 || {http.request.header.X-Game-Ticket}.contains(",") || !{http.request.header.X-Game-Ticket}.matches("^[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+$")`
+                    respond @mail_load_test_invalid_ticket 401
+                    @mail_load_test_conflicting_credentials expression `size({http.request.header.Authorization}) > 0 || size({http.request.header.Proxy-Authorization}) > 0 || size({http.request.header.X-Service-Token}) > 0 || size({http.request.header.X-Admin-Token}) > 0 || size({http.request.header.X-Mail-Operations-Token}) > 0 || size({http.request.header.X-Mail-High-Risk-Token}) > 0 || size({http.request.header.Cookie}) > 0`
+                    respond @mail_load_test_conflicting_credentials 400
+                    request_body {
+                        max_size 1024
+                    }
+                    reverse_proxy mail-service:9003 {
+                        header_up X-Forwarded-For {http.request.remote.host}
+                        header_up X-Forwarded-Proto https
+                        header_up X-Forwarded-Host {http.request.host}
+                        header_up X-Real-IP {http.request.remote.host}
+                        header_up X-Request-ID {http.request.uuid}
+                        header_up X-Mail-Load-Test-Token {http.request.header.X-Mail-Load-Test-Token}
+                        header_down Cache-Control "private, no-store"
+                        transport http {
+                            max_response_header 16KB
+                            dial_timeout 3s
+                            response_header_timeout 5s
+                            read_timeout 12s
+                            write_timeout 5s
+                        }
+                    }
+                }
+
                 # Classify the route before credentials. A system-send method
                 # must remain a local 405 even without a player ticket, and an
                 # extra mail subpath must remain a local 404.
@@ -102,6 +149,8 @@
                 respond @mail_transfer_encoding 400
                 @mail_repeated_singletons expression `{http.request.header.Content-Length}.contains(",") || {http.request.header.X-Request-ID}.contains(",") || {http.request.header.X-Forwarded-For}.contains(",") || {http.request.header.X-Forwarded-Proto}.contains(",") || {http.request.header.X-Forwarded-Host}.contains(",") || {http.request.header.X-Real-IP}.contains(",")`
                 respond @mail_repeated_singletons 400
+                @mail_load_test_token_on_player_route header X-Mail-Load-Test-Token *
+                respond @mail_load_test_token_on_player_route 400
 
                 # The public player contract accepts exactly one compact game
                 # ticket and no alternate service/admin credential channel.
@@ -134,6 +183,7 @@
                         header_up X-Forwarded-Host {http.request.host}
                         header_up X-Real-IP {http.request.remote.host}
                         header_up X-Request-ID {http.request.uuid}
+                        header_up -X-Mail-Load-Test-Token
                         header_down Cache-Control "private, no-store"
                         transport http {
                             max_response_header 16KB

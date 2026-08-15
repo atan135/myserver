@@ -80,7 +80,8 @@ test("production compose propagates the rendered runtime identity without loweri
     ["game-proxy", "APP_ENV"],
     ["auth-http", "NODE_ENV"],
     ["admin-api", "NODE_ENV"],
-    ["migration-runner", "NODE_ENV"]
+    ["migration-runner", "NODE_ENV"],
+    ["caddy", "MYSERVER_RUNTIME_ENV"]
   ]) {
     const expected = `      ${key}: ${runtimeReference}`;
     assert.ok(
