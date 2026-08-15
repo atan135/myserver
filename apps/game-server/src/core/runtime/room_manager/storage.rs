@@ -288,6 +288,44 @@ impl RoomManager {
         self.rooms.read().await.contains_key(room_id)
     }
 
+    /// Resolves only a currently online member through the maintained index.
+    /// Disconnect cleanup uses this when a connection lost its cached room id;
+    /// it deliberately does not return offline members that may reconnect.
+    pub async fn find_room_by_online_character(&self, character_id: &str) -> Option<String> {
+        let room_id = self
+            .character_rooms
+            .read()
+            .await
+            .get(character_id)
+            .cloned()?;
+        let Some(room_entry) = self.get_room_entry(&room_id).await else {
+            self.remove_character_indexes_for_room(character_id, &room_id)
+                .await;
+            return None;
+        };
+
+        let index_state = {
+            let room = room_entry.lock().await;
+            if room.marked_for_destruction
+                || room.transfer_state.status == RoomTransferStatus::Retired
+            {
+                None
+            } else {
+                room.members.get(character_id).map(|member| member.offline)
+            }
+        };
+
+        match index_state {
+            Some(false) => Some(room_id),
+            Some(true) => None,
+            None => {
+                self.remove_character_indexes_for_room(character_id, &room_id)
+                    .await;
+                None
+            }
+        }
+    }
+
     pub async fn find_room_by_offline_character(&self, character_id: &str) -> Option<String> {
         let room_id = self
             .offline_characters

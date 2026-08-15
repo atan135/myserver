@@ -1233,6 +1233,22 @@ pub async fn handle_room_end(
     Ok(())
 }
 
+async fn resolve_disconnect_cleanup_room_id(
+    room_manager: &crate::core::runtime::RoomManager,
+    session_room_id: Option<&str>,
+    character_id: Option<&str>,
+) -> Option<String> {
+    match (session_room_id, character_id) {
+        (Some(room_id), _) => Some(room_id.to_string()),
+        (None, Some(character_id)) => {
+            room_manager
+                .find_room_by_online_character(character_id)
+                .await
+        }
+        (None, None) => None,
+    }
+}
+
 pub async fn handle_disconnect_cleanup(services: &ServiceContext, connection: &ConnectionContext) {
     let session = &connection.session;
     let room_id = session.room_id.clone();
@@ -1254,7 +1270,26 @@ pub async fn handle_disconnect_cleanup(services: &ServiceContext, connection: &C
         "handle_disconnect_cleanup called"
     );
 
-    if let (Some(room_id), Some(character_id)) = (room_id, character_id) {
+    let cleanup_room_id = resolve_disconnect_cleanup_room_id(
+        &services.room_manager,
+        room_id.as_deref(),
+        character_id.as_deref(),
+    )
+    .await;
+    if room_id.is_none()
+        && let (Some(room_id), Some(character_id)) =
+            (cleanup_room_id.as_deref(), character_id.as_deref())
+    {
+        info!(
+            session_id = session.id,
+            character_id = %character_id,
+            room_id = %room_id,
+            cleanup_source = "character_room_index",
+            "disconnect cleanup recovered missing session room id"
+        );
+    }
+
+    if let (Some(room_id), Some(character_id)) = (cleanup_room_id, character_id) {
         let leave_result = services
             .room_manager
             .disconnect_room_member(&room_id, &character_id)
@@ -2458,6 +2493,41 @@ mod tests {
         );
         assert_eq!(
             find_reconnect_room_for_character(&services, "chr_0000000000001").await,
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn disconnect_cleanup_resolves_missing_session_room_from_online_character_index() {
+        let services = service_context_fixture(false).await;
+        let room_id = "room-disconnect-index-fallback";
+        let character_id = "chr_0000000000001";
+        let (tx, _rx) = tokio::sync::mpsc::channel(8);
+        services
+            .room_manager
+            .join_room(
+                room_id,
+                character_id,
+                tx,
+                MemberRole::Player,
+                Some("default_match"),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            resolve_disconnect_cleanup_room_id(&services.room_manager, None, Some(character_id))
+                .await,
+            Some(room_id.to_string())
+        );
+
+        services
+            .room_manager
+            .disconnect_room_member(room_id, character_id)
+            .await;
+        assert_eq!(
+            resolve_disconnect_cleanup_room_id(&services.room_manager, None, Some(character_id))
+                .await,
             None
         );
     }

@@ -62,6 +62,10 @@ async fn offline_player_index_tracks_disconnect_leave_and_reconnect() {
         None
     );
     assert_eq!(manager.find_room_by_offline_character(PLAYER_A).await, None);
+    assert_eq!(
+        manager.find_room_by_online_character(PLAYER_A).await,
+        Some(TEST_ROOM_ID.to_string())
+    );
 
     manager.leave_room(TEST_ROOM_ID, PLAYER_A).await;
     assert_eq!(
@@ -72,6 +76,7 @@ async fn offline_player_index_tracks_disconnect_leave_and_reconnect() {
         offline_character_index_for_test(&manager, PLAYER_A).await,
         Some(TEST_ROOM_ID.to_string())
     );
+    assert_eq!(manager.find_room_by_online_character(PLAYER_A).await, None);
 }
 
 #[tokio::test]
