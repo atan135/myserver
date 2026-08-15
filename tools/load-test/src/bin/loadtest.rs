@@ -202,6 +202,7 @@ fn execute(arguments: Vec<String>) -> Result<(), String> {
             validate(&config, &parsed)?;
             println!("configuration is valid for {}", config.environment.name);
         }
+        "observe-registry" => observe_registry(&parsed)?,
         "run" => run(&parsed)?,
         "calibrate" => calibrate_dry(&parsed)?,
         "report" => show_report(
@@ -230,6 +231,219 @@ fn validate(config: &LoadTestConfig, cli: &Cli) -> Result<(), String> {
             confirmation: cli.confirmation.as_deref(),
         })
         .map_err(|error| error.to_string())
+}
+
+/// Runs the registry/metrics observer without constructing any player, auth,
+/// or game transport. Remote collection still establishes the credential-free
+/// public auth target baseline before the Redis adapter can connect.
+fn observe_registry(cli: &Cli) -> Result<(), String> {
+    if cli.dry_run
+        || cli.execute_auth
+        || cli.execute_game
+        || cli.confirm_auth.is_some()
+        || cli.confirm_game.is_some()
+    {
+        return Err(
+            "observe-registry is a live read-only command and does not accept --dry-run, --execute-auth, --confirm-auth, --execute-game, or --confirm-game".into(),
+        );
+    }
+    if cli.private_config.is_some() || cli.account_manifest.is_some() {
+        return Err(
+            "observe-registry does not accept --private-config or --account-manifest because it performs no account operations".into(),
+        );
+    }
+
+    let config = cli.load()?;
+    validate(&config, cli)?;
+    let budget = config
+        .effective_budget(&cli.budget_override)
+        .map_err(|error| error.to_string())?;
+    let registry_config = validate_registry_observation_smoke_config(&config, &budget)?;
+    let started = unix_ms();
+    let deadline_unix_ms = effective_deadline(&config, &budget, cli.deadline_unix_ms, started)?;
+    let preflight = summarize_run_with_guard_probes(
+        "observe-registry",
+        &config,
+        &budget,
+        RunAccess {
+            allow_remote: cli.allow_remote,
+            confirmation: cli.confirmation.as_deref(),
+        },
+        deadline_unix_ms,
+        false,
+        false,
+        config.environment.kind.is_remote(),
+    )?;
+    println!(
+        "preflight={}",
+        serde_json::to_string(&preflight).expect("preflight summary serializes")
+    );
+
+    let run_id = format!("registry-observation-{}-{started}", std::process::id());
+    let ctrl_c = install_ctrl_c_flag()
+        .map_err(|error| format!("failed to install Ctrl+C handler: {error}"))?;
+    let mut abort = AbortController::default();
+    abort.check_ctrl_c(&ctrl_c);
+    abort.check_stop_file(config.stop_file.as_deref().map(Path::new));
+    abort.check_deadline(unix_ms(), deadline_unix_ms);
+    if let Some(reason) = abort.reason() {
+        return write_registry_observation_failure(
+            &config,
+            &budget,
+            &run_id,
+            started,
+            deadline_unix_ms,
+            None,
+            &format!("{reason:?}"),
+            "registry_observation_stopped",
+            "read-only registry observation stopped before target verification",
+        );
+    }
+
+    let protection_error = if config.environment.kind.is_remote() {
+        let target_protection = LiveAuthProtection::new(&config, Duration::from_secs(5))?;
+        revalidate_or_abort(&target_protection, &mut abort)
+    } else {
+        revalidate_or_abort(&DryRunProtection::new(&config), &mut abort)
+    };
+    if let Some(error) = protection_error {
+        return write_registry_observation_failure(
+            &config,
+            &budget,
+            &run_id,
+            started,
+            deadline_unix_ms,
+            None,
+            "ProtectionUnknown",
+            "registry_target_protection_unavailable",
+            &format!("read-only registry observation target verification failed: {error}"),
+        );
+    }
+    abort.check_ctrl_c(&ctrl_c);
+    abort.check_stop_file(config.stop_file.as_deref().map(Path::new));
+    abort.check_deadline(unix_ms(), deadline_unix_ms);
+    if let Some(reason) = abort.reason() {
+        return write_registry_observation_failure(
+            &config,
+            &budget,
+            &run_id,
+            started,
+            deadline_unix_ms,
+            None,
+            &format!("{reason:?}"),
+            "registry_observation_stopped",
+            "read-only registry observation stopped before Redis collection",
+        );
+    }
+
+    let observation = match classify_registry_preflight(collect_registry_observation_for_run(
+        &run_id,
+        started,
+        registry_config,
+    )) {
+        RegistryPreflightDecision::Ready(report) => report,
+        RegistryPreflightDecision::Incomplete(report) => {
+            return write_registry_observation_failure(
+                &config,
+                &budget,
+                &run_id,
+                started,
+                deadline_unix_ms,
+                Some(&report),
+                "MetricsStale",
+                "registry_observation_incomplete",
+                "read-only registry observation has explicit coverage holes",
+            );
+        }
+        RegistryPreflightDecision::Unavailable => {
+            return write_registry_observation_failure(
+                &config,
+                &budget,
+                &run_id,
+                started,
+                deadline_unix_ms,
+                None,
+                "MetricsStale",
+                "registry_observation_unavailable",
+                "read-only registry observation could not be collected",
+            );
+        }
+    };
+    let mut metrics = Metrics::default();
+    observation.merge_into_metrics(&mut metrics);
+    let errors = ErrorBuffer::default();
+    let report = write_report(
+        Path::new(&config.reports_root),
+        ReportInput {
+            run_id: &run_id,
+            config: &config,
+            effective_budget: &budget,
+            status: "completed",
+            abort_reason: None,
+            shutdown_phase: None,
+            deadline_unix_ms,
+            graceful_shutdown_ms: config.graceful_shutdown_ms,
+            started_unix_ms: started,
+            ended_unix_ms: unix_ms(),
+            metrics: metrics.snapshot(),
+            resources: ResourceSampler.sample(0, 0, 0),
+            errors: &errors,
+            auth_metrics: None,
+            calibration: None,
+            service_versions: None,
+            registry_observation: Some(&observation),
+        },
+    )
+    .map_err(|error| error.to_string())?;
+    println!(
+        "observe-registry completed without player traffic or data writes. report={}",
+        report.display()
+    );
+    Ok(())
+}
+
+fn validate_registry_observation_smoke_config(
+    config: &LoadTestConfig,
+    budget: &loadtest_core::config::HardBudget,
+) -> Result<RegistryObservationConfig, String> {
+    let registry_config = config
+        .scenario
+        .registry_observation
+        .clone()
+        .ok_or("observe-registry requires scenario.registry_observation")?;
+    if !matches!(
+        config.environment.kind,
+        EnvironmentKind::Local | EnvironmentKind::Test
+    ) {
+        return Err("observe-registry is restricted to explicit local/test diagnostics".into());
+    }
+    if config.scenario.writes_data || budget.max_data_writes != 0 {
+        return Err("observe-registry requires writes_data=false and max_data_writes=0".into());
+    }
+    if budget.max_virtual_players != 1 || config.account_prepare.account_count != Some(1) {
+        return Err("observe-registry requires exactly one declared virtual player/account".into());
+    }
+    if !matches!(
+        &config.scenario.load,
+        LoadModel::FixedConcurrency {
+            virtual_players: 1,
+            ..
+        }
+    ) {
+        return Err("observe-registry requires fixed_concurrency with virtual_players=1".into());
+    }
+    if !config.scenario.steps.is_empty()
+        || config.scenario.auth.is_some()
+        || config.scenario.reconnect_burst.is_some()
+        || config.scenario.live_gameplay.is_some()
+        || config.scenario.side_services.is_some()
+    {
+        return Err(
+            "observe-registry forbids player, auth, gameplay, reconnect, and side-service steps"
+                .into(),
+        );
+    }
+    Ok(registry_config)
 }
 
 fn run_dry(cli: &Cli) -> Result<(), String> {
@@ -1246,13 +1460,14 @@ fn classify_registry_preflight(
     }
 }
 
-fn write_registry_preflight_failure(
+fn write_registry_observation_failure(
     config: &LoadTestConfig,
     budget: &loadtest_core::config::HardBudget,
     run_id: &str,
     started_unix_ms: u64,
     deadline_unix_ms: u64,
     observation: Option<&RegistryObservationReport>,
+    abort_reason: &str,
     error_code: &str,
     message: &str,
 ) -> Result<(), String> {
@@ -1269,7 +1484,7 @@ fn write_registry_preflight_failure(
             config,
             effective_budget: budget,
             status: "failed",
-            abort_reason: Some("MetricsStale"),
+            abort_reason: Some(abort_reason),
             shutdown_phase: None,
             deadline_unix_ms,
             graceful_shutdown_ms: config.graceful_shutdown_ms,
@@ -1286,7 +1501,7 @@ fn write_registry_preflight_failure(
     )
     .map_err(|error| error.to_string())?;
     Err(format!(
-        "read-only registry observation blocked transport setup; report={}",
+        "read-only registry observation failed; report={}",
         report.display()
     ))
 }
@@ -1554,25 +1769,27 @@ fn run_live(cli: &Cli) -> Result<(), String> {
         ) {
             RegistryPreflightDecision::Ready(report) => Some(report),
             RegistryPreflightDecision::Incomplete(report) => {
-                return write_registry_preflight_failure(
+                return write_registry_observation_failure(
                     &config,
                     &budget,
                     &run_id,
                     started,
                     deadline_unix_ms,
                     Some(&report),
+                    "MetricsStale",
                     "registry_observation_incomplete",
                     "read-only registry observation has explicit coverage holes",
                 );
             }
             RegistryPreflightDecision::Unavailable => {
-                return write_registry_preflight_failure(
+                return write_registry_observation_failure(
                     &config,
                     &budget,
                     &run_id,
                     started,
                     deadline_unix_ms,
                     None,
+                    "MetricsStale",
                     "registry_observation_unavailable",
                     "read-only registry observation could not be collected",
                 );
@@ -3913,7 +4130,7 @@ fn parse_value<T: std::str::FromStr>(value: Option<String>, flag: &str) -> Resul
         .map_err(|_| format!("{flag} has an invalid value"))
 }
 fn usage() -> String {
-    "usage: loadtest validate|calibrate --config <file> [--private-config <file>] [--allow-remote --confirm <environment>] [--dry-run]\n       loadtest run --config <file> --dry-run\n       loadtest run --config <file> --execute-auth --confirm-auth <environment> --account-manifest <file> --private-config <file> [--allow-remote --confirm <environment>]\n       loadtest run --config <file> --execute-auth --confirm-auth <environment> --execute-game --confirm-game <environment> --account-manifest <file> --private-config <file> [--allow-remote --confirm <environment>]\n       loadtest report --report-dir <reports/run-id>".into()
+    "usage: loadtest validate|calibrate --config <file> [--private-config <file>] [--allow-remote --confirm <environment>] [--dry-run]\n       loadtest observe-registry --config <file> [--allow-remote --confirm <environment>]\n       loadtest run --config <file> --dry-run\n       loadtest run --config <file> --execute-auth --confirm-auth <environment> --account-manifest <file> --private-config <file> [--allow-remote --confirm <environment>]\n       loadtest run --config <file> --execute-auth --confirm-auth <environment> --execute-game --confirm-game <environment> --account-manifest <file> --private-config <file> [--allow-remote --confirm <environment>]\n       loadtest report --report-dir <reports/run-id>".into()
 }
 
 #[cfg(test)]
@@ -3924,6 +4141,53 @@ mod tests {
     use loadtest_core::abort::AbortReason;
     use loadtest_core::auth_http::{AuthHttpStatusCategory, AuthOutcomeCategory};
     use loadtest_core::control_plane::ObservationSnapshot;
+
+    fn registry_observer_config() -> LoadTestConfig {
+        serde_json::from_value(serde_json::json!({
+            "schema_version": 1,
+            "environment": { "name": "local", "kind": "local" },
+            "targets": {
+                "auth_http": "http://127.0.0.1:3000",
+                "game_proxy": "kcp://127.0.0.1:4000"
+            },
+            "budget": {
+                "max_virtual_players": 1,
+                "max_login_qps": 1.0,
+                "max_new_connections_per_second": 1.0,
+                "max_business_messages_per_second": 1.0,
+                "max_messages_per_connection_per_second": 1.0,
+                "max_duration_secs": 1,
+                "max_total_operations": 1,
+                "max_error_rate": 0.1,
+                "max_connection_failure_rate": 0.1,
+                "max_p99_ms": 100,
+                "max_data_writes": 0
+            },
+            "scenario": {
+                "name": "registry-observer",
+                "load": {
+                    "type": "fixed_concurrency",
+                    "virtual_players": 1,
+                    "duration_secs": 1
+                },
+                "writes_data": false,
+                "registry_observation": {
+                    "read_only": true,
+                    "max_heartbeat_age_ms": 5000,
+                    "max_discovery_latency_ms": 500,
+                    "max_stale_cleanup_latency_ms": 5000,
+                    "max_metric_age_ms": 5000
+                }
+            },
+            "reports_root": "reports",
+            "prepare_reports_root": "prepare",
+            "account_prepare": {
+                "batch": "registry-smoke",
+                "account_count": 1
+            }
+        }))
+        .unwrap()
+    }
 
     fn registry_report(complete: bool) -> RegistryObservationReport {
         RegistryObservationReport {
@@ -4001,6 +4265,67 @@ mod tests {
             errors.samples()[0].category,
             "registry_observation_unavailable"
         );
+    }
+
+    #[test]
+    fn registry_observation_smoke_is_single_account_zero_write_and_player_free() {
+        let config = registry_observer_config();
+        let budget = config.effective_budget(&BudgetOverride::default()).unwrap();
+        assert!(validate_registry_observation_smoke_config(&config, &budget).is_ok());
+
+        let mut writable = config.clone();
+        writable.scenario.writes_data = true;
+        assert!(
+            validate_registry_observation_smoke_config(&writable, &budget)
+                .unwrap_err()
+                .contains("max_data_writes")
+        );
+
+        let mut multi_account = config.clone();
+        multi_account.account_prepare.account_count = Some(2);
+        assert!(
+            validate_registry_observation_smoke_config(&multi_account, &budget)
+                .unwrap_err()
+                .contains("exactly one")
+        );
+
+        let mut player_scenario = config.clone();
+        player_scenario.scenario.side_services = Some(Default::default());
+        assert!(
+            validate_registry_observation_smoke_config(&player_scenario, &budget)
+                .unwrap_err()
+                .contains("forbids player")
+        );
+
+        let mut missing_observer = config;
+        missing_observer.scenario.registry_observation = None;
+        assert!(
+            validate_registry_observation_smoke_config(&missing_observer, &budget)
+                .unwrap_err()
+                .contains("registry_observation")
+        );
+    }
+
+    #[test]
+    fn registry_observation_command_rejects_auth_and_private_inputs_before_config_load() {
+        let auth = execute(vec![
+            "observe-registry".into(),
+            "--config".into(),
+            "must-not-be-read.json".into(),
+            "--execute-auth".into(),
+        ])
+        .unwrap_err();
+        assert!(auth.contains("does not accept --dry-run"));
+
+        let private = execute(vec![
+            "observe-registry".into(),
+            "--config".into(),
+            "must-not-be-read.json".into(),
+            "--private-config".into(),
+            "must-not-be-read-private.json".into(),
+        ])
+        .unwrap_err();
+        assert!(private.contains("does not accept --private-config"));
     }
 
     #[test]

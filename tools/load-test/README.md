@@ -458,6 +458,33 @@ player execution is the existing guarded two-account `default_match` chain.
 This tool has no real GM or operations-write transport; `gm_or_ops_write` and
 other prohibited operations remain fail-closed in every profile.
 
+### Read-only Registry Observation Smoke
+
+`observe-registry` is the standalone, zero-player-traffic path for a small
+registry and instance-metrics observation smoke. Its scenario must include
+`registry_observation` with `read_only: true`, use exactly one declared virtual
+player/account, set `writes_data: false` and `max_data_writes: 0`, and contain
+no auth, gameplay, reconnect, side-service, or generic scenario steps. It does
+not accept an account manifest or private account configuration.
+
+For a remote `test` profile, it retains the normal `--allow-remote --confirm
+test`, approval, bounded-window, observer, STOP-file, DNS/IP allowlist gates.
+Before reading Redis it performs one credential-free public auth health
+baseline (DNS, TLS and `env: test`); it then opens the registry adapter only
+from the local runtime environment. The adapter issues read commands only and
+reports missing or stale service/instance metrics as fail-closed observation
+holes.
+
+```powershell
+cargo run --manifest-path tools/load-test/Cargo.toml --bin loadtest -- observe-registry --config <approved-test-registry-observer.json> --allow-remote --confirm test
+```
+
+Set the runtime-only `MYSERVER_LOADTEST_REGISTRY_URL` and, when needed,
+`MYSERVER_LOADTEST_REGISTRY_KEY_PREFIX` and
+`MYSERVER_LOADTEST_METRICS_KEY_PREFIX` in the invoking shell. These values are
+never accepted in scenario JSON or serialized into reports; use a dedicated
+read-only Redis ACL and do not place endpoint credentials in documentation.
+
 Each report has `run.json`, `metrics.json`, `timeseries.csv`, `errors.jsonl`
 and `summary.md`. Auth runs and fake auth dry-runs also have
 `auth-metrics.json`, which records login attempt QPS, login success rate,
