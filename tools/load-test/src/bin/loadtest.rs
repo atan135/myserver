@@ -7,6 +7,7 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use game_protocol::{MessageType, Packet};
 use loadtest_core::SCHEMA_VERSION;
 use loadtest_core::abort::{
     AbortController, AbortReason, ContinuousHealthEvaluator, ContinuousHealthObservation,
@@ -1134,6 +1135,225 @@ fn game_failure_category(error: &GameLiveError) -> &'static str {
         .unwrap_or("game_runner_transport_or_contract_failed")
 }
 
+const MAX_ROOM_RECOVERY_ASYNC_PUSHES: usize = 16;
+const RECONNECT_FAILURE_PREFIX: &str = "reconnect_failure:";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReconnectFailureCategory {
+    BudgetExceeded,
+    DeadlineExceeded,
+    Stopped,
+    GateRejected,
+    ProtectionOrCheckpointFailed,
+    RoomResponseTimeout,
+    RoomUnexpectedPacket,
+    RoomServerBusinessError,
+    RoomBoundaryRejected,
+    RoomAsyncPushLimit,
+    TransportFailed,
+    ExecutionFailed,
+}
+
+impl ReconnectFailureCategory {
+    fn report_category(self) -> &'static str {
+        match self {
+            Self::BudgetExceeded => "reconnect_burst_budget_exceeded",
+            Self::DeadlineExceeded => "reconnect_burst_deadline_exceeded",
+            Self::Stopped => "reconnect_burst_stopped",
+            Self::GateRejected => "reconnect_burst_gate_rejected",
+            Self::ProtectionOrCheckpointFailed => "reconnect_burst_protection_or_checkpoint_failed",
+            Self::RoomResponseTimeout => "reconnect_burst_room_response_timeout",
+            Self::RoomUnexpectedPacket => "reconnect_burst_room_unexpected_packet",
+            Self::RoomServerBusinessError => "reconnect_burst_room_server_business_error",
+            Self::RoomBoundaryRejected => "reconnect_burst_room_boundary_rejected",
+            Self::RoomAsyncPushLimit => "reconnect_burst_room_async_push_limit",
+            Self::TransportFailed => "reconnect_burst_transport_failed",
+            Self::ExecutionFailed => "reconnect_burst_execution_failed",
+        }
+    }
+
+    fn report_message(self) -> &'static str {
+        match self {
+            Self::BudgetExceeded => "live reconnect burst exceeded its approved budget",
+            Self::DeadlineExceeded => "live reconnect burst exceeded its deadline",
+            Self::Stopped => "live reconnect burst was stopped",
+            Self::GateRejected => "live reconnect burst execution gate rejected the run",
+            Self::ProtectionOrCheckpointFailed => {
+                "live reconnect burst protection or checkpoint failed"
+            }
+            Self::RoomResponseTimeout => "live reconnect burst room recovery response timed out",
+            Self::RoomUnexpectedPacket => {
+                "live reconnect burst room recovery received an unexpected packet"
+            }
+            Self::RoomServerBusinessError => {
+                "live reconnect burst room recovery received a server business error"
+            }
+            Self::RoomBoundaryRejected => {
+                "live reconnect burst room recovery left the approved room boundary"
+            }
+            Self::RoomAsyncPushLimit => {
+                "live reconnect burst room recovery exceeded the async push limit"
+            }
+            Self::TransportFailed => "live reconnect burst transport failed",
+            Self::ExecutionFailed => "live reconnect burst did not complete",
+        }
+    }
+
+    fn executor_error(self) -> String {
+        format!("{RECONNECT_FAILURE_PREFIX}{}", self.report_category())
+    }
+
+    fn from_executor_error(error: &str) -> Option<Self> {
+        if let Some(category) = error.strip_prefix(RECONNECT_FAILURE_PREFIX) {
+            return match category {
+                "reconnect_burst_room_response_timeout" => Some(Self::RoomResponseTimeout),
+                "reconnect_burst_room_unexpected_packet" => Some(Self::RoomUnexpectedPacket),
+                "reconnect_burst_room_server_business_error" => Some(Self::RoomServerBusinessError),
+                "reconnect_burst_room_boundary_rejected" => Some(Self::RoomBoundaryRejected),
+                "reconnect_burst_room_async_push_limit" => Some(Self::RoomAsyncPushLimit),
+                "reconnect_burst_transport_failed" => Some(Self::TransportFailed),
+                _ => None,
+            };
+        }
+        match error {
+            "reconnect burst action deadline elapsed" | "auth admission deadline elapsed" => {
+                Some(Self::DeadlineExceeded)
+            }
+            "reconnect burst stopped while waiting for scheduled action"
+            | "reconnect burst was stopped" => Some(Self::Stopped),
+            "remote auth target protection failed before request dispatch"
+            | "auth public game descriptor was rejected before reconnect dispatch" => {
+                Some(Self::ProtectionOrCheckpointFailed)
+            }
+            "reconnect burst KCP transport setup failed"
+            | "reconnect burst KCP connect failed"
+            | "reconnect burst KCP auth write failed"
+            | "reconnect burst KCP auth response failed"
+            | "reconnect burst room recovery write failed" => Some(Self::TransportFailed),
+            _ => None,
+        }
+    }
+}
+
+fn reconnect_execution_failure_category(
+    error: &loadtest_core::reconnect_burst::ReconnectBurstExecutionError,
+) -> ReconnectFailureCategory {
+    use loadtest_core::reconnect_burst::ReconnectBurstExecutionError;
+
+    match error {
+        ReconnectBurstExecutionError::Gate(_) => ReconnectFailureCategory::GateRejected,
+        ReconnectBurstExecutionError::BudgetMismatch
+        | ReconnectBurstExecutionError::Admission(AuthAdmissionError::BudgetExceeded(_)) => {
+            ReconnectFailureCategory::BudgetExceeded
+        }
+        ReconnectBurstExecutionError::Admission(AuthAdmissionError::DeadlineExceeded) => {
+            ReconnectFailureCategory::DeadlineExceeded
+        }
+        ReconnectBurstExecutionError::Admission(AuthAdmissionError::Stopped(_))
+        | ReconnectBurstExecutionError::Stopped => ReconnectFailureCategory::Stopped,
+        ReconnectBurstExecutionError::Checkpoint(_) => {
+            ReconnectFailureCategory::ProtectionOrCheckpointFailed
+        }
+        ReconnectBurstExecutionError::Executor(error) => {
+            ReconnectFailureCategory::from_executor_error(error)
+                .unwrap_or(ReconnectFailureCategory::ExecutionFailed)
+        }
+    }
+}
+
+fn record_reconnect_execution_failure(
+    errors: &mut ErrorBuffer,
+    error: &loadtest_core::reconnect_burst::ReconnectBurstExecutionError,
+) {
+    let category = reconnect_execution_failure_category(error);
+    errors.push(
+        category.report_category(),
+        category.report_message(),
+        Default::default(),
+    );
+}
+
+fn is_room_recovery_async_push(message_type: MessageType) -> bool {
+    matches!(
+        message_type,
+        MessageType::RoomStatePush
+            | MessageType::GameMessagePush
+            | MessageType::FrameBundlePush
+            | MessageType::RoomFrameRatePush
+            | MessageType::RoomMemberOfflinePush
+            | MessageType::MovementSnapshotPush
+            | MessageType::MovementRejectPush
+    )
+}
+
+fn receive_room_recovery_response<R, H>(
+    mut receive: R,
+    mut handle_async_push: H,
+    expected_response: MessageType,
+) -> Result<Packet, ReconnectFailureCategory>
+where
+    R: FnMut() -> Result<Packet, ReconnectFailureCategory>,
+    H: FnMut(Packet) -> Result<(), ReconnectFailureCategory>,
+{
+    let mut async_pushes = 0;
+    loop {
+        let packet = receive()?;
+        let Some(message_type) = packet.message_type() else {
+            return Err(ReconnectFailureCategory::RoomUnexpectedPacket);
+        };
+        if message_type == expected_response {
+            return Ok(packet);
+        }
+        if message_type == MessageType::ErrorRes {
+            return Err(ReconnectFailureCategory::RoomServerBusinessError);
+        }
+        if !is_room_recovery_async_push(message_type) {
+            return Err(ReconnectFailureCategory::RoomUnexpectedPacket);
+        }
+        if async_pushes >= MAX_ROOM_RECOVERY_ASYNC_PUSHES {
+            return Err(ReconnectFailureCategory::RoomAsyncPushLimit);
+        }
+        handle_async_push(packet)?;
+        async_pushes = async_pushes.saturating_add(1);
+    }
+}
+
+fn validate_room_recovery_response(
+    response: &Packet,
+    reconnect_attempt: u32,
+    approved_room_id: &str,
+) -> Result<(), ReconnectFailureCategory> {
+    let (ok, room_id) = match reconnect_attempt {
+        0 => {
+            let response = loadtest_core::pb::RoomJoinRes::decode(response.body.as_slice())
+                .map_err(|_| ReconnectFailureCategory::RoomUnexpectedPacket)?;
+            (response.ok, response.room_id)
+        }
+        _ => {
+            let response = loadtest_core::pb::RoomReconnectRes::decode(response.body.as_slice())
+                .map_err(|_| ReconnectFailureCategory::RoomUnexpectedPacket)?;
+            (response.ok, response.room_id)
+        }
+    };
+    if !ok {
+        return Err(ReconnectFailureCategory::RoomServerBusinessError);
+    }
+    if room_id != approved_room_id {
+        return Err(ReconnectFailureCategory::RoomBoundaryRejected);
+    }
+    Ok(())
+}
+
+fn reconnect_room_receive_failure_category(error: GameLiveError) -> ReconnectFailureCategory {
+    match error {
+        GameLiveError::Transport("KCP read deadline elapsed")
+        | GameLiveError::Transport("KCP session deadline elapsed") => {
+            ReconnectFailureCategory::RoomResponseTimeout
+        }
+        _ => ReconnectFailureCategory::TransportFailed,
+    }
+}
+
 fn finish_game_action_after_cleanup<C, R>(
     completed_game_session: bool,
     cleanup: C,
@@ -2216,11 +2436,7 @@ fn run_live(cli: &Cli) -> Result<(), String> {
                     .increment("reconnect_burst_room_recoveries", execution.room_recoveries);
             }
             Err(error) => {
-                errors.push(
-                    "reconnect_burst_execution_failed",
-                    "live reconnect burst did not complete",
-                    Default::default(),
-                );
+                record_reconnect_execution_failure(&mut errors, &error);
                 failed = true;
                 match error {
                     loadtest_core::reconnect_burst::ReconnectBurstExecutionError::Admission(
@@ -4073,39 +4289,35 @@ impl<'a> LiveReconnectBurstAdapter<'a> {
         self.runtime
             .block_on(transport.send(&request))
             .map_err(|_| "reconnect burst room recovery write failed")?;
-        let response = self
-            .runtime
-            .block_on(transport.receive())
-            .map_err(|_| "reconnect burst room recovery response failed")?;
-        if response.message_type() != Some(expected_response) {
-            return Err("reconnect burst room recovery returned an unexpected packet".into());
-        }
-        let (ok, room_id) = match reconnect_attempt {
-            0 => {
-                let response = loadtest_core::pb::RoomJoinRes::decode(response.body.as_slice())
-                    .map_err(|_| "reconnect burst room join returned an invalid body")?;
-                (response.ok, response.room_id)
-            }
-            _ => {
-                let response =
-                    loadtest_core::pb::RoomReconnectRes::decode(response.body.as_slice())
-                        .map_err(|_| "reconnect burst room recovery returned an invalid body")?;
-                (response.ok, response.room_id)
-            }
-        };
-        if !ok || room_id != gameplay.room_id {
-            return Err("reconnect burst room recovery left the approved room boundary".into());
-        }
+        let response = receive_room_recovery_response(
+            || {
+                self.runtime
+                    .block_on(transport.receive())
+                    .map_err(reconnect_room_receive_failure_category)
+            },
+            |packet| match session.handle_packet(self.account_pool, packet) {
+                Ok(VirtualPlayerEvent::Push { message_type, .. })
+                    if is_room_recovery_async_push(message_type) =>
+                {
+                    Ok(())
+                }
+                _ => Err(ReconnectFailureCategory::RoomUnexpectedPacket),
+            },
+            expected_response,
+        )
+        .map_err(ReconnectFailureCategory::executor_error)?;
+        validate_room_recovery_response(&response, reconnect_attempt, &gameplay.room_id)
+            .map_err(ReconnectFailureCategory::executor_error)?;
         match session
             .handle_packet(self.account_pool, response)
-            .map_err(|_| "reconnect burst room recovery lifecycle response failed")?
+            .map_err(|_| ReconnectFailureCategory::RoomUnexpectedPacket.executor_error())?
         {
             VirtualPlayerEvent::Response { message_type, .. }
                 if message_type == expected_response =>
             {
                 Ok(())
             }
-            _ => Err("reconnect burst room recovery lifecycle did not complete".into()),
+            _ => Err(ReconnectFailureCategory::RoomUnexpectedPacket.executor_error()),
         }
     }
 
@@ -5318,6 +5530,194 @@ mod tests {
                 source: Box::new(GameLiveError::Transport("ticket=secret")),
             };
             assert_eq!(game_failure_category(&error), expected);
+        }
+    }
+
+    fn room_recovery_packet(message_type: MessageType, sequence: u32, body: Vec<u8>) -> Packet {
+        Packet::new(
+            game_protocol::PacketHeader {
+                msg_type: message_type as u16,
+                seq: sequence,
+                body_len: body.len() as u32,
+            },
+            body,
+        )
+    }
+
+    #[test]
+    fn room_recovery_accepts_approved_pushes_before_expected_response() {
+        let mut packets = vec![
+            room_recovery_packet(MessageType::RoomStatePush, 1, Vec::new()),
+            room_recovery_packet(MessageType::RoomFrameRatePush, 2, Vec::new()),
+            room_recovery_packet(
+                MessageType::RoomJoinRes,
+                3,
+                game_protocol::encode_body(&loadtest_core::pb::RoomJoinRes {
+                    ok: true,
+                    room_id: "approved-room".into(),
+                    error_code: String::new(),
+                }),
+            ),
+        ]
+        .into_iter();
+        let mut pushed = Vec::new();
+
+        let response = receive_room_recovery_response(
+            || Ok(packets.next().expect("test packet")),
+            |packet| {
+                pushed.push(packet.message_type().expect("known push"));
+                Ok(())
+            },
+            MessageType::RoomJoinRes,
+        )
+        .unwrap();
+
+        assert_eq!(response.message_type(), Some(MessageType::RoomJoinRes));
+        assert_eq!(
+            pushed,
+            vec![MessageType::RoomStatePush, MessageType::RoomFrameRatePush]
+        );
+    }
+
+    #[test]
+    fn room_recovery_rejects_unexpected_and_business_packets() {
+        let unexpected = receive_room_recovery_response(
+            || Ok(room_recovery_packet(MessageType::AuthRes, 1, Vec::new())),
+            |_| Ok(()),
+            MessageType::RoomJoinRes,
+        );
+        assert_eq!(
+            unexpected,
+            Err(ReconnectFailureCategory::RoomUnexpectedPacket)
+        );
+
+        let business_error = receive_room_recovery_response(
+            || {
+                Ok(room_recovery_packet(
+                    MessageType::ErrorRes,
+                    2,
+                    game_protocol::encode_body(&loadtest_core::pb::ErrorRes {
+                        error_code: "ROOM_REJECTED".into(),
+                        message: "must not reach reports".into(),
+                    }),
+                ))
+            },
+            |_| Ok(()),
+            MessageType::RoomJoinRes,
+        );
+        assert_eq!(
+            business_error,
+            Err(ReconnectFailureCategory::RoomServerBusinessError)
+        );
+
+        let rejected_join = room_recovery_packet(
+            MessageType::RoomJoinRes,
+            3,
+            game_protocol::encode_body(&loadtest_core::pb::RoomJoinRes {
+                ok: false,
+                room_id: "approved-room".into(),
+                error_code: "ROOM_REJECTED".into(),
+            }),
+        );
+        assert_eq!(
+            validate_room_recovery_response(&rejected_join, 0, "approved-room"),
+            Err(ReconnectFailureCategory::RoomServerBusinessError)
+        );
+
+        let wrong_room = room_recovery_packet(
+            MessageType::RoomJoinRes,
+            4,
+            game_protocol::encode_body(&loadtest_core::pb::RoomJoinRes {
+                ok: true,
+                room_id: "other-room".into(),
+                error_code: String::new(),
+            }),
+        );
+        assert_eq!(
+            validate_room_recovery_response(&wrong_room, 0, "approved-room"),
+            Err(ReconnectFailureCategory::RoomBoundaryRejected)
+        );
+    }
+
+    #[test]
+    fn room_recovery_preserves_deadline_timeout_and_caps_async_pushes() {
+        let timeout = receive_room_recovery_response(
+            || Err(ReconnectFailureCategory::RoomResponseTimeout),
+            |_| panic!("a timed-out read must not invoke the push handler"),
+            MessageType::RoomJoinRes,
+        );
+        assert_eq!(timeout, Err(ReconnectFailureCategory::RoomResponseTimeout));
+        assert_eq!(
+            reconnect_room_receive_failure_category(GameLiveError::Transport(
+                "KCP session deadline elapsed"
+            )),
+            ReconnectFailureCategory::RoomResponseTimeout
+        );
+
+        let mut received = 0;
+        let mut handled = 0;
+        let push_limit = receive_room_recovery_response(
+            || {
+                received += 1;
+                Ok(room_recovery_packet(
+                    MessageType::RoomStatePush,
+                    received,
+                    Vec::new(),
+                ))
+            },
+            |_| {
+                handled += 1;
+                Ok(())
+            },
+            MessageType::RoomJoinRes,
+        );
+        assert_eq!(
+            push_limit,
+            Err(ReconnectFailureCategory::RoomAsyncPushLimit)
+        );
+        assert_eq!(handled, MAX_ROOM_RECOVERY_ASYNC_PUSHES);
+        assert_eq!(received, (MAX_ROOM_RECOVERY_ASYNC_PUSHES + 1) as u32);
+    }
+
+    #[test]
+    fn reconnect_failure_reports_use_static_precise_categories() {
+        use loadtest_core::reconnect_burst::ReconnectBurstExecutionError;
+
+        let cases = [
+            (
+                ReconnectBurstExecutionError::Executor(
+                    ReconnectFailureCategory::RoomServerBusinessError.executor_error(),
+                ),
+                ReconnectFailureCategory::RoomServerBusinessError,
+            ),
+            (
+                ReconnectBurstExecutionError::Admission(AuthAdmissionError::DeadlineExceeded),
+                ReconnectFailureCategory::DeadlineExceeded,
+            ),
+            (
+                ReconnectBurstExecutionError::Checkpoint("endpoint=secret".into()),
+                ReconnectFailureCategory::ProtectionOrCheckpointFailed,
+            ),
+            (
+                ReconnectBurstExecutionError::Executor("reconnect burst KCP connect failed".into()),
+                ReconnectFailureCategory::TransportFailed,
+            ),
+            (
+                ReconnectBurstExecutionError::Executor(
+                    "remote auth target protection failed before request dispatch".into(),
+                ),
+                ReconnectFailureCategory::ProtectionOrCheckpointFailed,
+            ),
+        ];
+
+        for (error, expected) in cases {
+            let mut errors = ErrorBuffer::default();
+            record_reconnect_execution_failure(&mut errors, &error);
+            let sample = errors.samples().first().expect("reported failure sample");
+            assert_eq!(sample.category, expected.report_category());
+            assert_eq!(sample.message, expected.report_message());
+            assert!(sample.context.is_empty());
+            assert!(!sample.message.contains("secret"));
         }
     }
 
