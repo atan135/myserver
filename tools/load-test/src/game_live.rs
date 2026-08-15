@@ -346,7 +346,12 @@ fn classify_player_match_event(
         metrics.cancellations = metrics.cancellations.saturating_add(1);
         return PlayerMatchEventOutcome::Cancelled;
     }
-    if event.event == "match_failed" && event.error_code == "MATCH_TIMEOUT" {
+    if event.event == "match_failed"
+        && matches!(
+            event.error_code.as_str(),
+            "MATCH_TIMEOUT" | "MATCH_JOIN_TIMEOUT"
+        )
+    {
         metrics.record_timeout();
         return PlayerMatchEventOutcome::TimedOut;
     }
@@ -367,6 +372,24 @@ fn classify_two_player_match_assignment(
         TwoPlayerMatchAssignmentOutcome::RoomMismatch
     } else {
         TwoPlayerMatchAssignmentOutcome::Agreed
+    }
+}
+
+fn match_start_rejection_category(error_code: &str) -> &'static str {
+    match error_code {
+        "ALREADY_MATCHING" => "match_start_already_matching",
+        "INVALID_MODE" => "match_start_invalid_mode",
+        "MATCH_SERVICE_UNAVAILABLE" => "match_start_service_unavailable",
+        _ => "match_start_rejected",
+    }
+}
+
+fn match_start_rejection_message(error_code: &str) -> &'static str {
+    match error_code {
+        "ALREADY_MATCHING" => "match start rejected: already matching",
+        "INVALID_MODE" => "match start rejected: invalid mode",
+        "MATCH_SERVICE_UNAVAILABLE" => "match start rejected: match service unavailable",
+        _ => "match start rejected",
     }
 }
 
@@ -1682,12 +1705,12 @@ impl GameSessionRunner {
                     .business_errors
                     .saturating_add(1);
                 return Err(GameLiveError::GameplayFailed {
-                    message: "match start rejected".to_string(),
+                    message: match_start_rejection_message(&body.error_code).to_string(),
                     metrics: with_player_match_metrics(
                         trackers[player_index].telemetry(),
                         &player_match_metrics[player_index],
                     ),
-                    failure_category: Some("match_start_rejected"),
+                    failure_category: Some(match_start_rejection_category(&body.error_code)),
                 });
             }
             steps[player_index].push(GameRunnerStep::MatchStarted);
@@ -4540,6 +4563,17 @@ mod tests {
             classify_player_match_event(&timed_out, &mut metrics),
             PlayerMatchEventOutcome::TimedOut
         );
+        let join_timed_out = MatchEventPush {
+            event: "match_failed".into(),
+            match_id: "match-b".into(),
+            room_id: String::new(),
+            token: String::new(),
+            error_code: "MATCH_JOIN_TIMEOUT".into(),
+        };
+        assert_eq!(
+            classify_player_match_event(&join_timed_out, &mut metrics),
+            PlayerMatchEventOutcome::TimedOut
+        );
         let matched = MatchEventPush {
             event: "matched".into(),
             match_id: "canonical-match".into(),
@@ -4564,7 +4598,7 @@ mod tests {
         );
         let snapshot = metrics.snapshot();
         assert_eq!(snapshot.counters["player_match_cancellations"], 1);
-        assert_eq!(snapshot.counters["player_match_timeouts"], 1);
+        assert_eq!(snapshot.counters["player_match_timeouts"], 2);
         assert_eq!(snapshot.counters["player_match_business_errors"], 1);
         assert_eq!(
             snapshot.counters["player_match_grpc_status_observation_holes"],
@@ -4598,6 +4632,22 @@ mod tests {
 
         retain_pending_match_event(&packet, &mut pending).unwrap();
         assert!(retain_pending_match_event(&packet, &mut pending).is_err());
+    }
+
+    #[test]
+    fn match_start_rejection_maps_server_reason_to_fixed_category() {
+        assert_eq!(
+            match_start_rejection_category("ALREADY_MATCHING"),
+            "match_start_already_matching"
+        );
+        assert_eq!(
+            match_start_rejection_message("ALREADY_MATCHING"),
+            "match start rejected: already matching"
+        );
+        assert_eq!(
+            match_start_rejection_category("UNRECOGNIZED_SERVER_REASON"),
+            "match_start_rejected"
+        );
     }
 
     #[test]
