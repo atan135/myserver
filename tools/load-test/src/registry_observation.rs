@@ -570,15 +570,25 @@ fn project_proxy_route_observation(
     expected_instance_ids: BTreeSet<String>,
     payload: &str,
 ) -> Result<RouteConvergenceObservation, RegistryObservationError> {
-    let projection = serde_json::from_str::<ProxyRouteObservation>(payload)
-        .map_err(|_| RegistryObservationError::MalformedRouteObservation)?;
-    projection
-        .validate()
-        .map_err(|_| RegistryObservationError::MalformedRouteObservation)?;
-    if projection.proxy_instance_id != proxy_instance_id
-        || projection.target_service != ObservedService::GameServer.registry_name()
-    {
-        return Err(RegistryObservationError::MalformedRouteObservation);
+    let projection = serde_json::from_str::<ProxyRouteObservation>(payload).map_err(|_| {
+        RegistryObservationError::malformed_route_observation(
+            RouteObservationMalformedReason::DeserializeFailed,
+        )
+    })?;
+    projection.validate().map_err(|_| {
+        RegistryObservationError::malformed_route_observation(
+            RouteObservationMalformedReason::ValidationFailed,
+        )
+    })?;
+    if projection.proxy_instance_id != proxy_instance_id {
+        return Err(RegistryObservationError::malformed_route_observation(
+            RouteObservationMalformedReason::ProxyInstanceMismatch,
+        ));
+    }
+    if projection.target_service != ObservedService::GameServer.registry_name() {
+        return Err(RegistryObservationError::malformed_route_observation(
+            RouteObservationMalformedReason::TargetServiceMismatch,
+        ));
     }
     Ok(RouteConvergenceObservation {
         source_service: ObservedService::GameProxy,
@@ -898,7 +908,9 @@ pub fn evaluate_registry_observation(
             || route.projection_observed_at_unix_ms > response.collected_at_unix_ms
             || !projected_proxy_ids.insert(route.source_instance_id.clone())
         {
-            return Err(RegistryObservationError::MalformedRouteObservation);
+            return Err(RegistryObservationError::malformed_route_observation(
+                RouteObservationMalformedReason::ProjectedRouteInvalid,
+            ));
         }
         let expected = active_by_service
             .get(&route.target_service)
@@ -1194,6 +1206,27 @@ fn unix_ms() -> u64 {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RouteObservationMalformedReason {
+    DeserializeFailed,
+    ValidationFailed,
+    ProxyInstanceMismatch,
+    TargetServiceMismatch,
+    ProjectedRouteInvalid,
+}
+
+impl RouteObservationMalformedReason {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::DeserializeFailed => "deserialize_failed",
+            Self::ValidationFailed => "validation_failed",
+            Self::ProxyInstanceMismatch => "proxy_instance_mismatch",
+            Self::TargetServiceMismatch => "target_service_mismatch",
+            Self::ProjectedRouteInvalid => "projected_route_invalid",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RegistryObservationError {
     InvalidRequest,
     InvalidRuntimeConfiguration,
@@ -1210,11 +1243,17 @@ pub enum RegistryObservationError {
     },
     InconsistentWindow,
     MalformedRegistryRecord,
-    MalformedRouteObservation,
+    MalformedRouteObservation {
+        reason: RouteObservationMalformedReason,
+    },
     MalformedMetricsRecord,
 }
 
 impl RegistryObservationError {
+    fn malformed_route_observation(reason: RouteObservationMalformedReason) -> Self {
+        Self::MalformedRouteObservation { reason }
+    }
+
     /// Safe report metadata. This intentionally drops Redis details because
     /// they may include key names, instance IDs, routes, or credentials.
     pub fn report_category(&self) -> &'static str {
@@ -1227,7 +1266,7 @@ impl RegistryObservationError {
             Self::RedisCommandFailed { .. } => "registry_redis_command_failed",
             Self::InconsistentWindow => "registry_observation_inconsistent_window",
             Self::MalformedRegistryRecord => "registry_observation_malformed_registry_record",
-            Self::MalformedRouteObservation => "registry_observation_malformed_route_record",
+            Self::MalformedRouteObservation { .. } => "registry_observation_malformed_route_record",
             Self::MalformedMetricsRecord => "registry_observation_malformed_metrics_record",
         }
     }
@@ -1250,7 +1289,7 @@ impl RegistryObservationError {
             Self::MalformedRegistryRecord => {
                 "read-only registry observation returned malformed data"
             }
-            Self::MalformedRouteObservation => {
+            Self::MalformedRouteObservation { .. } => {
                 "read-only registry observation returned malformed route data"
             }
             Self::MalformedMetricsRecord => {
@@ -1272,6 +1311,12 @@ impl RegistryObservationError {
             Self::RedisCommandFailed { command, class } => {
                 context.insert("redis_command".into(), command.as_str().into());
                 context.insert("redis_error_class".into(), class.as_str().into());
+            }
+            Self::MalformedRouteObservation { reason } => {
+                context.insert(
+                    "route_observation_malformed_reason".into(),
+                    reason.as_str().into(),
+                );
             }
             _ => {}
         }
@@ -1310,7 +1355,9 @@ impl std::fmt::Display for RegistryObservationError {
             Self::RedisCommandFailed { .. } => "registry read-only Redis command failed",
             Self::InconsistentWindow => "registry observation run_id or window is inconsistent",
             Self::MalformedRegistryRecord => "registry observation has an invalid instance record",
-            Self::MalformedRouteObservation => "registry observation has an invalid route record",
+            Self::MalformedRouteObservation { .. } => {
+                "registry observation has an invalid route record"
+            }
             Self::MalformedMetricsRecord => "registry observation has an invalid metrics record",
         };
         formatter.write_str(message)
@@ -1468,7 +1515,7 @@ mod tests {
     }
 
     #[test]
-    fn projection_adapter_accepts_only_sanitized_schema_and_redacts_rejections() {
+    fn projection_adapter_accepts_only_sanitized_schema_and_classifies_rejections() {
         let projection = ProxyRouteObservation::new(
             "game-proxy",
             "game-server",
@@ -1497,7 +1544,12 @@ mod tests {
             &serde_json::to_string(&invalid).unwrap(),
         )
         .unwrap_err();
-        assert_eq!(error, RegistryObservationError::MalformedRouteObservation);
+        assert_eq!(
+            error,
+            RegistryObservationError::MalformedRouteObservation {
+                reason: RouteObservationMalformedReason::DeserializeFailed,
+            }
+        );
         let report_text = serde_json::to_string(&serde_json::json!({
             "category": error.report_category(),
             "message": error.report_message(),
@@ -1506,6 +1558,106 @@ mod tests {
         .unwrap();
         assert!(!report_text.contains("private.sock"));
         assert!(!report_text.contains("socket"));
+    }
+
+    #[test]
+    fn projection_adapter_exposes_only_fixed_malformed_reasons() {
+        let projection = ProxyRouteObservation::new(
+            "game-proxy",
+            "game-server",
+            ["game-server".into()],
+            3,
+            20_000,
+        )
+        .unwrap();
+        let mut invalid_contract = projection.clone();
+        invalid_contract.eligible_upstream_count = 2;
+
+        let cases = [
+            (
+                serde_json::json!({
+                    "schema_version": 1,
+                    "proxy_instance_id": "game-proxy",
+                    "target_service": "game-server",
+                    "eligible_upstream_instance_ids": [],
+                    "eligible_upstream_count": 0,
+                    "revision": 1,
+                    "observed_at_unix_ms": 20_000,
+                    "ttl_secs": 30,
+                    "expires_at_unix_ms": 50_000,
+                    "private_field": "private-value"
+                })
+                .to_string(),
+                RouteObservationMalformedReason::DeserializeFailed,
+                "private-value",
+            ),
+            (
+                serde_json::to_string(&invalid_contract).unwrap(),
+                RouteObservationMalformedReason::ValidationFailed,
+                "eligible_upstream_count",
+            ),
+            (
+                serde_json::to_string(
+                    &ProxyRouteObservation::new(
+                        "proxy-private",
+                        "game-server",
+                        ["game-server".into()],
+                        3,
+                        20_000,
+                    )
+                    .unwrap(),
+                )
+                .unwrap(),
+                RouteObservationMalformedReason::ProxyInstanceMismatch,
+                "proxy-private",
+            ),
+            (
+                serde_json::to_string(
+                    &ProxyRouteObservation::new(
+                        "game-proxy",
+                        "private-target",
+                        ["game-server".into()],
+                        3,
+                        20_000,
+                    )
+                    .unwrap(),
+                )
+                .unwrap(),
+                RouteObservationMalformedReason::TargetServiceMismatch,
+                "private-target",
+            ),
+        ];
+
+        for (payload, reason, forbidden) in cases {
+            let error = project_proxy_route_observation(
+                "game-proxy".into(),
+                ["game-server".into()].into(),
+                &payload,
+            )
+            .unwrap_err();
+            assert_eq!(
+                error,
+                RegistryObservationError::MalformedRouteObservation { reason }
+            );
+            assert_eq!(
+                error.report_context(),
+                BTreeMap::from([(
+                    "route_observation_malformed_reason".into(),
+                    reason.as_str().into(),
+                )])
+            );
+            let report_text = serde_json::to_string(&serde_json::json!({
+                "category": error.report_category(),
+                "message": error.report_message(),
+                "context": error.report_context(),
+            }))
+            .unwrap();
+            assert_eq!(
+                error.report_category(),
+                "registry_observation_malformed_route_record"
+            );
+            assert!(!report_text.contains(forbidden));
+        }
     }
 
     #[test]
