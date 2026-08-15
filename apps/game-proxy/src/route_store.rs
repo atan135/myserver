@@ -704,6 +704,22 @@ impl ProxyRouteStore {
         routes
     }
 
+    /// Returns only upstream instance ids which can still receive traffic.
+    /// This in-process projection intentionally exposes neither socket names
+    /// nor player, character, or room route state.
+    pub async fn routable_upstream_server_ids(&self) -> Vec<String> {
+        let state = self.state.read().await;
+        let mut ids: Vec<_> = state
+            .routes
+            .values()
+            .filter(|route| route.can_accept_bound_sessions())
+            .map(|route| route.server_id.clone())
+            .collect();
+        ids.sort();
+        ids.dedup();
+        ids
+    }
+
     pub async fn update_operation_state(
         &self,
         server_id: &str,

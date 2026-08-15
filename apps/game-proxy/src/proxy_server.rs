@@ -34,8 +34,8 @@ use crate::session::{ProxySession, ProxySessionState};
 use crate::upstream::connect_upstream;
 use service_registry::{
     ConvergenceAttempt, ConvergenceConfig, ConvergenceTask, DiscoverySnapshot, HealthState,
-    RegistryClient, ServiceEndpoint, ServiceInstance, StartupErrorCode, record_discovery_metric,
-    spawn_convergence,
+    ProxyRouteObservationPublisher, RegistryClient, ServiceEndpoint, ServiceInstance,
+    StartupErrorCode, record_discovery_metric, spawn_convergence,
 };
 
 const MAX_PROXY_BODY_LEN: usize = 1024 * 1024;
@@ -257,6 +257,7 @@ pub async fn run(
         let registry_url = config.registry_url.clone();
         let registry_key_prefix = config.registry_key_prefix.clone();
         let service_name = config.upstream_service_name.clone();
+        let proxy_instance_id = config.service_instance_id.clone();
         let discover_interval = config.registry_discover_interval_secs;
         let route_store_clone = route_store.clone();
         Some(
@@ -264,6 +265,7 @@ pub async fn run(
                 registry_url,
                 registry_key_prefix,
                 service_name,
+                proxy_instance_id,
                 discover_interval,
                 route_store_clone,
                 health_state.clone(),
@@ -403,10 +405,16 @@ fn spawn_upstream_discovery(
     registry_url: String,
     registry_key_prefix: String,
     service_name: String,
+    proxy_instance_id: String,
     discover_interval_secs: u64,
     route_store: ProxyRouteStore,
     health_state: HealthState,
 ) -> Result<ConvergenceTask, Box<dyn std::error::Error + Send + Sync>> {
+    let route_observation_publisher = Arc::new(ProxyRouteObservationPublisher::new_lazy(
+        &registry_url,
+        registry_key_prefix.clone(),
+        proxy_instance_id,
+    )?);
     let client = Arc::new(
         RegistryClient::new_lazy(&registry_url, "proxy", "proxy-static")?
             .with_key_prefix(registry_key_prefix),
@@ -417,6 +425,7 @@ fn spawn_upstream_discovery(
         let service_name = service_name.clone();
         let route_store = route_store.clone();
         let health_state = health_state.clone();
+        let route_observation_publisher = Arc::clone(&route_observation_publisher);
         async move {
             let snapshot = match client.refresh_discovery_snapshot(&service_name).await {
                 Ok(snapshot) => snapshot,
@@ -430,6 +439,19 @@ fn spawn_upstream_discovery(
             let registry_failed = snapshot.error.is_some();
             let endpoint_count =
                 refresh_routes_from_discovery_snapshot(snapshot, &route_store).await;
+            if route_observation_publisher
+                .publish(
+                    &service_name,
+                    route_store.routable_upstream_server_ids().await,
+                )
+                .await
+                .is_err()
+            {
+                tracing::warn!(
+                    target_service = %service_name,
+                    "route observation projection publish failed"
+                );
+            }
             if registry_failed {
                 health_state.mark_degraded(
                     "game-server",
@@ -1991,6 +2013,29 @@ mod tests {
         assert_eq!(routes[0].local_socket_name, "new.sock");
         assert_eq!(routes[0].operation_state, UpstreamOperationState::Draining);
         assert_eq!(routes[0].health_state, UpstreamHealthState::Healthy);
+    }
+
+    #[tokio::test]
+    async fn route_observation_uses_only_currently_routable_instance_ids() {
+        let store = ProxyRouteStore::default();
+        store
+            .set_static_routes(vec![
+                upstream_route("active", UpstreamOperationState::Active),
+                upstream_route("draining", UpstreamOperationState::Draining),
+                upstream_route("disabled", UpstreamOperationState::Disabled),
+                UpstreamRoute {
+                    server_id: "unavailable".into(),
+                    local_socket_name: "unavailable.sock".into(),
+                    operation_state: UpstreamOperationState::Active,
+                    health_state: UpstreamHealthState::Unavailable,
+                },
+            ])
+            .await;
+
+        assert_eq!(
+            store.routable_upstream_server_ids().await,
+            ["active", "draining"]
+        );
     }
 
     #[tokio::test]
