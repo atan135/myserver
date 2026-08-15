@@ -1495,6 +1495,20 @@ fn execute_live_game_side_services<P: RuntimeProtection>(
     Ok(metrics.snapshot())
 }
 
+/// The live KCP runner uses a current-thread Tokio runtime. Blocking reqwest
+/// clients may own a Tokio runtime internally, whose destructor must not run
+/// from that async context. Run a bounded side-service phase on a scoped OS
+/// thread and synchronously join it before the KCP runner advances.
+fn run_scoped_blocking_side_work<T>(work: impl FnOnce() -> Result<T, ()> + Send) -> Result<T, ()>
+where
+    T: Send,
+{
+    std::thread::scope(|scope| match scope.spawn(work).join() {
+        Ok(result) => result,
+        Err(_) => Err(()),
+    })
+}
+
 fn collect_registry_observation_for_run(
     run_id: &str,
     started_unix_ms: u64,
@@ -2359,48 +2373,57 @@ fn run_live(cli: &Cli) -> Result<(), String> {
                                             == GameRunnerCheckpoint::OnlinePairReadyStarted
                                         {
                                             if online_default_match_mail_claim_phase {
-                                                check_live_composite_side_controller(
-                                                    &config,
-                                                    deadline_unix_ms,
-                                                    &ctrl_c,
-                                                    &protection,
-                                                    &mut abort,
-                                                )
-                                                .map_err(|_| {
-                                                    GameLiveError::Transport(
-                                                        "online mail-claim phase stopped before dispatch",
-                                                    )
-                                                })?;
-                                                for (ticket, character_id, auth_services) in
-                                                    &side_credentials
-                                                {
-                                                    match execute_live_game_side_services(
-                                                        &config,
-                                                        &budget,
-                                                        ticket,
-                                                        character_id,
-                                                        auth_services.as_ref(),
-                                                        &mut descriptor_tracker,
-                                                        action_deadline,
-                                                        deadline_unix_ms,
-                                                        &mut dispatch_admission,
-                                                        &mut abort,
-                                                        &ctrl_c,
-                                                        &protection,
-                                                    ) {
-                                                        Ok(metrics) => {
-                                                            core_metrics.merge_snapshot(&metrics)
-                                                        }
-                                                        Err(_) => {
-                                                            errors.push(
-                                                                "online_mail_claim_execution_failed",
-                                                                "online mail claim did not complete",
-                                                                Default::default(),
+                                                let online_result =
+                                                    run_scoped_blocking_side_work(|| {
+                                                        check_live_composite_side_controller(
+                                                            &config,
+                                                            deadline_unix_ms,
+                                                            &ctrl_c,
+                                                            &protection,
+                                                            &mut abort,
+                                                        )
+                                                        .map_err(|_| ())?;
+                                                        let mut snapshots = Vec::with_capacity(
+                                                            side_credentials.len(),
+                                                        );
+                                                        for (ticket, character_id, auth_services) in
+                                                            &side_credentials
+                                                        {
+                                                            snapshots.push(
+                                                                execute_live_game_side_services(
+                                                                    &config,
+                                                                    &budget,
+                                                                    ticket,
+                                                                    character_id,
+                                                                    auth_services.as_ref(),
+                                                                    &mut descriptor_tracker,
+                                                                    action_deadline,
+                                                                    deadline_unix_ms,
+                                                                    &mut dispatch_admission,
+                                                                    &mut abort,
+                                                                    &ctrl_c,
+                                                                    &protection,
+                                                                )
+                                                                .map_err(|_| ())?,
                                                             );
-                                                            return Err(GameLiveError::Transport(
-                                                                "online mail-claim phase failed",
-                                                            ));
                                                         }
+                                                        Ok(snapshots)
+                                                    });
+                                                match online_result {
+                                                    Ok(snapshots) => {
+                                                        for metrics in snapshots {
+                                                            core_metrics.merge_snapshot(&metrics);
+                                                        }
+                                                    }
+                                                    Err(()) => {
+                                                        errors.push(
+                                                            "online_mail_claim_execution_failed",
+                                                            "online mail claim did not complete",
+                                                            Default::default(),
+                                                        );
+                                                        return Err(GameLiveError::Transport(
+                                                            "online mail-claim phase failed",
+                                                        ));
                                                     }
                                                 }
                                             }
@@ -2461,7 +2484,9 @@ fn run_live(cli: &Cli) -> Result<(), String> {
                                             }
                                             GameRunnerCheckpoint::Control => {}
                                             GameRunnerCheckpoint::OnlinePairReadyStarted => {
-                                                unreachable!("online mail-claim phase returned above")
+                                                unreachable!(
+                                                    "online mail-claim phase returned above"
+                                                )
                                             }
                                         }
                                         Ok(())
@@ -4974,6 +4999,31 @@ mod tests {
                 .unwrap_err()
                 .contains("mail only")
         );
+    }
+
+    #[test]
+    fn scoped_blocking_side_work_drops_tokio_runtime_outside_kcp_runtime() {
+        let caller_thread = std::thread::current().id();
+        let kcp_runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+
+        let worker_thread = kcp_runtime
+            .block_on(async {
+                run_scoped_blocking_side_work(|| {
+                    let side_runtime = tokio::runtime::Builder::new_current_thread()
+                        .enable_time()
+                        .build()
+                        .map_err(|_| ())?;
+                    side_runtime.block_on(async {});
+                    drop(side_runtime);
+                    Ok(std::thread::current().id())
+                })
+            })
+            .unwrap();
+
+        assert_ne!(worker_thread, caller_thread);
     }
 
     #[test]
