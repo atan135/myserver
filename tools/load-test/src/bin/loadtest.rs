@@ -299,6 +299,7 @@ fn observe_registry(cli: &Cli) -> Result<(), String> {
             &format!("{reason:?}"),
             "registry_observation_stopped",
             "read-only registry observation stopped before target verification",
+            Default::default(),
         );
     }
 
@@ -319,6 +320,7 @@ fn observe_registry(cli: &Cli) -> Result<(), String> {
             "ProtectionUnknown",
             "registry_target_protection_unavailable",
             &format!("read-only registry observation target verification failed: {error}"),
+            Default::default(),
         );
     }
     abort.check_ctrl_c(&ctrl_c);
@@ -335,6 +337,7 @@ fn observe_registry(cli: &Cli) -> Result<(), String> {
             &format!("{reason:?}"),
             "registry_observation_stopped",
             "read-only registry observation stopped before Redis collection",
+            Default::default(),
         );
     }
 
@@ -355,9 +358,10 @@ fn observe_registry(cli: &Cli) -> Result<(), String> {
                 "MetricsStale",
                 "registry_observation_incomplete",
                 "read-only registry observation has explicit coverage holes",
+                Default::default(),
             );
         }
-        RegistryPreflightDecision::Unavailable => {
+        RegistryPreflightDecision::Unavailable(error) => {
             return write_registry_observation_failure(
                 &config,
                 &budget,
@@ -366,8 +370,9 @@ fn observe_registry(cli: &Cli) -> Result<(), String> {
                 deadline_unix_ms,
                 None,
                 "MetricsStale",
-                "registry_observation_unavailable",
-                "read-only registry observation could not be collected",
+                error.report_category(),
+                error.report_message(),
+                error.report_context(),
             );
         }
     };
@@ -1602,7 +1607,7 @@ fn collect_registry_observation_for_run(
 enum RegistryPreflightDecision {
     Ready(RegistryObservationReport),
     Incomplete(RegistryObservationReport),
-    Unavailable,
+    Unavailable(RegistryObservationError),
 }
 
 fn classify_registry_preflight(
@@ -1611,7 +1616,7 @@ fn classify_registry_preflight(
     match result {
         Ok(report) if report.snapshot.complete => RegistryPreflightDecision::Ready(report),
         Ok(report) => RegistryPreflightDecision::Incomplete(report),
-        Err(_) => RegistryPreflightDecision::Unavailable,
+        Err(error) => RegistryPreflightDecision::Unavailable(error),
     }
 }
 
@@ -1625,13 +1630,14 @@ fn write_registry_observation_failure(
     abort_reason: &str,
     error_code: &str,
     message: &str,
+    context: BTreeMap<String, String>,
 ) -> Result<(), String> {
     let mut metrics = Metrics::default();
     if let Some(observation) = observation {
         observation.merge_into_metrics(&mut metrics);
     }
     let mut errors = ErrorBuffer::default();
-    errors.push(error_code, message, Default::default());
+    errors.push(error_code, message, context);
     let report = write_report(
         Path::new(&config.reports_root),
         ReportInput {
@@ -1684,11 +1690,11 @@ fn record_registry_observation_result(
                 abort.request(AbortReason::MetricsStale);
             }
         }
-        Err(_) => {
+        Err(error) => {
             errors.push(
-                "registry_observation_unavailable",
-                "read-only registry observation could not be collected",
-                Default::default(),
+                error.report_category(),
+                error.report_message(),
+                error.report_context(),
             );
             *failed = true;
             abort.request(AbortReason::MetricsStale);
@@ -1945,9 +1951,10 @@ fn run_live(cli: &Cli) -> Result<(), String> {
                     "MetricsStale",
                     "registry_observation_incomplete",
                     "read-only registry observation has explicit coverage holes",
+                    Default::default(),
                 );
             }
-            RegistryPreflightDecision::Unavailable => {
+            RegistryPreflightDecision::Unavailable(error) => {
                 return write_registry_observation_failure(
                     &config,
                     &budget,
@@ -1956,8 +1963,9 @@ fn run_live(cli: &Cli) -> Result<(), String> {
                     deadline_unix_ms,
                     None,
                     "MetricsStale",
-                    "registry_observation_unavailable",
-                    "read-only registry observation could not be collected",
+                    error.report_category(),
+                    error.report_message(),
+                    error.report_context(),
                 );
             }
         },
@@ -4465,7 +4473,7 @@ mod tests {
         ));
         assert!(matches!(
             classify_registry_preflight(Err(RegistryObservationError::TransportUnavailable)),
-            RegistryPreflightDecision::Unavailable
+            RegistryPreflightDecision::Unavailable(RegistryObservationError::TransportUnavailable)
         ));
 
         let mut latest = None;
@@ -4508,8 +4516,106 @@ mod tests {
         assert_eq!(live_run_terminal_status(&abort, failed), "aborted");
         assert_eq!(
             errors.samples()[0].category,
-            "registry_observation_unavailable"
+            "registry_observation_transport_unavailable"
         );
+        assert!(errors.samples()[0].context.is_empty());
+
+        let mut latest = None;
+        let mut metrics = Metrics::default();
+        let mut errors = ErrorBuffer::default();
+        let mut abort = AbortController::default();
+        let mut failed = false;
+        record_registry_observation_result(
+            Err(RegistryObservationError::RedisCommandRejected {
+                command: loadtest_core::registry_observation::RegistryRedisCommand::Zrange,
+            }),
+            &mut latest,
+            &mut metrics,
+            &mut errors,
+            &mut abort,
+            &mut failed,
+        );
+        assert!(latest.is_none());
+        assert!(failed);
+        assert_eq!(
+            errors.samples()[0].category,
+            "registry_redis_command_rejected"
+        );
+        assert_eq!(
+            errors.samples()[0].context,
+            BTreeMap::from([
+                ("redis_command".into(), "zrange".into()),
+                ("redis_error_class".into(), "permission_denied".into()),
+            ])
+        );
+    }
+
+    #[test]
+    fn registry_observation_failure_report_keeps_redis_error_details_redacted() {
+        let root = std::env::temp_dir().join(format!(
+            "loadtest-registry-error-report-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let mut config = registry_observer_config();
+        config.reports_root = root.to_string_lossy().into_owned();
+        let budget = config.effective_budget(&BudgetOverride::default()).unwrap();
+        let error = RegistryObservationError::RedisCommandFailed {
+            command: loadtest_core::registry_observation::RegistryRedisCommand::Hgetall,
+            class: loadtest_core::registry_observation::RegistryRedisErrorClass::TypeError,
+        };
+
+        assert!(
+            write_registry_observation_failure(
+                &config,
+                &budget,
+                "registry-error-redaction",
+                1,
+                2,
+                None,
+                "MetricsStale",
+                error.report_category(),
+                error.report_message(),
+                error.report_context(),
+            )
+            .is_err()
+        );
+
+        let mut entries = std::fs::read_dir(&root).unwrap();
+        let report_dir = entries.next().unwrap().unwrap().path();
+        assert!(entries.next().is_none());
+        let artifacts = [
+            "run.json",
+            "errors.jsonl",
+            "metrics.json",
+            "summary.md",
+            "timeseries.csv",
+        ]
+        .into_iter()
+        .map(|name| std::fs::read_to_string(report_dir.join(name)).unwrap())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+        assert!(artifacts.contains("registry_redis_command_failed"));
+        assert!(artifacts.contains("\"redis_command\":\"hgetall\""));
+        assert!(artifacts.contains("\"redis_error_class\":\"type_error\""));
+        for forbidden in [
+            "redis://observer:secret@host",
+            "top-secret",
+            "service:private",
+            "metrics:v2:latest:private",
+            "WRONGTYPE",
+        ] {
+            assert!(
+                !artifacts.contains(forbidden),
+                "report artifact leaked Redis detail: {forbidden}"
+            );
+        }
+
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

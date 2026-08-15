@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
 
-use redis::AsyncCommands;
+use redis::{AsyncCommands, ErrorKind as RedisErrorKind, RedisError};
 use serde::{Deserialize, Serialize};
 use service_registry::{
     REGISTRY_HEARTBEAT_TTL_SECONDS, SERVICE_INSTANCE_SCHEMA_VERSION, ServiceInstance,
@@ -23,6 +23,90 @@ pub const MAX_REGISTRY_INSTANCES_PER_SERVICE: usize = 64;
 pub const MAX_METRIC_FIELDS_PER_INSTANCE: usize = 128;
 pub const MIN_REGISTRY_RECHECK_INTERVAL_MS: u64 = 100;
 pub const MAX_REGISTRY_RECHECK_INTERVAL_MS: u64 = 30_000;
+
+/// Commands issued by the read-only adapter. These are deliberately a fixed
+/// vocabulary so reports cannot contain a key, identifier, or command input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RegistryRedisCommand {
+    Zrange,
+    Hget,
+    Pttl,
+    Zrangebyscore,
+    Hgetall,
+}
+
+impl RegistryRedisCommand {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Zrange => "zrange",
+            Self::Hget => "hget",
+            Self::Pttl => "pttl",
+            Self::Zrangebyscore => "zrangebyscore",
+            Self::Hgetall => "hgetall",
+        }
+    }
+}
+
+/// A safe, low-cardinality projection of `redis::RedisError`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RegistryRedisErrorClass {
+    PermissionDenied,
+    ResponseError,
+    AuthenticationFailed,
+    TypeError,
+    BusyLoading,
+    ClusterUnavailable,
+    Retryable,
+    ReadOnly,
+    Io,
+    Client,
+    Other,
+}
+
+impl RegistryRedisErrorClass {
+    fn from_redis_error(error: &RedisError) -> Self {
+        if error
+            .detail()
+            .is_some_and(|detail| detail.trim_start().starts_with("NOPERM"))
+        {
+            return Self::PermissionDenied;
+        }
+        match error.kind() {
+            RedisErrorKind::ResponseError | RedisErrorKind::ExtensionError => Self::ResponseError,
+            RedisErrorKind::AuthenticationFailed => Self::AuthenticationFailed,
+            RedisErrorKind::TypeError => Self::TypeError,
+            RedisErrorKind::BusyLoadingError => Self::BusyLoading,
+            RedisErrorKind::ClusterDown
+            | RedisErrorKind::MasterDown
+            | RedisErrorKind::ClusterConnectionNotFound
+            | RedisErrorKind::MasterNameNotFoundBySentinel
+            | RedisErrorKind::NoValidReplicasFoundBySentinel => Self::ClusterUnavailable,
+            RedisErrorKind::TryAgain | RedisErrorKind::Moved | RedisErrorKind::Ask => {
+                Self::Retryable
+            }
+            RedisErrorKind::ReadOnly => Self::ReadOnly,
+            RedisErrorKind::IoError => Self::Io,
+            RedisErrorKind::InvalidClientConfig | RedisErrorKind::ClientError => Self::Client,
+            _ => Self::Other,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::PermissionDenied => "permission_denied",
+            Self::ResponseError => "response_error",
+            Self::AuthenticationFailed => "authentication_failed",
+            Self::TypeError => "type_error",
+            Self::BusyLoading => "busy_loading",
+            Self::ClusterUnavailable => "cluster_unavailable",
+            Self::Retryable => "retryable",
+            Self::ReadOnly => "read_only",
+            Self::Io => "io",
+            Self::Client => "client",
+            Self::Other => "other",
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(rename_all = "kebab-case")]
@@ -277,7 +361,9 @@ impl RedisReadonlyRegistryTransport {
                 .arg("WITHSCORES")
                 .query_async(&mut connection)
                 .await
-                .map_err(|_| RegistryObservationError::TransportUnavailable)?;
+                .map_err(|error| {
+                    registry_redis_command_error(RegistryRedisCommand::Zrange, error)
+                })?;
             for (instance_id, heartbeat_score) in indexed {
                 let heartbeat_seconds = heartbeat_score_to_seconds(heartbeat_score)?;
                 let instance_key = format!(
@@ -286,15 +372,20 @@ impl RedisReadonlyRegistryTransport {
                 );
                 let heartbeat_key =
                     format!("{}heartbeat:{name}:{instance_id}", self.registry_key_prefix);
-                let data: Option<String> = connection
-                    .hget(&instance_key, "data")
-                    .await
-                    .map_err(|_| RegistryObservationError::TransportUnavailable)?;
+                let data: Option<String> =
+                    connection
+                        .hget(&instance_key, "data")
+                        .await
+                        .map_err(|error| {
+                            registry_redis_command_error(RegistryRedisCommand::Hget, error)
+                        })?;
                 let ttl_ms: i64 = redis::cmd("PTTL")
                     .arg(&heartbeat_key)
                     .query_async(&mut connection)
                     .await
-                    .map_err(|_| RegistryObservationError::TransportUnavailable)?;
+                    .map_err(|error| {
+                        registry_redis_command_error(RegistryRedisCommand::Pttl, error)
+                    })?;
                 if ttl_ms <= 0 {
                     stale_cleanups.push(StaleCleanupObservation {
                         service,
@@ -334,16 +425,18 @@ impl RedisReadonlyRegistryTransport {
                 .arg(MAX_REGISTRY_INSTANCES_PER_SERVICE)
                 .query_async(&mut connection)
                 .await
-                .map_err(|_| RegistryObservationError::TransportUnavailable)?;
+                .map_err(|error| {
+                    registry_redis_command_error(RegistryRedisCommand::Zrangebyscore, error)
+                })?;
             for instance_id in metric_ids {
                 let metrics_key = format!(
                     "{}metrics:v2:latest:{name}:{instance_id}",
                     self.metrics_key_prefix
                 );
-                let fields: BTreeMap<String, String> = connection
-                    .hgetall(&metrics_key)
-                    .await
-                    .map_err(|_| RegistryObservationError::TransportUnavailable)?;
+                let fields: BTreeMap<String, String> =
+                    connection.hgetall(&metrics_key).await.map_err(|error| {
+                        registry_redis_command_error(RegistryRedisCommand::Hgetall, error)
+                    })?;
                 if let Some(observation) = parse_metrics_hash(service, &instance_id, fields)? {
                     instance_metrics.push(observation);
                 }
@@ -940,10 +1033,89 @@ pub enum RegistryObservationError {
     InvalidRequest,
     InvalidRuntimeConfiguration,
     TransportUnavailable,
+    RedisCommandRejected {
+        command: RegistryRedisCommand,
+    },
+    RedisCommandFailed {
+        command: RegistryRedisCommand,
+        class: RegistryRedisErrorClass,
+    },
     InconsistentWindow,
     MalformedRegistryRecord,
     MalformedRouteObservation,
     MalformedMetricsRecord,
+}
+
+impl RegistryObservationError {
+    /// Safe report metadata. This intentionally drops Redis details because
+    /// they may include key names, instance IDs, routes, or credentials.
+    pub fn report_category(&self) -> &'static str {
+        match self {
+            Self::InvalidRequest => "registry_observation_invalid_request",
+            Self::InvalidRuntimeConfiguration => "registry_observation_invalid_runtime",
+            Self::TransportUnavailable => "registry_observation_transport_unavailable",
+            Self::RedisCommandRejected { .. } => "registry_redis_command_rejected",
+            Self::RedisCommandFailed { .. } => "registry_redis_command_failed",
+            Self::InconsistentWindow => "registry_observation_inconsistent_window",
+            Self::MalformedRegistryRecord => "registry_observation_malformed_registry_record",
+            Self::MalformedRouteObservation => "registry_observation_malformed_route_record",
+            Self::MalformedMetricsRecord => "registry_observation_malformed_metrics_record",
+        }
+    }
+
+    pub fn report_message(&self) -> &'static str {
+        match self {
+            Self::InvalidRequest => "read-only registry observation request is invalid",
+            Self::InvalidRuntimeConfiguration => {
+                "read-only registry observer runtime configuration is invalid"
+            }
+            Self::TransportUnavailable => "read-only registry transport could not be established",
+            Self::RedisCommandRejected { .. } => {
+                "read-only registry Redis command was rejected by its access policy"
+            }
+            Self::RedisCommandFailed { .. } => "read-only registry Redis command failed",
+            Self::InconsistentWindow => {
+                "read-only registry observation returned an inconsistent window"
+            }
+            Self::MalformedRegistryRecord => {
+                "read-only registry observation returned malformed data"
+            }
+            Self::MalformedRouteObservation => {
+                "read-only registry observation returned malformed route data"
+            }
+            Self::MalformedMetricsRecord => {
+                "read-only registry observation returned malformed metrics data"
+            }
+        }
+    }
+
+    pub fn report_context(&self) -> BTreeMap<String, String> {
+        let mut context = BTreeMap::new();
+        match self {
+            Self::RedisCommandRejected { command } => {
+                context.insert("redis_command".into(), command.as_str().into());
+                context.insert("redis_error_class".into(), "permission_denied".into());
+            }
+            Self::RedisCommandFailed { command, class } => {
+                context.insert("redis_command".into(), command.as_str().into());
+                context.insert("redis_error_class".into(), class.as_str().into());
+            }
+            _ => {}
+        }
+        context
+    }
+}
+
+fn registry_redis_command_error(
+    command: RegistryRedisCommand,
+    error: RedisError,
+) -> RegistryObservationError {
+    let class = RegistryRedisErrorClass::from_redis_error(&error);
+    if class == RegistryRedisErrorClass::PermissionDenied {
+        RegistryObservationError::RedisCommandRejected { command }
+    } else {
+        RegistryObservationError::RedisCommandFailed { command, class }
+    }
 }
 
 impl std::fmt::Display for RegistryObservationError {
@@ -954,6 +1126,8 @@ impl std::fmt::Display for RegistryObservationError {
                 "registry observer runtime configuration is invalid"
             }
             Self::TransportUnavailable => "registry read-only transport is unavailable",
+            Self::RedisCommandRejected { .. } => "registry read-only Redis command was rejected",
+            Self::RedisCommandFailed { .. } => "registry read-only Redis command failed",
             Self::InconsistentWindow => "registry observation run_id or window is inconsistent",
             Self::MalformedRegistryRecord => "registry observation has an invalid instance record",
             Self::MalformedRouteObservation => "registry observation has an invalid route record",
@@ -1073,6 +1247,110 @@ mod tests {
             instance_metrics,
             dependency_metrics,
         }
+    }
+
+    fn empty_response() -> RegistryReadResponse {
+        RegistryReadResponse {
+            run_id: "run-registry-1".into(),
+            window_start_unix_ms: 10_000,
+            window_end_unix_ms: 20_000,
+            collection_started_unix_ms: 20_000,
+            collected_at_unix_ms: 20_100,
+            instances: Vec::new(),
+            stale_cleanups: Vec::new(),
+            routes: Vec::new(),
+            instance_metrics: Vec::new(),
+            dependency_metrics: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn redis_command_errors_are_classified_without_exporting_details() {
+        let rejected = registry_redis_command_error(
+            RegistryRedisCommand::Zrange,
+            RedisError::from((
+                RedisErrorKind::ResponseError,
+                "server error",
+                "NOPERM key=service:private password=top-secret redis://observer:secret@host"
+                    .to_string(),
+            )),
+        );
+        assert!(matches!(
+            rejected,
+            RegistryObservationError::RedisCommandRejected {
+                command: RegistryRedisCommand::Zrange
+            }
+        ));
+        assert_eq!(
+            rejected.report_context(),
+            BTreeMap::from([
+                ("redis_command".into(), "zrange".into()),
+                ("redis_error_class".into(), "permission_denied".into()),
+            ])
+        );
+
+        let failed = registry_redis_command_error(
+            RegistryRedisCommand::Hgetall,
+            RedisError::from((
+                RedisErrorKind::TypeError,
+                "server error",
+                "WRONGTYPE key=metrics:v2:latest:private token=top-secret".to_string(),
+            )),
+        );
+        assert!(matches!(
+            failed,
+            RegistryObservationError::RedisCommandFailed {
+                command: RegistryRedisCommand::Hgetall,
+                class: RegistryRedisErrorClass::TypeError,
+            }
+        ));
+        let report_text = serde_json::to_string(&serde_json::json!({
+            "category": failed.report_category(),
+            "message": failed.report_message(),
+            "context": failed.report_context(),
+        }))
+        .unwrap();
+        assert!(report_text.contains("hgetall"));
+        assert!(report_text.contains("type_error"));
+        for forbidden in [
+            "service:private",
+            "metrics:v2:latest:private",
+            "top-secret",
+            "redis://",
+            "WRONGTYPE",
+        ] {
+            assert!(!report_text.contains(forbidden));
+        }
+    }
+
+    #[test]
+    fn malformed_metrics_records_keep_a_static_safe_report_category() {
+        let error = parse_metrics_hash(
+            ObservedService::GameServer,
+            "instance-private",
+            BTreeMap::from([("_schema".into(), "unexpected-schema".into())]),
+        )
+        .unwrap_err();
+        assert_eq!(error, RegistryObservationError::MalformedMetricsRecord);
+        assert_eq!(
+            error.report_category(),
+            "registry_observation_malformed_metrics_record"
+        );
+        assert!(error.report_context().is_empty());
+    }
+
+    #[tokio::test]
+    async fn empty_registry_indexes_remain_observation_holes_not_transport_errors() {
+        let mut transport = ScriptedRegistryReadTransport::scripted([Ok(empty_response())]);
+        let report = collect_registry_observation(&mut transport, &request(), 20_200).await;
+        assert!(report.is_ok());
+        let report = report.unwrap();
+        assert!(!report.snapshot.complete);
+        assert!(report.holes.contains(&hole(
+            ObservationHoleKind::RegistryInstanceMissing,
+            Some(ObservedService::GameServer),
+            None,
+        )));
     }
 
     #[tokio::test]
