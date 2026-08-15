@@ -914,7 +914,12 @@ fn validate_live_game_side_service_composite(
     Ok(true)
 }
 
-fn validate_remote_authenticated_player_chain(
+/// Production has a deliberately narrower execution boundary than an
+/// explicitly approved remote `Test` profile. The latter still passes the
+/// complete remote `RunAccess`/window/allowlist/protection gates before this
+/// point; it merely keeps the already-supported local/test diagnostic
+/// transports available to an isolated environment.
+fn validate_production_authenticated_player_chain(
     environment: EnvironmentKind,
     game_mode: bool,
     two_player_default_match: bool,
@@ -924,8 +929,14 @@ fn validate_remote_authenticated_player_chain(
     live_match_internal: bool,
     live_http: bool,
 ) -> Result<(), String> {
-    if !environment.is_remote() {
+    if matches!(environment, EnvironmentKind::Local | EnvironmentKind::Test) {
         return Ok(());
+    }
+    if environment == EnvironmentKind::Staging {
+        return Err(
+            "remote live execution outside production is restricted to an explicitly approved test profile"
+                .into(),
+        );
     }
     if game_mode
         && two_player_default_match
@@ -935,7 +946,7 @@ fn validate_remote_authenticated_player_chain(
         return Ok(());
     }
     Err(
-        "remote live execution is restricted to the authenticated two-player default_match player chain; chat, mail, announce, direct match diagnostics, reconnect bursts, and auth-only runs are forbidden"
+        "production live execution is restricted to the authenticated two-player default_match player chain; chat, mail, announce, direct match diagnostics, reconnect bursts, and auth-only runs are forbidden"
             .into(),
     )
 }
@@ -1407,7 +1418,7 @@ fn run_live(cli: &Cli) -> Result<(), String> {
             .is_some_and(|gameplay| {
                 gameplay.coordination == LiveGameplayCoordination::TwoPlayerDefaultMatch
             });
-    validate_remote_authenticated_player_chain(
+    validate_production_authenticated_player_chain(
         config.environment.kind,
         game_mode,
         two_player_default_match,
@@ -2308,39 +2319,53 @@ fn run_live(cli: &Cli) -> Result<(), String> {
                 && !game_mode
                 && (live_chat || live_match || live_match_internal || live_http)
             {
-                match config
-                    .scenario
-                    .side_services
-                    .as_ref()
-                    .ok_or("live side-service configuration disappeared after validation")
+                if protection
+                    .observe_auth_services(auth_side_services.as_ref())
+                    .is_err()
                 {
-                    Ok(side) => match resolve_live_side_services(
-                        side,
-                        auth_side_services.as_ref(),
-                        &mut descriptor_tracker,
-                        &mut core_metrics,
-                    ) {
-                        Ok(side) => Some(side),
+                    errors.push(
+                        "auth_service_descriptor_rejected",
+                        "auth public service descriptors were rejected before side-service setup",
+                        Default::default(),
+                    );
+                    failed = true;
+                    execution_failed = true;
+                    None
+                } else {
+                    match config
+                        .scenario
+                        .side_services
+                        .as_ref()
+                        .ok_or("live side-service configuration disappeared after validation")
+                    {
+                        Ok(side) => match resolve_live_side_services(
+                            side,
+                            auth_side_services.as_ref(),
+                            &mut descriptor_tracker,
+                            &mut core_metrics,
+                        ) {
+                            Ok(side) => Some(side),
+                            Err(_) => {
+                                errors.push(
+                                    "auth_service_descriptor_rejected",
+                                    "auth-discovered side-service descriptor was rejected",
+                                    Default::default(),
+                                );
+                                failed = true;
+                                execution_failed = true;
+                                None
+                            }
+                        },
                         Err(_) => {
                             errors.push(
-                                "auth_service_descriptor_rejected",
-                                "auth-discovered side-service descriptor was rejected",
+                                "side_service_configuration_missing",
+                                "live side-service configuration disappeared after validation",
                                 Default::default(),
                             );
                             failed = true;
                             execution_failed = true;
                             None
                         }
-                    },
-                    Err(_) => {
-                        errors.push(
-                            "side_service_configuration_missing",
-                            "live side-service configuration disappeared after validation",
-                            Default::default(),
-                        );
-                        failed = true;
-                        execution_failed = true;
-                        None
                     }
                 }
             } else {
@@ -4451,9 +4476,9 @@ mod tests {
     }
 
     #[test]
-    fn remote_execution_is_limited_to_the_two_player_player_chain() {
+    fn production_execution_is_limited_to_the_two_player_player_chain() {
         assert!(
-            validate_remote_authenticated_player_chain(
+            validate_production_authenticated_player_chain(
                 EnvironmentKind::Production,
                 true,
                 true,
@@ -4473,7 +4498,7 @@ mod tests {
             (true, true, false, false, false, false, true),
         ] {
             assert!(
-                validate_remote_authenticated_player_chain(
+                validate_production_authenticated_player_chain(
                     EnvironmentKind::Production,
                     rejected.0,
                     rejected.1,
@@ -4487,7 +4512,7 @@ mod tests {
             );
         }
         assert!(
-            validate_remote_authenticated_player_chain(
+            validate_production_authenticated_player_chain(
                 EnvironmentKind::Local,
                 false,
                 false,
@@ -4498,6 +4523,32 @@ mod tests {
                 true,
             )
             .is_ok()
+        );
+        assert!(
+            validate_production_authenticated_player_chain(
+                EnvironmentKind::Test,
+                false,
+                false,
+                true,
+                true,
+                true,
+                true,
+                true,
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_production_authenticated_player_chain(
+                EnvironmentKind::Staging,
+                true,
+                true,
+                false,
+                false,
+                false,
+                false,
+                false,
+            )
+            .is_err()
         );
     }
 

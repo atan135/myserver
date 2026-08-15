@@ -984,6 +984,16 @@ impl LoadTestConfig {
                     "account_prepare.account_count may not exceed max_virtual_players".into(),
                 ));
             }
+        } else if self.environment.kind.is_remote() {
+            return Err(ConfigError::Rejected(
+                "remote profile requires an explicit account_prepare.account_count".into(),
+            ));
+        }
+        if self.environment.kind.is_remote() && batch == default_account_batch() {
+            return Err(ConfigError::Rejected(
+                "remote profile requires an explicit non-default dedicated account_prepare.batch"
+                    .into(),
+            ));
         }
         let prefix = self.account_prepare.character_name_prefix.trim();
         if prefix.is_empty()
@@ -1242,6 +1252,8 @@ mod tests {
         production.environment.stop_responsible_party = Some("stop-owner".into());
         production.environment.manual_confirmation_reference = Some("manual-confirm".into());
         production.stop_file = Some("run.stop".into());
+        production.account_prepare.batch = "prod-smoke".into();
+        production.account_prepare.account_count = Some(1);
         production
             .environment
             .allowed_hosts
@@ -1357,6 +1369,8 @@ mod tests {
         remote.environment.kind = EnvironmentKind::Test;
         remote.environment.name = "test".into();
         remote.environment.approval_reference = Some("approved".into());
+        remote.account_prepare.batch = "test-smoke".into();
+        remote.account_prepare.account_count = Some(1);
         remote.environment.allowed_hosts.insert("127.0.0.1".into());
         remote
             .environment
@@ -1411,6 +1425,35 @@ mod tests {
     }
 
     #[test]
+    fn remote_profile_requires_an_explicit_dedicated_account_batch_and_count() {
+        let mut remote = config();
+        remote.environment.kind = EnvironmentKind::Test;
+        remote.environment.name = "test".into();
+        remote.environment.approval_reference = Some("approved".into());
+        remote.environment.test_window = Some(RemoteTestWindow {
+            starts_unix_ms: 10,
+            ends_unix_ms: 20,
+        });
+        remote.environment.observers.insert("observer-a".into());
+        remote.environment.stop_responsible_party = Some("operator-a".into());
+        remote.environment.manual_confirmation_reference = Some("manual-a".into());
+        remote.stop_file = Some("test.stop".into());
+        remote.environment.allowed_hosts.insert("127.0.0.1".into());
+        remote
+            .environment
+            .allowed_ips
+            .insert("127.0.0.1".parse().unwrap());
+
+        let error = remote.validate_structural().unwrap_err().to_string();
+        assert!(error.contains("account_count"), "unexpected error: {error}");
+        remote.account_prepare.account_count = Some(1);
+        let error = remote.validate_structural().unwrap_err().to_string();
+        assert!(error.contains("dedicated"), "unexpected error: {error}");
+        remote.account_prepare.batch = "test-smoke".into();
+        remote.validate_structural().unwrap();
+    }
+
+    #[test]
     fn remote_test_window_must_be_ordered_and_prohibited_operations_have_no_execution_path() {
         let mut remote = config();
         remote.environment.kind = EnvironmentKind::Staging;
@@ -1455,6 +1498,8 @@ mod tests {
         remote.environment.kind = EnvironmentKind::Test;
         remote.environment.name = "test".into();
         remote.environment.approval_reference = Some("approved".into());
+        remote.account_prepare.batch = "test-smoke".into();
+        remote.account_prepare.account_count = Some(1);
         remote.environment.test_window = Some(RemoteTestWindow {
             starts_unix_ms: 100,
             ends_unix_ms: 200,
@@ -1472,6 +1517,35 @@ mod tests {
             allow_remote: true,
             confirmation: Some("test"),
         };
+        assert!(
+            remote
+                .validate_access_at(RunAccess::default(), 100)
+                .unwrap_err()
+                .to_string()
+                .contains("--allow-remote")
+        );
+        assert!(
+            remote
+                .validate_access_at(
+                    RunAccess {
+                        allow_remote: true,
+                        confirmation: Some("other"),
+                    },
+                    100,
+                )
+                .unwrap_err()
+                .to_string()
+                .contains("--confirm")
+        );
+        let mut missing_ips = remote.clone();
+        missing_ips.environment.allowed_ips.clear();
+        assert!(
+            missing_ips
+                .validate_access_at(access, 100)
+                .unwrap_err()
+                .to_string()
+                .contains("allowlists")
+        );
         for now in [99, 200] {
             assert!(
                 remote

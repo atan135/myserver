@@ -413,7 +413,10 @@ ticket value.
   fallback targets are rejected during static configuration validation.
 - Remote profiles require `--allow-remote`, an exact `--confirm <environment>`
   value, non-empty approval reference, host allowlist, IP allowlist and DNS
-  revalidation. CLI budget flags only reduce the profile's hard budgets.
+  revalidation. They also require a bounded test window, named observer, stop
+  owner, manual-confirmation reference, STOP-file path, explicit account count
+  and a non-default dedicated account batch. CLI budget flags only reduce the
+  profile's hard budgets.
 - Configs cannot contain unknown fields. Private configuration contains secret
   references only, never credential values. Passwords, tokens, tickets and
   identity fields are redacted from errors and reports.
@@ -425,6 +428,35 @@ ticket value.
   failed or unavailable check aborts before further admission. Stage-one remote
   dry-runs fail closed because they cannot inspect a live certificate or
   descriptor without connecting.
+
+### Remote Test/Preprod Profile
+
+Set `environment.kind` to `test` only for an isolated remote test/preprod
+environment whose public auth health response identifies `env: "test"`. A
+different profile name does not relax this identity check. The profile keeps
+the same remote gate as every non-local run: exact CLI confirmation, approved
+time window, observers and stop owner, STOP file, host/IP allowlists, private
+credential references, verified manifest accounts, and hard operation/write
+budgets. Before every admitted auth request, and again at controller and
+side-service admission points, the runner rechecks the approved window and
+the DNS/TLS/auth-descriptor baseline. Auth-supplied side-service descriptors
+are pinned for the run and must remain within their configured allowlists.
+
+An approved remote `test` profile may use the existing local/test diagnostics:
+bounded Chat WSS, mail/announcement HTTP operations, direct match diagnostics,
+guarded reconnect execution, and the read-only registry observer. Mail writes
+still require `writes_data: true`, a positive data-write budget, and a
+`write_batch` exactly matching the dedicated account batch. The registry
+adapter exposes read commands only and its runtime connection details are never
+serialized into reports. These diagnostics remain bounded service smoke tests,
+not a capacity conclusion or a distributed-worker acceptance run.
+
+`production` remains stricter: it rejects Chat, mail/announcement live
+diagnostics, direct match diagnostics, reconnect bursts, auth-only live runs,
+registry observation, and all control-plane writes. Its only supported remote
+player execution is the existing guarded two-account `default_match` chain.
+This tool has no real GM or operations-write transport; `gm_or_ops_write` and
+other prohibited operations remain fail-closed in every profile.
 
 Each report has `run.json`, `metrics.json`, `timeseries.csv`, `errors.jsonl`
 and `summary.md`. Auth runs and fake auth dry-runs also have

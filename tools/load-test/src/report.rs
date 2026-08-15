@@ -565,6 +565,56 @@ mod tests {
     }
 
     #[test]
+    fn remote_test_report_keeps_target_and_approval_details_out_of_artifacts() {
+        let root = std::env::temp_dir().join(format!(
+            "loadtest-remote-report-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let mut value = config();
+        value.environment.name = "preprod".into();
+        value.environment.kind = EnvironmentKind::Test;
+        value.environment.approval_reference = Some("approval-ref-not-for-reports".into());
+        value.targets.auth_http = "https://auth.preprod.example:443".into();
+        value.targets.game_proxy = "kcp://game.preprod.example:4000".into();
+        value.account_prepare.batch = "preprod-smoke".into();
+        value.account_prepare.account_count = Some(1);
+        let errors = ErrorBuffer::default();
+        let report = write_report(
+            &root,
+            ReportInput {
+                run_id: "remote-safe-run",
+                config: &value,
+                effective_budget: &value.budget,
+                status: "completed",
+                abort_reason: None,
+                shutdown_phase: None,
+                deadline_unix_ms: 3,
+                graceful_shutdown_ms: 1,
+                started_unix_ms: 1,
+                ended_unix_ms: 2,
+                metrics: MetricsSnapshot::default(),
+                resources: ResourceSampler.sample(0, 0, 0),
+                errors: &errors,
+                auth_metrics: None,
+                calibration: None,
+                service_versions: None,
+                registry_observation: None,
+            },
+        )
+        .unwrap();
+        let run = fs::read_to_string(report.join("run.json")).unwrap();
+        assert!(!run.contains("auth.preprod.example"));
+        assert!(!run.contains("game.preprod.example"));
+        assert!(!run.contains("approval-ref-not-for-reports"));
+        assert!(run.contains("target-"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn timeseries_report_preserves_merged_boundary_rows() {
         let root =
             std::env::temp_dir().join(format!("loadtest-timeseries-report-{}", std::process::id()));
