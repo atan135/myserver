@@ -895,21 +895,31 @@ pub fn evaluate_registry_observation(
         .unwrap_or_default();
     let mut projected_proxy_ids = BTreeSet::new();
     for route in &response.routes {
+        let expected_expiry = route
+            .projection_ttl_secs
+            .checked_mul(1_000)
+            .and_then(|ttl_ms| route.projection_observed_at_unix_ms.checked_add(ttl_ms));
         if route.source_service != ObservedService::GameProxy
             || route.source_instance_id.trim().is_empty()
             || route.target_service != ObservedService::GameServer
             || route.projection_revision == 0
             || route.projection_observed_at_unix_ms == 0
             || route.projection_ttl_secs != PROXY_ROUTE_OBSERVATION_TTL_SECS
-            || route.projection_expires_at_unix_ms
-                != route
-                    .projection_observed_at_unix_ms
-                    .saturating_add(route.projection_ttl_secs.saturating_mul(1_000))
-            || route.projection_observed_at_unix_ms > response.collected_at_unix_ms
+            || expected_expiry != Some(route.projection_expires_at_unix_ms)
             || !projected_proxy_ids.insert(route.source_instance_id.clone())
         {
             return Err(RegistryObservationError::malformed_route_observation(
                 RouteObservationMalformedReason::ProjectedRouteInvalid,
+            ));
+        }
+        let route_age_ms = response
+            .collected_at_unix_ms
+            .checked_sub(route.projection_observed_at_unix_ms);
+        if route_age_ms.is_none() {
+            holes.insert(hole(
+                ObservationHoleKind::ClockSkewDetected,
+                Some(route.source_service),
+                None,
             ));
         }
         let expected = active_by_service
@@ -919,10 +929,7 @@ pub fn evaluate_registry_observation(
         if route.expected_instance_ids != expected
             || route.routed_instance_ids != expected
             || route.projection_expires_at_unix_ms <= response.collected_at_unix_ms
-            || response
-                .collected_at_unix_ms
-                .saturating_sub(route.projection_observed_at_unix_ms)
-                > request.config.max_heartbeat_age_ms
+            || route_age_ms.is_none_or(|age_ms| age_ms > request.config.max_heartbeat_age_ms)
         {
             holes.insert(hole(
                 ObservationHoleKind::RegistryRouteUnconverged,
@@ -2081,6 +2088,9 @@ mod tests {
             .unwrap();
         game_server_metrics.reported_at_unix_ms = 20_101;
         game_server_metrics.received_at_unix_ms = 20_102;
+        let route = response.routes.first_mut().unwrap();
+        route.projection_observed_at_unix_ms = 20_101;
+        route.projection_expires_at_unix_ms = 50_101;
 
         let report = evaluate_registry_observation(&request, response, 20_200).unwrap();
         assert!(report.holes.contains(&hole(
@@ -2088,6 +2098,82 @@ mod tests {
             Some(ObservedService::GameServer),
             None,
         )));
+        assert!(report.holes.contains(&hole(
+            ObservationHoleKind::ClockSkewDetected,
+            Some(ObservedService::GameProxy),
+            None,
+        )));
+        assert!(report.holes.contains(&hole(
+            ObservationHoleKind::RegistryRouteUnconverged,
+            Some(ObservedService::GameServer),
+            None,
+        )));
+        assert!(!report.snapshot.complete);
+    }
+
+    #[test]
+    fn static_route_projection_invariants_remain_fixed_and_redacted() {
+        let assert_invalid = |response: RegistryReadResponse| {
+            let error = evaluate_registry_observation(&request(), response, 20_200).unwrap_err();
+            assert_eq!(
+                error,
+                RegistryObservationError::MalformedRouteObservation {
+                    reason: RouteObservationMalformedReason::ProjectedRouteInvalid,
+                }
+            );
+            assert_eq!(
+                error.report_context(),
+                BTreeMap::from([(
+                    "route_observation_malformed_reason".into(),
+                    "projected_route_invalid".into(),
+                )])
+            );
+            let report_text = serde_json::to_string(&serde_json::json!({
+                "category": error.report_category(),
+                "message": error.report_message(),
+                "context": error.report_context(),
+            }))
+            .unwrap();
+            assert_eq!(
+                error.report_category(),
+                "registry_observation_malformed_route_record"
+            );
+            assert!(!report_text.contains("private-route"));
+        };
+
+        let mut source_service = response();
+        source_service.routes[0].source_service = ObservedService::GameServer;
+        assert_invalid(source_service);
+
+        let mut source_id = response();
+        source_id.routes[0].source_instance_id.clear();
+        assert_invalid(source_id);
+
+        let mut target_service = response();
+        target_service.routes[0].target_service = ObservedService::ChatServer;
+        assert_invalid(target_service);
+
+        let mut revision = response();
+        revision.routes[0].projection_revision = 0;
+        assert_invalid(revision);
+
+        let mut ttl = response();
+        ttl.routes[0].projection_ttl_secs = PROXY_ROUTE_OBSERVATION_TTL_SECS - 1;
+        assert_invalid(ttl);
+
+        let mut expiry = response();
+        expiry.routes[0].source_instance_id = "private-route".into();
+        expiry.routes[0].projection_expires_at_unix_ms -= 1;
+        assert_invalid(expiry);
+
+        let mut overflow = response();
+        overflow.routes[0].projection_observed_at_unix_ms = u64::MAX;
+        overflow.routes[0].projection_expires_at_unix_ms = u64::MAX;
+        assert_invalid(overflow);
+
+        let mut duplicate = response();
+        duplicate.routes.push(duplicate.routes[0].clone());
+        assert_invalid(duplicate);
     }
 
     #[test]
