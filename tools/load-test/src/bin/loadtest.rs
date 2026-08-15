@@ -66,8 +66,8 @@ use loadtest_core::resource::ResourceSampler;
 use loadtest_core::scheduler::MonotonicScheduler;
 use loadtest_core::side_http::{SideHttpAdmission, execute_live_mail_announce_steps};
 use loadtest_core::side_services::{
-    AuthServicesPayload, DescriptorChangeTracker, SideServiceKind, SideServicesScenario,
-    execute_side_services_dry, resolve_auth_service_descriptors,
+    AuthServicesPayload, DescriptorChangeTracker, SideServiceKind, SideServiceOperation,
+    SideServicesScenario, execute_side_services_dry, resolve_auth_service_descriptors,
 };
 use loadtest_core::virtual_player::{VirtualPlayerEvent, VirtualPlayerSession};
 use prost::Message;
@@ -1128,6 +1128,70 @@ fn validate_live_game_side_service_composite(
     Ok(true)
 }
 
+/// Mail claims are routed to the character's authoritative online game
+/// session. Keep this phase deliberately narrower than the general post-game
+/// side-service composite: exactly one list followed by one claim and its
+/// idempotent replay for each of the two already-matched players.
+fn requires_online_default_match_mail_claim_phase(
+    side: &SideServicesScenario,
+) -> Result<bool, String> {
+    let Some(mail) = side.mail.as_ref() else {
+        return Ok(false);
+    };
+    if !mail
+        .steps
+        .iter()
+        .any(|step| step.operation == SideServiceOperation::MailClaim)
+    {
+        return Ok(false);
+    }
+    if side.chat.is_some() || side.announce.is_some() || side.r#match.is_some() {
+        return Err(
+            "online default_match mail-claim phase permits mail only; chat, announce, and match side services are forbidden"
+                .into(),
+        );
+    }
+    if !mail.live_http || !mail.writes || mail.write_batch.is_none() {
+        return Err(
+            "online default_match mail-claim phase requires an explicit writable live mail HTTP batch"
+                .into(),
+        );
+    }
+    let expected_steps = [
+        SideServiceOperation::MailList,
+        SideServiceOperation::MailClaim,
+        SideServiceOperation::MailClaim,
+    ];
+    if mail.steps.len() != expected_steps.len()
+        || mail
+            .steps
+            .iter()
+            .zip(expected_steps)
+            .any(|(actual, expected)| actual.operation != expected || actual.weight != 1)
+    {
+        return Err(
+            "online default_match mail-claim phase requires exactly mail_list, mail_claim, mail_claim with weight=1"
+                .into(),
+        );
+    }
+    if side.composition.weights.get(&SideServiceKind::Mail) != Some(&1)
+        || side.composition.weights.len() != 1
+        || side.composition.max_operations_per_player != 3
+        || side
+            .composition
+            .max_operations_per_service_per_player
+            .get(&SideServiceKind::Mail)
+            != Some(&3)
+        || side.composition.max_operations_per_service_per_player.len() != 1
+    {
+        return Err(
+            "online default_match mail-claim phase requires a mail-only composition capped at three operations per player"
+                .into(),
+        );
+    }
+    Ok(true)
+}
+
 /// Production has a deliberately narrower execution boundary than an
 /// explicitly approved remote `Test` profile. The latter still passes the
 /// complete remote `RunAccess`/window/allowlist/protection gates before this
@@ -1268,10 +1332,10 @@ fn resolve_live_side_services(
     Ok(resolved)
 }
 
-/// Execute public side-service diagnostics after both KCP players have closed
-/// their shared `default_match` room. Each caller invokes this once per
-/// authenticated player, so tickets never cross account boundaries and the
-/// synchronous controller retains one global admission ledger.
+/// Execute public side-service diagnostics for one authenticated player while
+/// the caller holds the lifecycle phase required by that operation. Tickets
+/// never cross account boundaries and the synchronous controller retains one
+/// global admission ledger.
 #[allow(clippy::too_many_arguments)]
 fn execute_live_game_side_services<P: RuntimeProtection>(
     config: &LoadTestConfig,
@@ -1721,6 +1785,17 @@ fn run_live(cli: &Cli) -> Result<(), String> {
         live_match_internal,
         live_http,
     )?;
+    let online_default_match_mail_claim_phase = if live_game_side_service_composite {
+        requires_online_default_match_mail_claim_phase(
+            config
+                .scenario
+                .side_services
+                .as_ref()
+                .expect("live game-side composite has side services"),
+        )?
+    } else {
+        false
+    };
     if game_mode
         && !game_auth_operations.iter().any(|operation| {
             matches!(
@@ -2280,6 +2355,57 @@ fn run_live(cli: &Cli) -> Result<(), String> {
                                     [leases[0].clone(), leases[1].clone()],
                                     [&tickets[0], &tickets[1]],
                                     |checkpoint| {
+                                        if checkpoint
+                                            == GameRunnerCheckpoint::OnlinePairReadyStarted
+                                        {
+                                            if online_default_match_mail_claim_phase {
+                                                check_live_composite_side_controller(
+                                                    &config,
+                                                    deadline_unix_ms,
+                                                    &ctrl_c,
+                                                    &protection,
+                                                    &mut abort,
+                                                )
+                                                .map_err(|_| {
+                                                    GameLiveError::Transport(
+                                                        "online mail-claim phase stopped before dispatch",
+                                                    )
+                                                })?;
+                                                for (ticket, character_id, auth_services) in
+                                                    &side_credentials
+                                                {
+                                                    match execute_live_game_side_services(
+                                                        &config,
+                                                        &budget,
+                                                        ticket,
+                                                        character_id,
+                                                        auth_services.as_ref(),
+                                                        &mut descriptor_tracker,
+                                                        action_deadline,
+                                                        deadline_unix_ms,
+                                                        &mut dispatch_admission,
+                                                        &mut abort,
+                                                        &ctrl_c,
+                                                        &protection,
+                                                    ) {
+                                                        Ok(metrics) => {
+                                                            core_metrics.merge_snapshot(&metrics)
+                                                        }
+                                                        Err(_) => {
+                                                            errors.push(
+                                                                "online_mail_claim_execution_failed",
+                                                                "online mail claim did not complete",
+                                                                Default::default(),
+                                                            );
+                                                            return Err(GameLiveError::Transport(
+                                                                "online mail-claim phase failed",
+                                                            ));
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            return Ok(());
+                                        }
                                         let mut control = || -> Result<(), String> {
                                             abort.check_ctrl_c(&ctrl_c);
                                             abort.check_stop_file(
@@ -2334,6 +2460,9 @@ fn run_live(cli: &Cli) -> Result<(), String> {
                                                     })?;
                                             }
                                             GameRunnerCheckpoint::Control => {}
+                                            GameRunnerCheckpoint::OnlinePairReadyStarted => {
+                                                unreachable!("online mail-claim phase returned above")
+                                            }
                                         }
                                         Ok(())
                                     },
@@ -2397,11 +2526,14 @@ fn run_live(cli: &Cli) -> Result<(), String> {
                             }
                         }
                     }
-                    if !failed && live_game_side_service_composite {
-                        // The KCP pair is complete before any public
-                        // side-service request. Process each authenticated
-                        // player in account order so chat/mail/announce never
-                        // create a second concurrent load stream.
+                    if !failed
+                        && live_game_side_service_composite
+                        && !online_default_match_mail_claim_phase
+                    {
+                        // Non-claim side-service diagnostics run after the
+                        // KCP pair closes. Process each player in account
+                        // order so chat/mail/announce never create a second
+                        // concurrent load stream.
                         for (ticket, character_id, auth_services) in side_credentials {
                             match execute_live_game_side_services(
                                 &config,
@@ -2739,6 +2871,11 @@ fn run_live(cli: &Cli) -> Result<(), String> {
                                                     })?;
                                             }
                                             GameRunnerCheckpoint::Control => {}
+                                            GameRunnerCheckpoint::OnlinePairReadyStarted => {
+                                                return Err(GameLiveError::Transport(
+                                                    "two-player online checkpoint reached the single-player runner",
+                                                ));
+                                            }
                                         }
                                         Ok(())
                                     },
@@ -4797,6 +4934,45 @@ mod tests {
                 false,
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn online_default_match_mail_claim_phase_is_exactly_bounded() {
+        let side: SideServicesScenario = serde_json::from_value(serde_json::json!({
+            "mail": {
+                "steps": [
+                    { "operation": "mail_list", "weight": 1 },
+                    { "operation": "mail_claim", "weight": 1 },
+                    { "operation": "mail_claim", "weight": 1 }
+                ],
+                "writes": true,
+                "live_http": true,
+                "write_batch": "batch"
+            },
+            "composition": {
+                "weights": { "mail": 1 },
+                "max_operations_per_player": 3,
+                "max_operations_per_service_per_player": { "mail": 3 }
+            }
+        }))
+        .unwrap();
+        assert!(requires_online_default_match_mail_claim_phase(&side).unwrap());
+
+        let mut reordered = side.clone();
+        reordered.mail.as_mut().unwrap().steps.swap(0, 1);
+        assert!(
+            requires_online_default_match_mail_claim_phase(&reordered)
+                .unwrap_err()
+                .contains("mail_list, mail_claim, mail_claim")
+        );
+
+        let mut mixed_service = side;
+        mixed_service.announce = Some(Default::default());
+        assert!(
+            requires_online_default_match_mail_claim_phase(&mixed_service)
+                .unwrap_err()
+                .contains("mail only")
         );
     }
 

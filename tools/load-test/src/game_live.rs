@@ -214,6 +214,9 @@ pub enum GameRunnerCheckpoint {
     Control,
     OutboundMessage,
     GameplayOutboundMessage,
+    /// Both players have completed RoomReady and the shared RoomStart. The
+    /// caller may run a bounded online-only diagnostic before frame input.
+    OnlinePairReadyStarted,
     ReconnectConnection,
 }
 
@@ -553,6 +556,28 @@ impl GameSessionRunner {
         tickets: [&str; 2],
         gameplay: &LiveGameplayScenario,
     ) -> Result<TwoPlayerGameRunResult, GameLiveError> {
+        self.run_guarded_two_player_default_match_with_online_hook(
+            gate,
+            transports,
+            pool,
+            leases,
+            tickets,
+            gameplay,
+            || Ok(()),
+        )
+    }
+
+    #[cfg(test)]
+    fn run_guarded_two_player_default_match_with_online_hook<T: GameTransport>(
+        &self,
+        gate: GameExecutionGate<'_>,
+        transports: [&mut T; 2],
+        pool: &mut AccountLeasePool,
+        leases: [AccountLease; 2],
+        tickets: [&str; 2],
+        gameplay: &LiveGameplayScenario,
+        mut online_pair_ready_started: impl FnMut() -> Result<(), GameLiveError>,
+    ) -> Result<TwoPlayerGameRunResult, GameLiveError> {
         let prepared = prepare_two_player_live_gameplay(gameplay)?;
         let mut sessions = [
             VirtualPlayerSession::new(leases[0].clone(), self.max_body_len, self.reconnect_policy)?,
@@ -732,7 +757,13 @@ impl GameSessionRunner {
             match step.request_type {
                 MessageType::RoomJoinReq => steps[player_index].push(GameRunnerStep::RoomJoined),
                 MessageType::RoomReadyReq => steps[player_index].push(GameRunnerStep::RoomReady),
-                MessageType::RoomStartReq => steps[player_index].push(GameRunnerStep::RoomStarted),
+                MessageType::RoomStartReq => {
+                    steps[player_index].push(GameRunnerStep::RoomStarted);
+                    if let Err(error) = online_pair_ready_started() {
+                        close_guarded_two_player_sessions(&mut sessions, pool);
+                        return Err(error);
+                    }
+                }
                 MessageType::PlayerInputReq => {
                     steps[player_index].push(GameRunnerStep::FrameInputAcknowledged)
                 }
@@ -2070,6 +2101,15 @@ impl GameSessionRunner {
                 _ => {
                     close_two_player_sessions(&mut sessions, &mut transports, pool);
                     return Err(GameLiveError::UnexpectedLifecycleEvent);
+                }
+            }
+            if response == MessageType::RoomStartRes {
+                if let Err(error) = run_checkpoint(
+                    &mut checkpoint,
+                    GameRunnerCheckpoint::OnlinePairReadyStarted,
+                ) {
+                    close_two_player_sessions(&mut sessions, &mut transports, pool);
+                    return Err(error);
                 }
             }
             packet_index += 1;
@@ -4365,6 +4405,76 @@ mod tests {
         );
         assert_eq!(first.active_connections(), 0);
         assert_eq!(second.active_connections(), 0);
+    }
+
+    #[test]
+    fn online_pair_hook_runs_after_ready_start_and_failure_stops_before_inputs() {
+        let mut pool = AccountLeasePool::default();
+        let leases = [
+            pool.acquire("account-a", "player-a", 0, 1_000).unwrap(),
+            pool.acquire("account-b", "player-b", 0, 1_000).unwrap(),
+        ];
+        let mut first = ScriptedTwoPlayerTransport::scripted([
+            Ok(authenticated_response(1)),
+            Ok(heartbeat_response(2)),
+            Ok(room_join_response(3, true)),
+            Ok(room_ready_response(4, true)),
+            Ok(room_start_response(5, true)),
+        ]);
+        let mut second = ScriptedTwoPlayerTransport::scripted([
+            Ok(authenticated_response(1)),
+            Ok(heartbeat_response(2)),
+            Ok(room_join_response(3, true)),
+            Ok(room_ready_response(4, true)),
+        ]);
+
+        let error = runner()
+            .run_guarded_two_player_default_match_with_online_hook(
+                gate(),
+                [&mut first, &mut second],
+                &mut pool,
+                leases,
+                ["private-ticket-a", "private-ticket-b"],
+                &two_player_gameplay(),
+                || Err(GameLiveError::Transport("online side-service failure")),
+            )
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            GameLiveError::Transport("online side-service failure")
+        ));
+        assert_eq!(
+            first
+                .sent
+                .iter()
+                .map(|(message, _)| *message)
+                .collect::<Vec<_>>(),
+            vec![
+                MessageType::AuthReq,
+                MessageType::PingReq,
+                MessageType::RoomJoinReq,
+                MessageType::RoomReadyReq,
+                MessageType::RoomStartReq,
+            ]
+        );
+        assert_eq!(
+            second
+                .sent
+                .iter()
+                .map(|(message, _)| *message)
+                .collect::<Vec<_>>(),
+            vec![
+                MessageType::AuthReq,
+                MessageType::PingReq,
+                MessageType::RoomJoinReq,
+                MessageType::RoomReadyReq,
+            ]
+        );
+        assert_eq!(first.active_connections(), 0);
+        assert_eq!(second.active_connections(), 0);
+        assert!(pool.acquire("account-a", "replacement-a", 1, 1_000).is_ok());
+        assert!(pool.acquire("account-b", "replacement-b", 1, 1_000).is_ok());
     }
 
     #[test]
