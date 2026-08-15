@@ -22,6 +22,7 @@ Required options (or matching environment variables):
 Optional:
   --user <name>                     Default: MYSERVER_SSH_USER or gameops
   --port <number>                   Default: MYSERVER_SSH_PORT or 22
+  --runtime-env <production|test>   Default: MYSERVER_RUNTIME_ENV or production
 EOF
 }
 
@@ -31,6 +32,7 @@ ssh_host="${MYSERVER_SSH_HOST:-}"
 ssh_user="${MYSERVER_SSH_USER:-gameops}"
 ssh_port="${MYSERVER_SSH_PORT:-22}"
 ssh_identity="${MYSERVER_SSH_IDENTITY:-}"
+runtime_env="${MYSERVER_RUNTIME_ENV:-production}"
 caddy_landing_host="${MYSERVER_CADDY_LANDING_HOST:-}"
 caddy_auth_host="${MYSERVER_CADDY_AUTH_HOST:-}"
 caddy_admin_host="${MYSERVER_CADDY_ADMIN_HOST:-}"
@@ -45,6 +47,7 @@ while [[ $# -gt 0 ]]; do
     --user) ssh_user="${2:?--user requires a value}"; shift 2 ;;
     --port) ssh_port="${2:?--port requires a value}"; shift 2 ;;
     --identity) ssh_identity="${2:?--identity requires a value}"; shift 2 ;;
+    --runtime-env) runtime_env="${2:?--runtime-env requires a value}"; shift 2 ;;
     --caddy-landing-host) caddy_landing_host="${2:?--caddy-landing-host requires a value}"; shift 2 ;;
     --caddy-auth-host) caddy_auth_host="${2:?--caddy-auth-host requires a value}"; shift 2 ;;
     --caddy-admin-host) caddy_admin_host="${2:?--caddy-admin-host requires a value}"; shift 2 ;;
@@ -62,6 +65,7 @@ done
 case "$root" in /mnt/*) echo "Run from a WSL-native checkout: $root" >&2; exit 65 ;; esac
 case "$release_id" in *[!A-Za-z0-9._-]*|'') echo "Invalid release ID: $release_id" >&2; exit 64 ;; esac
 [[ "$ssh_port" =~ ^[0-9]+$ ]] || { echo "Invalid SSH port: $ssh_port" >&2; exit 64; }
+case "$runtime_env" in production|test) ;; *) echo "--runtime-env must be production or test." >&2; exit 64 ;; esac
 
 for command in git node sha256sum tar ssh scp; do
   command -v "$command" >/dev/null || { echo "Required command is unavailable: $command" >&2; exit 69; }
@@ -113,6 +117,7 @@ git worktree add --detach "$worktree" "$lock_commit" >/dev/null
 "$worktree/scripts/docker/create-release-bundle.sh" \
   --output "$bundle" \
   --release-root "/data/myserver/release/$release_id" \
+  --runtime-env "$runtime_env" \
   --caddy-landing-host "$caddy_landing_host" \
   --caddy-auth-host "$caddy_auth_host" \
   --caddy-admin-host "$caddy_admin_host" \

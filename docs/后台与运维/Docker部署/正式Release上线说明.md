@@ -49,6 +49,8 @@ release_tag="v0.1.0-<full-or-short-commit>"
 
 脚本会拒绝 test tag、脏 lock 和缺失的镜像。生成物包含：
 
+默认 bundle 使用 `MYSERVER_RUNTIME_ENV=production`。隔离的测试或预发布服务器可在创建 bundle 时显式传入 `--runtime-env test`，或设置同名环境变量；该参数只允许 `production` 和 `test`，并会传递给全部应用及 `migration-runner` 的 `NODE_ENV`/`APP_ENV`。它不改变 TLS、严格安全、Redis 服务发现或 legacy direct config 禁令。
+
 ```text
 compose.production.yml
 compose.production.env

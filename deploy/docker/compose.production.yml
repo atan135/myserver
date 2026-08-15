@@ -87,7 +87,7 @@ services:
     image: ${IMAGE_GAME_SERVER:?set IMAGE_GAME_SERVER from images.lock.json}
     env_file: ${GAME_SERVER_ENV_FILE:?set GAME_SERVER_ENV_FILE}
     environment:
-      APP_ENV: production
+      APP_ENV: ${MYSERVER_RUNTIME_ENV:?set MYSERVER_RUNTIME_ENV to production or test}
       GAME_HOST: 0.0.0.0
       SERVICE_BIND_HOST: 0.0.0.0
       SERVICE_PUBLIC_HOST: game-server
@@ -136,7 +136,7 @@ services:
     image: ${IMAGE_MATCH_SERVICE:?set IMAGE_MATCH_SERVICE from images.lock.json}
     env_file: ${MATCH_SERVICE_ENV_FILE:?set MATCH_SERVICE_ENV_FILE}
     environment:
-      APP_ENV: production
+      APP_ENV: ${MYSERVER_RUNTIME_ENV:?set MYSERVER_RUNTIME_ENV to production or test}
       MATCH_BIND_ADDR: 0.0.0.0:9002
       SERVICE_BIND_HOST: 0.0.0.0
       SERVICE_PUBLIC_HOST: match-service
@@ -169,7 +169,7 @@ services:
     image: ${IMAGE_CHAT_SERVER:?set IMAGE_CHAT_SERVER from images.lock.json}
     env_file: ${CHAT_SERVER_ENV_FILE:?set CHAT_SERVER_ENV_FILE}
     environment:
-      APP_ENV: production
+      APP_ENV: ${MYSERVER_RUNTIME_ENV:?set MYSERVER_RUNTIME_ENV to production or test}
       CHAT_BIND_ADDR: 0.0.0.0:9001
       CHAT_WS_ENABLED: "true"
       CHAT_WS_BIND_ADDR: 0.0.0.0:9011
@@ -219,7 +219,7 @@ services:
     image: ${IMAGE_MAIL_SERVICE:?set IMAGE_MAIL_SERVICE from images.lock.json}
     env_file: ${MAIL_SERVICE_ENV_FILE:?set MAIL_SERVICE_ENV_FILE}
     environment:
-      NODE_ENV: production
+      NODE_ENV: ${MYSERVER_RUNTIME_ENV:?set MYSERVER_RUNTIME_ENV to production or test}
       HOST: 0.0.0.0
       SERVICE_BIND_HOST: 0.0.0.0
       SERVICE_PUBLIC_HOST: mail-service
@@ -249,7 +249,7 @@ services:
     image: ${IMAGE_ANNOUNCE_SERVICE:?set IMAGE_ANNOUNCE_SERVICE from images.lock.json}
     env_file: ${ANNOUNCE_SERVICE_ENV_FILE:?set ANNOUNCE_SERVICE_ENV_FILE}
     environment:
-      NODE_ENV: production
+      NODE_ENV: ${MYSERVER_RUNTIME_ENV:?set MYSERVER_RUNTIME_ENV to production or test}
       HOST: 0.0.0.0
       SERVICE_BIND_HOST: 0.0.0.0
       SERVICE_PUBLIC_HOST: announce-service
@@ -275,7 +275,7 @@ services:
     image: ${IMAGE_METRICS_COLLECTOR:?set IMAGE_METRICS_COLLECTOR from images.lock.json}
     env_file: ${METRICS_COLLECTOR_ENV_FILE:?set METRICS_COLLECTOR_ENV_FILE}
     environment:
-      NODE_ENV: production
+      NODE_ENV: ${MYSERVER_RUNTIME_ENV:?set MYSERVER_RUNTIME_ENV to production or test}
       SERVICE_BUILD_VERSION: ${RELEASE_ID:?set RELEASE_ID}
     depends_on:
       redis:
@@ -295,7 +295,7 @@ services:
       - internal
     env_file: ${GAME_PROXY_ENV_FILE:?set GAME_PROXY_ENV_FILE}
     environment:
-      APP_ENV: production
+      APP_ENV: ${MYSERVER_RUNTIME_ENV:?set MYSERVER_RUNTIME_ENV to production or test}
       PROXY_HOST: 0.0.0.0
       SERVICE_BIND_HOST: 0.0.0.0
       SERVICE_PUBLIC_HOST: ${GAME_PROXY_ADVERTISED_HOST:?set GAME_PROXY_ADVERTISED_HOST}
@@ -332,7 +332,7 @@ services:
     image: ${IMAGE_AUTH_HTTP:?set IMAGE_AUTH_HTTP from images.lock.json}
     env_file: ${AUTH_HTTP_ENV_FILE:?set AUTH_HTTP_ENV_FILE}
     environment:
-      NODE_ENV: production
+      NODE_ENV: ${MYSERVER_RUNTIME_ENV:?set MYSERVER_RUNTIME_ENV to production or test}
       HOST: 0.0.0.0
       SERVICE_BIND_HOST: 0.0.0.0
       SERVICE_PUBLIC_HOST: auth-http
@@ -372,7 +372,7 @@ services:
     image: ${IMAGE_ADMIN_API:?set IMAGE_ADMIN_API from images.lock.json}
     env_file: ${ADMIN_API_ENV_FILE:?set ADMIN_API_ENV_FILE}
     environment:
-      NODE_ENV: production
+      NODE_ENV: ${MYSERVER_RUNTIME_ENV:?set MYSERVER_RUNTIME_ENV to production or test}
       HOST: 0.0.0.0
       SERVICE_BIND_HOST: 0.0.0.0
       SERVICE_PUBLIC_HOST: admin-api
@@ -429,6 +429,7 @@ services:
     restart: "no"
     env_file: ${MIGRATION_ENV_FILE:?set MIGRATION_ENV_FILE}
     environment:
+      NODE_ENV: ${MYSERVER_RUNTIME_ENV:?set MYSERVER_RUNTIME_ENV to production or test}
       MYSERVER_DB_DEPLOY_AUTH_HTTP_READINESS_URL: http://auth-http:3000/healthz
       MYSERVER_DB_DEPLOY_ADMIN_API_READINESS_URL: http://admin-api:3001/healthz
       MYSERVER_DB_DEPLOY_GAME_SERVER_READINESS_URL: http://game-server:7600/readyz

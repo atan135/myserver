@@ -30,6 +30,11 @@ function envValue(name) {
   return value;
 }
 
+const runtimeEnv = options.has("runtime-env") ? envValue("runtime-env") : "production";
+if (runtimeEnv !== "production" && runtimeEnv !== "test") {
+  throw new Error("--runtime-env must be production or test");
+}
+
 const lock = JSON.parse(await readFile(options.get("lock"), "utf8"));
 if (lock.schemaVersion !== 2 || lock.dirtyWorktree || !lock.releaseId || !lock.images || !lock.infrastructure) {
   throw new Error("release lock must be a clean schemaVersion 2 lock");
@@ -53,6 +58,7 @@ const serviceNames = [
 const values = new Map([
   ["RELEASE_ID", lock.releaseId],
   ["RELEASE_ROOT", envValue("release-root")],
+  ["MYSERVER_RUNTIME_ENV", runtimeEnv],
   ["POSTGRES_IMAGE", lock.infrastructure.postgres?.reference],
   ["REDIS_IMAGE", lock.infrastructure.redis?.reference],
   ["NATS_IMAGE", lock.infrastructure.nats?.reference],

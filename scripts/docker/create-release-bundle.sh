@@ -7,7 +7,8 @@ Usage:
   scripts/docker/create-release-bundle.sh --output <directory> \
     --caddy-landing-host <domain> \
     --caddy-auth-host <domain> --caddy-admin-host <domain> --caddy-chat-host <domain> --caddy-email <email> \
-    --game-proxy-advertised-host <host> [--release-root <server-release-directory>]
+    --game-proxy-advertised-host <host> [--release-root <server-release-directory>] \
+    [--runtime-env <production|test>]
 
 Creates a server-ready, non-secret release bundle from the current schemaVersion 2
 images.lock.json. The output directory must not already contain files. When
@@ -19,6 +20,7 @@ EOF
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 output=""
 release_root=""
+runtime_env="${MYSERVER_RUNTIME_ENV:-production}"
 caddy_auth_host=""
 caddy_admin_host=""
 caddy_chat_host=""
@@ -34,6 +36,10 @@ while [ "$#" -gt 0 ]; do
       ;;
     --release-root)
       release_root="${2:?--release-root requires a value}"
+      shift 2
+      ;;
+    --runtime-env)
+      runtime_env="${2:?--runtime-env requires a value}"
       shift 2
       ;;
     --caddy-landing-host)
@@ -71,6 +77,14 @@ while [ "$#" -gt 0 ]; do
       ;;
   esac
 done
+
+case "$runtime_env" in
+  production|test) ;;
+  *)
+    echo "--runtime-env must be production or test." >&2
+    exit 64
+    ;;
+esac
 
 for value in "$output" "$caddy_landing_host" "$caddy_auth_host" "$caddy_admin_host" "$caddy_chat_host" "$caddy_email" "$game_proxy_advertised_host"; do
   if [ -z "$value" ]; then
@@ -136,6 +150,7 @@ node scripts/docker/render-release-env.mjs \
   --template deploy/docker/compose.production.env.example \
   --output "$output/compose.production.env" \
   --release-root "$release_root" \
+  --runtime-env "$runtime_env" \
   --caddy-landing-host "$caddy_landing_host" \
   --caddy-auth-host "$caddy_auth_host" \
   --caddy-admin-host "$caddy_admin_host" \
