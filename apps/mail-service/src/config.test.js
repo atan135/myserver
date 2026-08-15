@@ -42,6 +42,11 @@ const CONFIG_ENV_NAMES = [
   "MAIL_SERVICE_TOKEN",
   "MAIL_OPERATIONS_TOKEN",
   "MAIL_HIGH_RISK_TOKEN",
+  "MAIL_LOAD_TEST_NOTIFICATION_ENABLED",
+  "MAIL_LOAD_TEST_NOTIFICATION_TOKEN",
+  "MAIL_LOAD_TEST_NOTIFICATION_BATCH",
+  "MAIL_LOAD_TEST_NOTIFICATION_PLAYER_IDS",
+  "MAIL_LOAD_TEST_NOTIFICATION_ITEM_ID",
   "MAIL_RETENTION_DAYS",
   "MAIL_CLAIM_WORKFLOW_RETENTION_DAYS",
   "MAIL_GAME_GRANT_RETENTION_DAYS",
@@ -233,6 +238,44 @@ test("mail-service rejects invalid notification outbox settings", async () => {
       MAIL_OUTBOX_BACKOFF_MAX_MS: "1000"
     }, (getConfig) => getConfig()),
     /MAIL_OUTBOX_BACKOFF_MAX_MS must be greater than or equal/
+  );
+});
+
+test("mail notification smoke is explicitly bounded to local/test players", async () => {
+  const enabled = {
+    NODE_ENV: "test",
+    REGISTRY_ENABLED: "true",
+    MAIL_LOAD_TEST_NOTIFICATION_ENABLED: "true",
+    MAIL_LOAD_TEST_NOTIFICATION_TOKEN: "separate-load-test-token",
+    MAIL_LOAD_TEST_NOTIFICATION_BATCH: "smoke-01",
+    MAIL_LOAD_TEST_NOTIFICATION_PLAYER_IDS: "player-one,player-two",
+    MAIL_LOAD_TEST_NOTIFICATION_ITEM_ID: "1001"
+  };
+  await withEnv(enabled, (getConfig) => {
+    const config = getConfig();
+    assert.equal(config.mailLoadTestNotificationEnabled, true);
+    assert.deepEqual(config.mailLoadTestNotificationPlayerIds, ["player-one", "player-two"]);
+  });
+  await assert.rejects(
+    () => withEnv({ ...enabled, NODE_ENV: "production" }, (getConfig) => getConfig()),
+    /restricted to explicit local\/test environments/
+  );
+  await assert.rejects(
+    () => withEnv({ ...enabled, APP_ENV: "production" }, (getConfig) => getConfig()),
+    /restricted to explicit local\/test environments/
+  );
+  await assert.rejects(
+    () => withEnv({ ...enabled, NODE_ENV: "development", APP_ENV: "prod" }, (getConfig) => getConfig()),
+    /restricted to explicit local\/test environments/
+  );
+  const { NODE_ENV: _nodeEnv, ...withoutEnvironment } = enabled;
+  await assert.rejects(
+    () => withEnv(withoutEnvironment, (getConfig) => getConfig()),
+    /restricted to explicit local\/test environments/
+  );
+  await assert.rejects(
+    () => withEnv({ ...enabled, MAIL_LOAD_TEST_NOTIFICATION_PLAYER_IDS: "player-one,player-two,player-three" }, (getConfig) => getConfig()),
+    /one or two unique player identifiers/
   );
 });
 

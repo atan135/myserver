@@ -6,6 +6,7 @@ import {
   MailPlayerAuthService,
   ticketKey,
   ticketVersionKey,
+  validateMailLoadTestToken,
   verifyTicketSignature
 } from "./mail-auth.js";
 
@@ -91,5 +92,21 @@ test("MailPlayerAuthService requires an unmodified ticket with the active versio
   await assert.rejects(
     () => auth.authenticateTicket(`${ticket}tampered`),
     { code: "INVALID_TICKET_SIGNATURE" }
+  );
+});
+
+test("load-test mail notification token is isolated from general service auth", () => {
+  const config = { mailLoadTestNotificationToken: "separate-load-test-token" };
+  assert.doesNotThrow(() => validateMailLoadTestToken(
+    { "x-mail-load-test-token": "separate-load-test-token" },
+    config
+  ));
+  assert.throws(
+    () => validateMailLoadTestToken({ "x-service-token": "separate-load-test-token" }, config),
+    { code: "MAIL_LOAD_TEST_NOTIFICATION_TOKEN_REQUIRED" }
+  );
+  assert.throws(
+    () => validateMailLoadTestToken({ "x-mail-load-test-token": "wrong" }, config),
+    { code: "MAIL_LOAD_TEST_NOTIFICATION_TOKEN_INVALID" }
   );
 });

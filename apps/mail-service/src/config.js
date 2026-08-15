@@ -21,6 +21,13 @@ function parsePositiveIntegerWithFallback(value, fallback) {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
+function parseOptionalIntegerInRange(name, value, min, max) {
+  if (value === undefined || value === "") {
+    return null;
+  }
+  return parseIntegerInRange(name, value, min, min, max);
+}
+
 function parseStrictBoolean(name, value, fallback) {
   if (value === undefined || value === "") {
     return fallback;
@@ -91,6 +98,35 @@ function firstNonEmptyEnv(names) {
     }
   }
   return undefined;
+}
+
+function parseLoadTestPlayerIds(value) {
+  if (value === undefined || value === "") {
+    return [];
+  }
+  const playerIds = String(value)
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+  if (
+    playerIds.length === 0 ||
+    playerIds.length > 2 ||
+    new Set(playerIds).size !== playerIds.length ||
+    playerIds.some((playerId) => !/^[A-Za-z0-9:_-]{1,64}$/.test(playerId))
+  ) {
+    throw new Error(
+      "Invalid mail-service config: MAIL_LOAD_TEST_NOTIFICATION_PLAYER_IDS must contain one or two unique player identifiers"
+    );
+  }
+  return playerIds;
+}
+
+function isExplicitLocalOrTestEnv() {
+  const values = [process.env.NODE_ENV, process.env.APP_ENV]
+    .map((value) => String(value || "").trim().toLowerCase())
+    .filter(Boolean);
+  return values.length > 0
+    && values.every((value) => ["development", "local", "test", "testing"].includes(value));
 }
 
 function advertisedHostFromEnv(names, fallbackHost) {
@@ -294,7 +330,9 @@ function emitLegacyDirectConfigWarnings(appName, warnings) {
 }
 
 export function getConfig() {
-  const env = process.env.NODE_ENV || "development";
+  // Keep the diagnostic gate aligned with the deployment-wide production
+  // check, which accepts either NODE_ENV or APP_ENV.
+  const env = firstNonEmptyEnv(["NODE_ENV", "APP_ENV"]) || "development";
   const bindHost = firstNonEmptyEnv(["SERVICE_BIND_HOST", "HOST"]) || "127.0.0.1";
   const localDiscoveryFallbackEnabled = isLocalDiscoveryFallbackEnv();
   const registryDiscoveryEnabled = parseBoolean(process.env.REGISTRY_ENABLED, false);
@@ -448,6 +486,25 @@ export function getConfig() {
     mailServiceToken: process.env.MAIL_SERVICE_TOKEN || "dev-only-change-this-mail-service-token",
     mailOperationsToken: process.env.MAIL_OPERATIONS_TOKEN || "dev-only-change-this-mail-operations-token",
     mailHighRiskToken: process.env.MAIL_HIGH_RISK_TOKEN || "dev-only-change-this-mail-high-risk-token",
+    // This path is off by default and must use a separate, test-only token.
+    // It creates at most one deterministic reward mail per allowed player and
+    // batch so a load-test retry cannot fan out additional mail.
+    mailLoadTestNotificationEnabled: parseStrictBoolean(
+      "MAIL_LOAD_TEST_NOTIFICATION_ENABLED",
+      process.env.MAIL_LOAD_TEST_NOTIFICATION_ENABLED,
+      false
+    ),
+    mailLoadTestNotificationToken: process.env.MAIL_LOAD_TEST_NOTIFICATION_TOKEN || "",
+    mailLoadTestNotificationBatch: process.env.MAIL_LOAD_TEST_NOTIFICATION_BATCH || "",
+    mailLoadTestNotificationPlayerIds: parseLoadTestPlayerIds(
+      process.env.MAIL_LOAD_TEST_NOTIFICATION_PLAYER_IDS
+    ),
+    mailLoadTestNotificationItemId: parseOptionalIntegerInRange(
+      "MAIL_LOAD_TEST_NOTIFICATION_ITEM_ID",
+      process.env.MAIL_LOAD_TEST_NOTIFICATION_ITEM_ID,
+      1,
+      2_147_483_647
+    ),
     mailRetentionDays: parseIntegerInRange("MAIL_RETENTION_DAYS", process.env.MAIL_RETENTION_DAYS, 400, 30, 3650),
     claimWorkflowRetentionDays: parseIntegerInRange("MAIL_CLAIM_WORKFLOW_RETENTION_DAYS", process.env.MAIL_CLAIM_WORKFLOW_RETENTION_DAYS, 400, 30, 3650),
     gameGrantRetentionDays: parseIntegerInRange("MAIL_GAME_GRANT_RETENTION_DAYS", process.env.MAIL_GAME_GRANT_RETENTION_DAYS, 400, 30, 3650),
@@ -478,6 +535,33 @@ export function getConfig() {
   }
   if (config.gameGrantRetentionDays < config.claimWorkflowRetentionDays) {
     throw new Error("Invalid mail-service config: MAIL_GAME_GRANT_RETENTION_DAYS must be greater than or equal to MAIL_CLAIM_WORKFLOW_RETENTION_DAYS");
+  }
+  if (config.mailLoadTestNotificationEnabled) {
+    if (!isExplicitLocalOrTestEnv()) {
+      throw new Error(
+        "Invalid mail-service config: MAIL_LOAD_TEST_NOTIFICATION_ENABLED is restricted to explicit local/test environments"
+      );
+    }
+    if (isWeakSecret(config.mailLoadTestNotificationToken)) {
+      throw new Error(
+        "Invalid mail-service config: MAIL_LOAD_TEST_NOTIFICATION_TOKEN must be an independent non-default secret with at least 16 characters"
+      );
+    }
+    if (!/^[a-z0-9-]{1,32}$/.test(config.mailLoadTestNotificationBatch)) {
+      throw new Error(
+        "Invalid mail-service config: MAIL_LOAD_TEST_NOTIFICATION_BATCH must be 1..=32 lowercase letters, digits, or hyphens"
+      );
+    }
+    if (config.mailLoadTestNotificationPlayerIds.length === 0) {
+      throw new Error(
+        "Invalid mail-service config: MAIL_LOAD_TEST_NOTIFICATION_PLAYER_IDS is required when the diagnostic is enabled"
+      );
+    }
+    if (!config.mailLoadTestNotificationItemId) {
+      throw new Error(
+        "Invalid mail-service config: MAIL_LOAD_TEST_NOTIFICATION_ITEM_ID is required when the diagnostic is enabled"
+      );
+    }
   }
 
   emitLegacyDirectConfigWarnings(config.appName, config.legacyDirectConfigWarnings);

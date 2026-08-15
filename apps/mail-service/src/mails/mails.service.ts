@@ -628,6 +628,12 @@ export class MailsService implements OnModuleInit, OnModuleDestroy {
           error: String(error.message || "unknown outbox error").slice(0, 512)
         });
       }
+      // A one-item worker pass can publish an older pending event. Derive the
+      // response from this mail's persisted outbox row instead of that pass's
+      // aggregate counters so callers cannot correlate the wrong event.
+      const notificationOutbox = await this.mailStore.getMailNotificationOutboxByMailId(mail.mail_id);
+      const outboxPublished = notificationOutbox?.status === "sent";
+      const outboxPending = ["pending", "sending"].includes(notificationOutbox?.status);
       log("info", created.idempotent ? "mail.reward_delivery_replayed" : "mail.reward_delivery_created", {
         deliveryRequestId: mail.delivery_request_id,
         mailId: mail.mail_id,
@@ -640,7 +646,12 @@ export class MailsService implements OnModuleInit, OnModuleDestroy {
         ok: true,
         mail_id: mail.mail_id,
         delivery_request_id: mail.delivery_request_id,
-        idempotent_replay: created.idempotent === true
+        idempotent_replay: created.idempotent === true,
+        notification: {
+          event_id: `mail.notify:${mail.mail_id}`,
+          outbox_published: outboxPublished,
+          outbox_pending: outboxPending
+        }
       };
     } catch (error: any) {
       if (error?.getStatus?.()) throw error;
@@ -650,6 +661,36 @@ export class MailsService implements OnModuleInit, OnModuleDestroy {
       log("error", "route.create_reward_delivery_failed", { error: error.message });
       throw error;
     }
+  }
+
+  async createLoadTestNotification({ playerId, characterId, batch, itemId }: any) {
+    const fingerprint = createHash("sha256")
+      .update(`mail-load-test-v1:${batch}:${playerId}`)
+      .digest("hex")
+      .slice(0, 32);
+    const deliveryRequestId = `loadtest-mail:${batch}:${fingerprint}`;
+    const mailId = `loadtest-mail-${fingerprint}`;
+    const existing = await this.mailStore.getMailById(mailId);
+    if (existing && (
+      existing.delivery_request_id !== deliveryRequestId
+      || existing.to_player_id !== playerId
+      || !existing.delivery_character_id
+    )) {
+      throw conflict("LOAD_TEST_NOTIFICATION_IDENTITY_CONFLICT", "mail load-test notification identity conflicts with an existing mail");
+    }
+    return this.createRewardDelivery({
+      delivery_request_id: deliveryRequestId,
+      mail_id: mailId,
+      to_player_id: playerId,
+      character_id: existing?.delivery_character_id || characterId,
+      origin_type: "system",
+      origin_id: `loadtest:${batch}`,
+      delivery_policy: "MAIL_ONLY",
+      operator: { type: "loadtest", id: batch, name: "load-test" },
+      title: "Load-test notification",
+      content: "Dedicated load-test reward mail",
+      attachments: [{ type: "item", id: itemId, count: 1, binded: true }]
+    });
   }
 
   async create(body: any) {

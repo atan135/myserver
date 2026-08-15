@@ -223,3 +223,15 @@ export function validateMailHighRiskToken(headers, config) {
     "MAIL_HIGH_RISK_TOKEN"
   );
 }
+
+// This credential is deliberately independent from the generic internal
+// sender token. It is valid only for the explicitly enabled local/test mail
+// notification smoke route.
+export function validateMailLoadTestToken(headers, config) {
+  validateDedicatedToken(
+    headers,
+    config?.mailLoadTestNotificationToken,
+    "x-mail-load-test-token",
+    "MAIL_LOAD_TEST_NOTIFICATION_TOKEN"
+  );
+}

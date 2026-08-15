@@ -1,8 +1,8 @@
 import { Body, Controller, Get, Headers, HttpCode, HttpStatus, Inject, Param, Post, Put, Query, Req, Res } from "@nestjs/common";
 import { ApiCreatedResponse, ApiOkResponse, ApiOperation, ApiTags } from "@nestjs/swagger";
 
-import { forbidden, rateLimited, serviceUnavailable, unauthorized } from "../common/http-exception.js";
-import { authenticatePlayerHeaders, validateServiceToken } from "../mail-auth.js";
+import { badRequest, forbidden, rateLimited, serviceUnavailable, unauthorized } from "../common/http-exception.js";
+import { authenticatePlayerHeaders, validateMailLoadTestToken, validateServiceToken } from "../mail-auth.js";
 import { MAIL_CONFIG, MAIL_METRICS, MAIL_PLAYER_AUTH, MAIL_PLAYER_RATE_LIMITER } from "../tokens.js";
 import {
   publicResultClass,
@@ -60,6 +60,31 @@ export class MailsController {
       }
       throw unauthorized(error?.code || "MAIL_SERVICE_TOKEN_REQUIRED", error?.message || "mail service token is required");
     }
+  }
+
+  private authenticateLoadTestNotification(headers: any, body: any) {
+    if (this.config?.mailLoadTestNotificationEnabled !== true) {
+      throw forbidden("MAIL_LOAD_TEST_NOTIFICATION_DISABLED", "mail load-test notification is disabled");
+    }
+    try {
+      validateMailLoadTestToken(headers, this.config);
+    } catch (error: any) {
+      if (error?.statusCode === 403) {
+        throw forbidden(error.code || "MAIL_LOAD_TEST_NOTIFICATION_TOKEN_INVALID", error.message || "mail load-test token is invalid");
+      }
+      throw unauthorized(
+        error?.code || "MAIL_LOAD_TEST_NOTIFICATION_TOKEN_REQUIRED",
+        error?.message || "mail load-test token is required"
+      );
+    }
+    if (!body || typeof body !== "object" || Array.isArray(body) || Object.keys(body).length !== 1) {
+      throw badRequest("INVALID_MAIL_LOAD_TEST_NOTIFICATION", "only the dedicated load-test batch is accepted");
+    }
+    const batch = typeof body.batch === "string" ? body.batch.trim() : "";
+    if (!batch || batch !== this.config.mailLoadTestNotificationBatch) {
+      throw forbidden("MAIL_LOAD_TEST_NOTIFICATION_BATCH_REJECTED", "mail load-test batch is not authorized");
+    }
+    return batch;
   }
 
   private async executePlayerRequest(
@@ -171,6 +196,23 @@ export class MailsController {
   createRewardDelivery(@Headers() headers: any, @Body() body: any) {
     this.authenticateService(headers);
     return this.mailsService.createRewardDelivery(body);
+  }
+
+  @Post("load-test/notification")
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: "Create one dedicated local/test mail notification smoke delivery" })
+  async createLoadTestNotification(@Headers() headers: any, @Body() body: any) {
+    const batch = this.authenticateLoadTestNotification(headers, body);
+    const auth = await this.authenticatePlayer(headers);
+    if (!this.config.mailLoadTestNotificationPlayerIds.includes(auth.playerId)) {
+      throw forbidden("MAIL_LOAD_TEST_NOTIFICATION_PLAYER_REJECTED", "mail load-test player is not authorized");
+    }
+    return this.mailsService.createLoadTestNotification({
+      playerId: auth.playerId,
+      characterId: auth.characterId,
+      batch,
+      itemId: this.config.mailLoadTestNotificationItemId
+    });
   }
 
   @Put(":mailId/read")

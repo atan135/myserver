@@ -127,13 +127,15 @@ function createService({
   grant,
   config = {},
   metrics = null,
-  storeOptions = {}
+  storeOptions = {},
+  pubsub = {}
 }: {
   mail?: any;
   grant?: (...args: any[]) => Promise<any>;
   config?: any;
   metrics?: any;
   storeOptions?: any;
+  pubsub?: any;
 } = {}) {
   const calls: any[][] = [];
   const mailStore = new DbMailStore(null, storeOptions);
@@ -161,7 +163,7 @@ function createService({
     mailStore,
     service: new MailsService(
       mailStore,
-      {},
+      pubsub,
       gameAdminClient,
       { claimLeaseMs: 30_000, serviceInstanceId: "mail-test", ...config },
       metrics
@@ -589,6 +591,96 @@ test("trusted reward delivery is idempotent and protects unclaimed attachments f
     () => service.createRewardDelivery({ ...delivery, title: "forged replacement" }),
     (error: any) => error?.getResponse?.()?.error === "REWARD_DELIVERY_CONFLICT"
   );
+});
+
+test("dedicated load-test notification creates one deterministic reward mail per player and batch", async () => {
+  const published: any[] = [];
+  const { service, mailStore } = createService({
+    mail: null,
+    pubsub: {
+      async publishMailNotification(playerId: string, event: any) {
+        published.push({ playerId, event });
+      }
+    }
+  });
+  const request = {
+    playerId: "player-loadtest-1",
+    characterId: "chr-loadtest-1",
+    batch: "smoke-01",
+    itemId: 1001
+  };
+  const first = await service.createLoadTestNotification(request);
+  const replay = await service.createLoadTestNotification(request);
+  const mail = await mailStore.getMailById(first.mail_id);
+
+  assert.equal(first.idempotent_replay, false);
+  assert.equal(first.notification.outbox_published, true);
+  assert.equal(replay.idempotent_replay, true);
+  assert.equal(replay.mail_id, first.mail_id);
+  assert.equal(published.length, 1);
+  assert.equal(mail.to_player_id, request.playerId);
+  assert.equal(mail.delivery_character_id, request.characterId);
+  assert.equal(mail.origin_id, "loadtest:smoke-01");
+  assert.deepEqual(mail.attachments, [{ type: "item", id: 1001, count: 1, binded: true }]);
+});
+
+test("load-test notification preserves the first character for a player and batch", async () => {
+  const published: any[] = [];
+  const { service, mailStore } = createService({
+    mail: null,
+    pubsub: {
+      async publishMailNotification(playerId: string, event: any) {
+        published.push({ playerId, event });
+      }
+    }
+  });
+  const first = await service.createLoadTestNotification({
+    playerId: "player-loadtest-1",
+    characterId: "chr-loadtest-first",
+    batch: "smoke-03",
+    itemId: 1001
+  });
+  const replay = await service.createLoadTestNotification({
+    playerId: "player-loadtest-1",
+    characterId: "chr-loadtest-second",
+    batch: "smoke-03",
+    itemId: 1001
+  });
+  const mail = await mailStore.getMailById(first.mail_id);
+
+  assert.equal(replay.idempotent_replay, true);
+  assert.equal(replay.mail_id, first.mail_id);
+  assert.equal(mail.delivery_character_id, "chr-loadtest-first");
+  assert.equal(mailStore.memory.size, 1);
+  assert.equal(published.length, 1);
+});
+
+test("load-test notification never reports an older outbox publish as its own", async () => {
+  const published: any[] = [];
+  const { service, mailStore } = createService({
+    mail: null,
+    pubsub: {
+      async publishMailNotification(playerId: string, event: any) {
+        published.push({ playerId, event });
+      }
+    }
+  });
+  await mailStore.createMailWithNotificationOutbox(createMail({
+    mail_id: "mail-older-outbox",
+    to_player_id: "player-older"
+  }));
+
+  const result = await service.createLoadTestNotification({
+    playerId: "player-loadtest-1",
+    characterId: "chr-loadtest-1",
+    batch: "smoke-02",
+    itemId: 1001
+  });
+
+  assert.equal(published.length, 1);
+  assert.equal(published[0].event.mail.mail_id, "mail-older-outbox");
+  assert.equal(result.notification.outbox_published, false);
+  assert.equal(result.notification.outbox_pending, true);
 });
 
 test("started workflow can finish from its frozen snapshot after hard mail deletion", async () => {
