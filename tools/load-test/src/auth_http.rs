@@ -998,7 +998,9 @@ pub fn send_with_bounded_retry<T: AuthHttpTransport>(
     .expect("the no-op admission callback cannot fail")
 }
 
-fn send_with_bounded_retry_after_admission<T, F>(
+/// Sends an auth request only after the caller admits every individual
+/// transport attempt and supplies its remaining deadline as the timeout.
+pub fn send_with_bounded_retry_after_admission<T, F>(
     transport: &mut T,
     request: AuthHttpRequest,
     configured_retries: u8,

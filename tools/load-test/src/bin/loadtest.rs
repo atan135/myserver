@@ -25,7 +25,7 @@ use loadtest_core::auth_http::{
     AuthAdmissionError, AuthDispatchAdmission, AuthHttpRequest, AuthHttpTransport,
     AuthResponseBody, AuthRunMetrics, FakeAuthHttpService, FakeAuthOutcome,
     ReqwestAuthHttpTransport, execute_auth_operations, execute_deferred_logout,
-    send_with_bounded_retry, split_game_auth_operations,
+    send_with_bounded_retry_after_admission, split_game_auth_operations,
 };
 use loadtest_core::calibration::{
     CalibrationRun, bounded_calibration_duration_ms, bounded_calibration_operations,
@@ -946,9 +946,17 @@ where
             return Err("remote auth target protection failed before request dispatch".into());
         }
     }
-    transport.set_attempt_timeout(admission.remaining().map_err(|error| error.to_string())?);
     let mut request_metrics = AuthRunMetrics::default();
-    let response = send_with_bounded_retry(transport, request, 0, &mut request_metrics);
+    let response = send_with_bounded_retry_after_admission(
+        transport,
+        request,
+        0,
+        &mut request_metrics,
+        || {
+            admission.revalidate().map_err(|error| error.to_string())?;
+            admission.remaining().map_err(|error| error.to_string())
+        },
+    )?;
     auth_metrics.merge(&request_metrics);
     match response.body {
         AuthResponseBody::Success(success)
@@ -4963,6 +4971,7 @@ mod tests {
 
     struct CountingReconnectAuthTransport {
         dispatched: u32,
+        attempt_timeouts: Vec<Duration>,
     }
 
     impl AuthHttpTransport for CountingReconnectAuthTransport {
@@ -4983,7 +4992,9 @@ mod tests {
             }
         }
 
-        fn set_attempt_timeout(&mut self, _timeout: Duration) {}
+        fn set_attempt_timeout(&mut self, timeout: Duration) {
+            self.attempt_timeouts.push(timeout);
+        }
     }
 
     struct ReconnectRemoteProtection {
@@ -5109,7 +5120,10 @@ mod tests {
         let budget = reconnect_guard_budget(3);
         let mut admission = AuthDispatchAdmission::new(&budget).unwrap();
         let mut abort = AbortController::default();
-        let mut transport = CountingReconnectAuthTransport { dispatched: 0 };
+        let mut transport = CountingReconnectAuthTransport {
+            dispatched: 0,
+            attempt_timeouts: Vec::new(),
+        };
         let protection = ReconnectRemoteProtection {
             fail_guard: true,
             guard_checks: Cell::new(0),
@@ -5143,6 +5157,7 @@ mod tests {
         ));
         assert_eq!(protection.guard_checks.get(), 1);
         assert_eq!(executor.transport.dispatched, 0);
+        assert!(executor.transport.attempt_timeouts.is_empty());
         assert_eq!(executor.executed, vec![ReconnectBurstStep::Login]);
         assert_eq!(executor.metrics.guard_probe_attempts, 1);
         assert_eq!(executor.metrics.guard_probe_successes, 0);
@@ -5150,11 +5165,14 @@ mod tests {
     }
 
     #[test]
-    fn reconnect_remote_guard_counts_with_the_primary_auth_admission() {
+    fn reconnect_auth_dispatch_uses_finite_timeout_after_checkpoint() {
         let budget = reconnect_guard_budget(2);
         let mut admission = AuthDispatchAdmission::new(&budget).unwrap();
         let mut abort = AbortController::default();
-        let mut transport = CountingReconnectAuthTransport { dispatched: 0 };
+        let mut transport = CountingReconnectAuthTransport {
+            dispatched: 0,
+            attempt_timeouts: Vec::new(),
+        };
         let protection = ReconnectRemoteProtection {
             fail_guard: false,
             guard_checks: Cell::new(0),
@@ -5166,6 +5184,7 @@ mod tests {
             executed: Vec::new(),
         };
 
+        let mut checkpoint_calls = 0;
         execute_reconnect_burst(
             &reconnect_auth_plan(false),
             &budget,
@@ -5178,7 +5197,10 @@ mod tests {
             &mut admission,
             Instant::now() + Duration::from_secs(1),
             &mut abort,
-            |_| Ok(()),
+            |_| {
+                checkpoint_calls += 1;
+                Ok(())
+            },
             &mut executor,
         )
         .unwrap();
@@ -5190,6 +5212,64 @@ mod tests {
         assert_eq!(executor.metrics.guard_probe_connection_admissions, 1);
         assert_eq!(executor.metrics.requests, 1);
         assert_eq!(admission.used_operations(), 2);
+        // Admission may re-check while waiting for a rate slot. The three
+        // required checkpoints are action entry, guard admission, and the
+        // per-dispatch timeout callback.
+        assert!(checkpoint_calls >= 3);
+        assert_eq!(executor.transport.attempt_timeouts.len(), 1);
+        assert!(!executor.transport.attempt_timeouts[0].is_zero());
+        assert_ne!(executor.transport.attempt_timeouts[0], Duration::MAX);
+    }
+
+    #[test]
+    fn reconnect_expired_deadline_rejects_before_auth_transport() {
+        let budget = reconnect_guard_budget(1);
+        let mut admission = AuthDispatchAdmission::new(&budget).unwrap();
+        let mut abort = AbortController::default();
+        let mut transport = CountingReconnectAuthTransport {
+            dispatched: 0,
+            attempt_timeouts: Vec::new(),
+        };
+        let protection = ReconnectRemoteProtection {
+            fail_guard: false,
+            guard_checks: Cell::new(0),
+        };
+        let mut executor = GuardedReconnectAuthExecutor {
+            transport: &mut transport,
+            protection: &protection,
+            metrics: AuthRunMetrics::default(),
+            executed: Vec::new(),
+        };
+
+        let result = execute_reconnect_burst(
+            &reconnect_auth_plan(false),
+            &budget,
+            ReconnectBurstExecutionGate {
+                execute_game: true,
+                confirm_game: Some("local"),
+                environment_name: "local",
+                environment_kind: EnvironmentKind::Local,
+            },
+            &mut admission,
+            Instant::now()
+                .checked_sub(Duration::from_millis(1))
+                .unwrap(),
+            &mut abort,
+            |_| Ok(()),
+            &mut executor,
+        );
+
+        assert!(matches!(
+            result,
+            Err(
+                loadtest_core::reconnect_burst::ReconnectBurstExecutionError::Admission(
+                    AuthAdmissionError::DeadlineExceeded
+                )
+            )
+        ));
+        assert!(executor.executed.is_empty());
+        assert_eq!(executor.transport.dispatched, 0);
+        assert!(executor.transport.attempt_timeouts.is_empty());
     }
 
     #[test]
