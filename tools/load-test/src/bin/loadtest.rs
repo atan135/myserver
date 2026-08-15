@@ -54,8 +54,8 @@ use loadtest_core::protection::{
 };
 use loadtest_core::reconnect_burst::{
     ReconnectBurstAction, ReconnectBurstAdmission, ReconnectBurstExecutionGate,
-    ReconnectBurstExecutor, ReconnectBurstSpec, ReconnectBurstStep, execute_reconnect_burst,
-    plan_reconnect_burst,
+    ReconnectBurstExecutor, ReconnectBurstSpec, ReconnectBurstStep, estimate_live_reconnect_burst,
+    execute_reconnect_burst, plan_reconnect_burst, validate_live_reconnect_burst_budget,
 };
 use loadtest_core::registry_observation::{
     RegistryObservationError, RegistryObservationReport, RegistryObservationRequest,
@@ -894,10 +894,7 @@ fn admit_live_auth_request<P: AuthenticatedPlayerProtection>(
                 )
             })
             .map_err(|error| map_auth_admission_to_string(abort, error))?;
-        let started = Instant::now();
-        let guard_result = protection.revalidate_before_auth_dispatch();
-        guard_metrics.record_guard_probe(started, guard_result.is_ok());
-        if guard_result.is_err() {
+        if confirm_live_auth_guard(protection, guard_metrics).is_err() {
             abort.check_protection(false);
             return Err("remote auth target protection failed before request dispatch".into());
         }
@@ -913,6 +910,53 @@ fn admit_live_auth_request<P: AuthenticatedPlayerProtection>(
             )
         })
         .map_err(|error| map_auth_admission_to_string(abort, error))
+}
+
+/// The full DNS/TLS/health/descriptor probe is shared by ordinary auth flows
+/// and reconnect auth. Admission for the probe itself remains caller-owned so
+/// reconnect can retain its pre-planned primary-action reservation.
+fn confirm_live_auth_guard<P: AuthenticatedPlayerProtection>(
+    protection: &P,
+    guard_metrics: &mut AuthRunMetrics,
+) -> Result<(), String> {
+    let started = Instant::now();
+    let guard_result = protection.revalidate_before_auth_dispatch();
+    guard_metrics.record_guard_probe(started, guard_result.is_ok());
+    guard_result.map_err(|_| "remote auth target protection failed before request dispatch".into())
+}
+
+fn send_reconnect_auth_with_guard<T, P>(
+    transport: &mut T,
+    request: AuthHttpRequest,
+    admission: &mut ReconnectBurstAdmission<'_>,
+    protection: &P,
+    auth_metrics: &mut AuthRunMetrics,
+) -> Result<loadtest_core::auth_http::AuthSuccess, String>
+where
+    T: AuthHttpTransport,
+    P: AuthenticatedPlayerProtection,
+{
+    if protection.uses_guard_probe() {
+        admission
+            .admit_guard_probe()
+            .map_err(|error| error.to_string())?;
+        if confirm_live_auth_guard(protection, auth_metrics).is_err() {
+            admission.mark_protection_failed();
+            return Err("remote auth target protection failed before request dispatch".into());
+        }
+    }
+    transport.set_attempt_timeout(admission.remaining().map_err(|error| error.to_string())?);
+    let mut request_metrics = AuthRunMetrics::default();
+    let response = send_with_bounded_retry(transport, request, 0, &mut request_metrics);
+    auth_metrics.merge(&request_metrics);
+    match response.body {
+        AuthResponseBody::Success(success)
+            if response.status.is_some_and(|status| status < 400) =>
+        {
+            Ok(success)
+        }
+        _ => Err("reconnect burst auth request did not succeed".into()),
+    }
 }
 
 fn check_authenticated_player_checkpoint<P: AuthenticatedPlayerProtection>(
@@ -2077,6 +2121,7 @@ fn run_live(cli: &Cli) -> Result<(), String> {
         let mut adapter = LiveReconnectBurstAdapter::new(
             &mut transport,
             &config,
+            &protection,
             RunAccess {
                 allow_remote: cli.allow_remote,
                 confirmation: cli.confirmation.as_deref(),
@@ -3671,6 +3716,7 @@ fn validate_live_auth_load_model(model: &LoadModel) -> Result<(), String> {
 struct LiveReconnectBurstAdapter<'a> {
     auth_transport: &'a mut ReqwestAuthHttpTransport,
     config: &'a LoadTestConfig,
+    protection: &'a RunPlayerProtection<'a>,
     access: RunAccess<'a>,
     endpoint: &'a GameProxyEndpoint,
     account_pool: &'a mut AccountLeasePool,
@@ -3698,6 +3744,7 @@ impl<'a> LiveReconnectBurstAdapter<'a> {
     fn new(
         auth_transport: &'a mut ReqwestAuthHttpTransport,
         config: &'a LoadTestConfig,
+        protection: &'a RunPlayerProtection<'a>,
         access: RunAccess<'a>,
         endpoint: &'a GameProxyEndpoint,
         account_pool: &'a mut AccountLeasePool,
@@ -3711,6 +3758,7 @@ impl<'a> LiveReconnectBurstAdapter<'a> {
         Self {
             auth_transport,
             config,
+            protection,
             access,
             endpoint,
             account_pool,
@@ -3791,21 +3839,15 @@ impl<'a> LiveReconnectBurstAdapter<'a> {
     fn send_auth(
         &mut self,
         request: AuthHttpRequest,
-        admission: &ReconnectBurstAdmission<'_>,
+        admission: &mut ReconnectBurstAdmission<'_>,
     ) -> Result<loadtest_core::auth_http::AuthSuccess, String> {
-        self.auth_transport
-            .set_attempt_timeout(admission.remaining().map_err(|error| error.to_string())?);
-        let mut metrics = AuthRunMetrics::default();
-        let response = send_with_bounded_retry(self.auth_transport, request, 0, &mut metrics);
-        self.auth_metrics.merge(&metrics);
-        match response.body {
-            AuthResponseBody::Success(success)
-                if response.status.is_some_and(|status| status < 400) =>
-            {
-                Ok(success)
-            }
-            _ => Err("reconnect burst auth request did not succeed".into()),
-        }
+        send_reconnect_auth_with_guard(
+            self.auth_transport,
+            request,
+            admission,
+            self.protection,
+            &mut self.auth_metrics,
+        )
     }
 
     fn login(
@@ -3828,6 +3870,16 @@ impl<'a> LiveReconnectBurstAdapter<'a> {
             },
             admission,
         )?;
+        if self
+            .protection
+            .observe_auth_services(success.services.as_ref())
+            .is_err()
+        {
+            admission.mark_protection_failed();
+            return Err(
+                "auth public game descriptor was rejected before reconnect dispatch".into(),
+            );
+        }
         let access_token = success
             .access_token
             .ok_or("reconnect burst login did not return an access token")?;
@@ -3859,7 +3911,7 @@ impl<'a> LiveReconnectBurstAdapter<'a> {
     fn issue_ticket(
         &mut self,
         player_index: usize,
-        admission: &ReconnectBurstAdmission<'_>,
+        admission: &mut ReconnectBurstAdmission<'_>,
     ) -> Result<(), String> {
         let player = self
             .players
@@ -4170,7 +4222,7 @@ fn validate_live_reconnect_burst_gate(
                 .into(),
         );
     }
-    plan_reconnect_burst(
+    let plan = plan_reconnect_burst(
         ReconnectBurstSpec {
             virtual_players: reconnect.virtual_players,
             reconnect_attempts_per_player: reconnect.reconnect_attempts_per_player,
@@ -4179,8 +4231,10 @@ fn validate_live_reconnect_burst_gate(
         budget,
         reconnect.reconnect_policy.into(),
     )
-    .map(|_| ())
-    .map_err(|error| error.to_string())
+    .map_err(|error| error.to_string())?;
+    let live_estimate =
+        estimate_live_reconnect_burst(&plan, budget, config.environment.kind.is_remote())?;
+    validate_live_reconnect_burst_budget(&live_estimate, budget)
 }
 
 fn map_auth_admission_to_string(abort: &mut AbortController, error: AuthAdmissionError) -> String {
@@ -4902,6 +4956,237 @@ mod tests {
         );
         cli.confirm_game = Some("other".into());
         assert!(validate_live_reconnect_burst_gate(&cli, &config, &budget).is_err());
+    }
+
+    struct CountingReconnectAuthTransport {
+        dispatched: u32,
+    }
+
+    impl AuthHttpTransport for CountingReconnectAuthTransport {
+        fn send(
+            &mut self,
+            _request: AuthHttpRequest,
+        ) -> loadtest_core::auth_http::AuthHttpResponse {
+            self.dispatched = self.dispatched.saturating_add(1);
+            loadtest_core::auth_http::AuthHttpResponse {
+                status: Some(200),
+                retry_after_secs: None,
+                body: AuthResponseBody::Success(loadtest_core::auth_http::AuthSuccess {
+                    access_token: Some("in-memory-access-token".into()),
+                    ticket: None,
+                    character_id: None,
+                    services: None,
+                }),
+            }
+        }
+
+        fn set_attempt_timeout(&mut self, _timeout: Duration) {}
+    }
+
+    struct ReconnectRemoteProtection {
+        fail_guard: bool,
+        guard_checks: Cell<u32>,
+    }
+
+    impl RuntimeProtection for ReconnectRemoteProtection {
+        fn verify_dns(&self) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn verify_certificate(&self) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn verify_descriptor(&self) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn verify_environment_identity(&self) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn revalidate(&self) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    impl AuthenticatedPlayerProtection for ReconnectRemoteProtection {
+        fn revalidate_before_auth_dispatch(&self) -> Result<(), String> {
+            self.guard_checks
+                .set(self.guard_checks.get().saturating_add(1));
+            if self.fail_guard {
+                Err("guard rejected test target".into())
+            } else {
+                Ok(())
+            }
+        }
+
+        fn uses_guard_probe(&self) -> bool {
+            true
+        }
+    }
+
+    fn reconnect_guard_budget(max_total_operations: u64) -> loadtest_core::config::HardBudget {
+        loadtest_core::config::HardBudget {
+            max_virtual_players: 1,
+            max_login_qps: 100.0,
+            max_new_connections_per_second: 100.0,
+            max_business_messages_per_second: 100.0,
+            max_messages_per_connection_per_second: 100.0,
+            max_duration_secs: 10,
+            max_total_operations,
+            max_error_rate: 1.0,
+            max_connection_failure_rate: 1.0,
+            max_p99_ms: 1_000,
+            max_data_writes: 3,
+        }
+    }
+
+    fn reconnect_auth_plan(
+        with_later_connect: bool,
+    ) -> loadtest_core::reconnect_burst::ReconnectBurstPlan {
+        let mut actions = vec![ReconnectBurstAction {
+            at_ms: 0,
+            player_slot: 0,
+            reconnect_attempt: 0,
+            step: ReconnectBurstStep::Login,
+        }];
+        if with_later_connect {
+            actions.push(ReconnectBurstAction {
+                at_ms: 1,
+                player_slot: 0,
+                reconnect_attempt: 0,
+                step: ReconnectBurstStep::ConnectProxy,
+            });
+        }
+        loadtest_core::reconnect_burst::ReconnectBurstPlan {
+            actions,
+            forced_disconnects: 0,
+            login_actions: 1,
+            new_connections: if with_later_connect { 2 } else { 1 },
+            total_operations: if with_later_connect { 2 } else { 1 },
+            potential_data_writes: 3,
+            total_backoff_ms: 0,
+            latest_action_ms: u64::from(with_later_connect),
+        }
+    }
+
+    struct GuardedReconnectAuthExecutor<'a> {
+        transport: &'a mut CountingReconnectAuthTransport,
+        protection: &'a ReconnectRemoteProtection,
+        metrics: AuthRunMetrics,
+        executed: Vec<ReconnectBurstStep>,
+    }
+
+    impl ReconnectBurstExecutor for GuardedReconnectAuthExecutor<'_> {
+        fn execute(
+            &mut self,
+            action: ReconnectBurstAction,
+            admission: &mut ReconnectBurstAdmission<'_>,
+        ) -> Result<(), String> {
+            self.executed.push(action.step);
+            if action.step == ReconnectBurstStep::Login {
+                send_reconnect_auth_with_guard(
+                    self.transport,
+                    AuthHttpRequest::Login {
+                        login_name: "loadtest_account".into(),
+                        password: "in-memory-only".into(),
+                    },
+                    admission,
+                    self.protection,
+                    &mut self.metrics,
+                )?;
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn reconnect_remote_guard_failure_sends_no_auth_and_stops_later_transport() {
+        let budget = reconnect_guard_budget(3);
+        let mut admission = AuthDispatchAdmission::new(&budget).unwrap();
+        let mut abort = AbortController::default();
+        let mut transport = CountingReconnectAuthTransport { dispatched: 0 };
+        let protection = ReconnectRemoteProtection {
+            fail_guard: true,
+            guard_checks: Cell::new(0),
+        };
+        let mut executor = GuardedReconnectAuthExecutor {
+            transport: &mut transport,
+            protection: &protection,
+            metrics: AuthRunMetrics::default(),
+            executed: Vec::new(),
+        };
+
+        let result = execute_reconnect_burst(
+            &reconnect_auth_plan(true),
+            &budget,
+            ReconnectBurstExecutionGate {
+                execute_game: true,
+                confirm_game: Some("local"),
+                environment_name: "local",
+                environment_kind: EnvironmentKind::Local,
+            },
+            &mut admission,
+            Instant::now() + Duration::from_secs(1),
+            &mut abort,
+            |_| Ok(()),
+            &mut executor,
+        );
+
+        assert!(matches!(
+            result,
+            Err(loadtest_core::reconnect_burst::ReconnectBurstExecutionError::Executor(_))
+        ));
+        assert_eq!(protection.guard_checks.get(), 1);
+        assert_eq!(executor.transport.dispatched, 0);
+        assert_eq!(executor.executed, vec![ReconnectBurstStep::Login]);
+        assert_eq!(executor.metrics.guard_probe_attempts, 1);
+        assert_eq!(executor.metrics.guard_probe_successes, 0);
+        assert_eq!(abort.reason(), Some(&AbortReason::ProtectionUnknown));
+    }
+
+    #[test]
+    fn reconnect_remote_guard_counts_with_the_primary_auth_admission() {
+        let budget = reconnect_guard_budget(2);
+        let mut admission = AuthDispatchAdmission::new(&budget).unwrap();
+        let mut abort = AbortController::default();
+        let mut transport = CountingReconnectAuthTransport { dispatched: 0 };
+        let protection = ReconnectRemoteProtection {
+            fail_guard: false,
+            guard_checks: Cell::new(0),
+        };
+        let mut executor = GuardedReconnectAuthExecutor {
+            transport: &mut transport,
+            protection: &protection,
+            metrics: AuthRunMetrics::default(),
+            executed: Vec::new(),
+        };
+
+        execute_reconnect_burst(
+            &reconnect_auth_plan(false),
+            &budget,
+            ReconnectBurstExecutionGate {
+                execute_game: true,
+                confirm_game: Some("local"),
+                environment_name: "local",
+                environment_kind: EnvironmentKind::Local,
+            },
+            &mut admission,
+            Instant::now() + Duration::from_secs(1),
+            &mut abort,
+            |_| Ok(()),
+            &mut executor,
+        )
+        .unwrap();
+
+        assert_eq!(protection.guard_checks.get(), 1);
+        assert_eq!(executor.transport.dispatched, 1);
+        assert_eq!(executor.metrics.guard_probe_attempts, 1);
+        assert_eq!(executor.metrics.guard_probe_successes, 1);
+        assert_eq!(executor.metrics.guard_probe_connection_admissions, 1);
+        assert_eq!(executor.metrics.requests, 1);
+        assert_eq!(admission.used_operations(), 2);
     }
 
     #[test]

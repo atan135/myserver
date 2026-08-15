@@ -7,7 +7,7 @@ use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 
-use crate::abort::AbortController;
+use crate::abort::{AbortController, AbortReason};
 use crate::auth_budget::{
     LIVE_GAMEPLAY_POTENTIAL_WRITES_PER_MESSAGE, auth_operation_potential_writes,
 };
@@ -55,6 +55,101 @@ pub struct ReconnectBurstPlan {
     /// admission waits introduced by rate limiting.
     pub total_backoff_ms: u64,
     pub latest_action_ms: u64,
+}
+
+/// Runtime accounting for the guarded live adapter. A reconnect player always
+/// sends login, character-list, and ticket requests; remote profiles add one
+/// target guard probe immediately before each of those dispatches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LiveReconnectBurstBudgetEstimate {
+    pub guard_probe_operations: u64,
+    pub total_operations: u64,
+    pub new_connections: u64,
+    pub business_messages: u64,
+    pub potential_data_writes: u64,
+    pub projected_duration_ms: u64,
+}
+
+pub fn estimate_live_reconnect_burst(
+    plan: &ReconnectBurstPlan,
+    budget: &HardBudget,
+    include_guard_probes: bool,
+) -> Result<LiveReconnectBurstBudgetEstimate, String> {
+    let auth_requests = plan
+        .login_actions
+        .checked_mul(3)
+        .ok_or("live reconnect auth request estimate overflowed")?;
+    let guard_probe_operations = include_guard_probes.then_some(auth_requests).unwrap_or(0);
+    let total_operations = plan
+        .total_operations
+        .checked_add(guard_probe_operations)
+        .ok_or("live reconnect operation estimate overflowed")?;
+    let new_connections = plan
+        .new_connections
+        .checked_add(guard_probe_operations)
+        .ok_or("live reconnect connection estimate overflowed")?;
+    let proxy_connections = plan
+        .new_connections
+        .checked_sub(auth_requests)
+        .ok_or("live reconnect plan is missing auth connection accounting")?;
+    let business_messages = plan
+        .total_operations
+        .checked_sub(proxy_connections)
+        .and_then(|count| count.checked_add(guard_probe_operations))
+        .ok_or("live reconnect message estimate overflowed")?;
+
+    let guard_spacing_ms = rate_spacing_ms(budget.max_new_connections_per_second)
+        .map_err(|error| error.to_string())?
+        .max(
+            rate_spacing_ms(budget.max_business_messages_per_second)
+                .map_err(|error| error.to_string())?,
+        )
+        .max(
+            rate_spacing_ms(budget.max_messages_per_connection_per_second)
+                .map_err(|error| error.to_string())?,
+        );
+    let guard_duration_ms = guard_probe_operations
+        .checked_mul(guard_spacing_ms)
+        .ok_or("live reconnect duration estimate overflowed")?;
+    let projected_duration_ms = plan
+        .latest_action_ms
+        .checked_add(guard_duration_ms)
+        .ok_or("live reconnect duration estimate overflowed")?;
+
+    Ok(LiveReconnectBurstBudgetEstimate {
+        guard_probe_operations,
+        total_operations,
+        new_connections,
+        business_messages,
+        potential_data_writes: plan.potential_data_writes,
+        projected_duration_ms,
+    })
+}
+
+pub fn validate_live_reconnect_burst_budget(
+    estimate: &LiveReconnectBurstBudgetEstimate,
+    budget: &HardBudget,
+) -> Result<(), String> {
+    if estimate.total_operations > budget.max_total_operations {
+        return Err(format!(
+            "live reconnect burst estimates {} operations including {} auth guard probes, exceeding max_total_operations {}",
+            estimate.total_operations, estimate.guard_probe_operations, budget.max_total_operations
+        ));
+    }
+    if estimate.potential_data_writes > budget.max_data_writes {
+        return Err(format!(
+            "live reconnect burst estimates {} potential data writes, exceeding max_data_writes {}",
+            estimate.potential_data_writes, budget.max_data_writes
+        ));
+    }
+    let maximum_duration_ms = budget.max_duration_secs.saturating_mul(1_000);
+    if estimate.projected_duration_ms > maximum_duration_ms {
+        return Err(format!(
+            "live reconnect burst needs up to {}ms including auth guard probes, exceeding max_duration_secs {}",
+            estimate.projected_duration_ms, budget.max_duration_secs
+        ));
+    }
+    Ok(())
 }
 
 /// Explicitly separates plan inspection from live reconnect transport. The
@@ -125,6 +220,31 @@ impl ReconnectBurstAdmission<'_> {
         )
     }
 
+    /// A remote auth guard has the same connection and message accounting as
+    /// an auth request, but reserves no mutable data-write budget.
+    pub fn admit_guard_probe(&mut self) -> Result<(), ReconnectBurstExecutionError> {
+        let result = {
+            let admission = &mut *self.admission;
+            let deadline = self.deadline;
+            let abort = &mut *self.abort;
+            let checkpoint = &mut *self.checkpoint;
+            admit_reconnect(admission.admit_guard_probe(deadline, || {
+                checkpoint(abort)?;
+                ensure_not_stopped(abort)
+            }))
+        };
+        match &result {
+            Err(ReconnectBurstExecutionError::Admission(AuthAdmissionError::BudgetExceeded(_))) => {
+                self.abort.request(AbortReason::BudgetExceeded);
+            }
+            Err(ReconnectBurstExecutionError::Admission(AuthAdmissionError::DeadlineExceeded)) => {
+                self.abort.request(AbortReason::Deadline);
+            }
+            _ => {}
+        }
+        result
+    }
+
     pub fn admit_game_connection(&mut self) -> Result<(), ReconnectBurstExecutionError> {
         admit_reconnect(
             self.admission
@@ -159,6 +279,10 @@ impl ReconnectBurstAdmission<'_> {
 
     pub fn should_stop(&self) -> bool {
         self.abort.should_stop_new_sessions()
+    }
+
+    pub fn mark_protection_failed(&mut self) {
+        self.abort.check_protection(false);
     }
 }
 
@@ -635,6 +759,44 @@ mod tests {
                     && action.step == ReconnectBurstStep::DisconnectExisting
             }));
         }
+    }
+
+    #[test]
+    fn live_remote_estimate_reserves_a_guard_for_every_reconnect_auth_request() {
+        let plan = plan_reconnect_burst(
+            ReconnectBurstSpec {
+                virtual_players: 1,
+                reconnect_attempts_per_player: 1,
+                start_ms: 0,
+            },
+            &budget(),
+            policy(),
+        )
+        .unwrap();
+
+        let local = estimate_live_reconnect_burst(&plan, &budget(), false).unwrap();
+        assert_eq!(local.guard_probe_operations, 0);
+        assert_eq!(local.total_operations, 9);
+        assert_eq!(local.new_connections, 5);
+        assert_eq!(local.business_messages, 7);
+
+        let remote = estimate_live_reconnect_burst(&plan, &budget(), true).unwrap();
+        assert_eq!(remote.guard_probe_operations, 3);
+        assert_eq!(remote.total_operations, 12);
+        assert_eq!(remote.new_connections, 8);
+        assert_eq!(remote.business_messages, 10);
+        assert_eq!(remote.potential_data_writes, 12);
+        assert!(remote.projected_duration_ms > plan.latest_action_ms);
+
+        let constrained = HardBudget {
+            max_total_operations: 11,
+            ..budget()
+        };
+        assert!(
+            validate_live_reconnect_burst_budget(&remote, &constrained)
+                .unwrap_err()
+                .contains("auth guard probes")
+        );
     }
 
     #[test]
