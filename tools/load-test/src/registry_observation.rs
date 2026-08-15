@@ -11,7 +11,8 @@ use std::pin::Pin;
 use redis::{AsyncCommands, ErrorKind as RedisErrorKind, RedisError};
 use serde::{Deserialize, Serialize};
 use service_registry::{
-    REGISTRY_HEARTBEAT_TTL_SECONDS, SERVICE_INSTANCE_SCHEMA_VERSION, ServiceInstance,
+    PROXY_ROUTE_OBSERVATION_TTL_SECS, ProxyRouteObservation, REGISTRY_HEARTBEAT_TTL_SECONDS,
+    SERVICE_INSTANCE_SCHEMA_VERSION, ServiceInstance, proxy_route_observation_key,
 };
 
 use crate::config::RegistryObservationConfig;
@@ -23,6 +24,24 @@ pub const MAX_REGISTRY_INSTANCES_PER_SERVICE: usize = 64;
 pub const MAX_METRIC_FIELDS_PER_INSTANCE: usize = 128;
 pub const MIN_REGISTRY_RECHECK_INTERVAL_MS: u64 = 100;
 pub const MAX_REGISTRY_RECHECK_INTERVAL_MS: u64 = 30_000;
+/// The exact Redis command vocabulary required by the observer. Deployment
+/// ACLs must not grant SCAN, KEYS, write commands, or route-store access.
+pub const REGISTRY_READONLY_ACL_COMMANDS: [&str; 6] =
+    ["zrange", "hget", "pttl", "zrangebyscore", "hgetall", "get"];
+
+pub fn registry_readonly_acl_key_patterns(
+    registry_key_prefix: &str,
+    metrics_key_prefix: &str,
+) -> [String; 6] {
+    [
+        format!("{registry_key_prefix}service:*:instance-index"),
+        format!("{registry_key_prefix}service:*:instances:*"),
+        format!("{registry_key_prefix}heartbeat:*"),
+        format!("{metrics_key_prefix}metrics:v2:latest-index:*"),
+        format!("{metrics_key_prefix}metrics:v2:latest:*"),
+        format!("{registry_key_prefix}route-observation:game-proxy:*"),
+    ]
+}
 
 /// Commands issued by the read-only adapter. These are deliberately a fixed
 /// vocabulary so reports cannot contain a key, identifier, or command input.
@@ -33,6 +52,7 @@ pub enum RegistryRedisCommand {
     Pttl,
     Zrangebyscore,
     Hgetall,
+    Get,
 }
 
 impl RegistryRedisCommand {
@@ -43,6 +63,7 @@ impl RegistryRedisCommand {
             Self::Pttl => "pttl",
             Self::Zrangebyscore => "zrangebyscore",
             Self::Hgetall => "hgetall",
+            Self::Get => "get",
         }
     }
 }
@@ -287,11 +308,14 @@ pub struct StaleCleanupObservation {
 #[serde(deny_unknown_fields)]
 pub struct RouteConvergenceObservation {
     pub source_service: ObservedService,
+    pub source_instance_id: String,
     pub target_service: ObservedService,
     pub expected_instance_ids: BTreeSet<String>,
     pub routed_instance_ids: BTreeSet<String>,
-    pub registry_changed_at_unix_ms: u64,
-    pub observed_at_unix_ms: u64,
+    pub projection_revision: u64,
+    pub projection_observed_at_unix_ms: u64,
+    pub projection_ttl_secs: u64,
+    pub projection_expires_at_unix_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -492,6 +516,13 @@ impl RedisReadonlyRegistryTransport {
             }
         }
 
+        let routes = collect_proxy_route_observations(
+            &mut connection,
+            &self.registry_key_prefix,
+            &instances,
+        )
+        .await?;
+
         Ok(RegistryReadResponse {
             run_id: request.run_id.clone(),
             window_start_unix_ms: request.window_start_unix_ms,
@@ -500,13 +531,88 @@ impl RedisReadonlyRegistryTransport {
             collected_at_unix_ms: unix_ms(),
             instances,
             stale_cleanups,
-            routes: Vec::new(),
+            routes,
             instance_metrics,
             // PostgreSQL/NATS/host read models are intentionally not guessed
             // from registry keys. A later read-only collector supplies them.
             dependency_metrics: Vec::new(),
         })
     }
+}
+
+async fn collect_proxy_route_observations(
+    connection: &mut redis::aio::MultiplexedConnection,
+    registry_key_prefix: &str,
+    instances: &[RegistryInstanceObservation],
+) -> Result<Vec<RouteConvergenceObservation>, RegistryObservationError> {
+    let expected_instance_ids = active_instance_ids(instances, ObservedService::GameServer);
+    let proxy_instance_ids = active_instance_ids(instances, ObservedService::GameProxy);
+    let mut routes = Vec::with_capacity(proxy_instance_ids.len());
+
+    for proxy_instance_id in proxy_instance_ids {
+        let key = proxy_route_observation_key(registry_key_prefix, &proxy_instance_id);
+        let payload: Option<String> = connection
+            .get(key)
+            .await
+            .map_err(|error| registry_redis_command_error(RegistryRedisCommand::Get, error))?;
+        let Some(payload) = payload else { continue };
+        routes.push(project_proxy_route_observation(
+            proxy_instance_id,
+            expected_instance_ids.clone(),
+            &payload,
+        )?);
+    }
+    Ok(routes)
+}
+
+fn project_proxy_route_observation(
+    proxy_instance_id: String,
+    expected_instance_ids: BTreeSet<String>,
+    payload: &str,
+) -> Result<RouteConvergenceObservation, RegistryObservationError> {
+    let projection = serde_json::from_str::<ProxyRouteObservation>(payload)
+        .map_err(|_| RegistryObservationError::MalformedRouteObservation)?;
+    projection
+        .validate()
+        .map_err(|_| RegistryObservationError::MalformedRouteObservation)?;
+    if projection.proxy_instance_id != proxy_instance_id
+        || projection.target_service != ObservedService::GameServer.registry_name()
+    {
+        return Err(RegistryObservationError::MalformedRouteObservation);
+    }
+    Ok(RouteConvergenceObservation {
+        source_service: ObservedService::GameProxy,
+        source_instance_id: proxy_instance_id,
+        target_service: ObservedService::GameServer,
+        expected_instance_ids,
+        routed_instance_ids: projection
+            .eligible_upstream_instance_ids
+            .into_iter()
+            .collect(),
+        projection_revision: projection.revision,
+        projection_observed_at_unix_ms: projection.observed_at_unix_ms,
+        projection_ttl_secs: projection.ttl_secs,
+        projection_expires_at_unix_ms: projection.expires_at_unix_ms,
+    })
+}
+
+fn active_instance_ids(
+    instances: &[RegistryInstanceObservation],
+    service: ObservedService,
+) -> BTreeSet<String> {
+    instances
+        .iter()
+        .filter(|instance| {
+            instance.service == service
+                && instance.healthy
+                && instance.weight > 0
+                && instance.heartbeat_ttl_ms > 0
+                && instance.endpoints.iter().any(|endpoint| {
+                    endpoint.name == service.required_endpoint() && endpoint.healthy
+                })
+        })
+        .map(|instance| instance.instance_id.clone())
+        .collect()
 }
 
 impl RegistryReadTransport for RedisReadonlyRegistryTransport {
@@ -773,11 +879,24 @@ pub fn evaluate_registry_observation(
         }
     }
 
+    let active_proxy_ids = active_by_service
+        .get(&ObservedService::GameProxy)
+        .cloned()
+        .unwrap_or_default();
+    let mut projected_proxy_ids = BTreeSet::new();
     for route in &response.routes {
         if route.source_service != ObservedService::GameProxy
+            || route.source_instance_id.trim().is_empty()
             || route.target_service != ObservedService::GameServer
-            || route.registry_changed_at_unix_ms > route.observed_at_unix_ms
-            || route.observed_at_unix_ms > response.collected_at_unix_ms
+            || route.projection_revision == 0
+            || route.projection_observed_at_unix_ms == 0
+            || route.projection_ttl_secs != PROXY_ROUTE_OBSERVATION_TTL_SECS
+            || route.projection_expires_at_unix_ms
+                != route
+                    .projection_observed_at_unix_ms
+                    .saturating_add(route.projection_ttl_secs.saturating_mul(1_000))
+            || route.projection_observed_at_unix_ms > response.collected_at_unix_ms
+            || !projected_proxy_ids.insert(route.source_instance_id.clone())
         {
             return Err(RegistryObservationError::MalformedRouteObservation);
         }
@@ -787,10 +906,11 @@ pub fn evaluate_registry_observation(
             .unwrap_or_default();
         if route.expected_instance_ids != expected
             || route.routed_instance_ids != expected
-            || route
-                .observed_at_unix_ms
-                .saturating_sub(route.registry_changed_at_unix_ms)
-                > request.config.max_discovery_latency_ms
+            || route.projection_expires_at_unix_ms <= response.collected_at_unix_ms
+            || response
+                .collected_at_unix_ms
+                .saturating_sub(route.projection_observed_at_unix_ms)
+                > request.config.max_heartbeat_age_ms
         {
             holes.insert(hole(
                 ObservationHoleKind::RegistryRouteUnconverged,
@@ -799,11 +919,7 @@ pub fn evaluate_registry_observation(
             ));
         }
     }
-    if !active_by_service
-        .get(&ObservedService::GameServer)
-        .is_none_or(BTreeSet::is_empty)
-        && response.routes.is_empty()
-    {
+    if !active_proxy_ids.is_empty() && projected_proxy_ids != active_proxy_ids {
         holes.insert(hole(
             ObservationHoleKind::RegistryRouteUnconverged,
             Some(ObservedService::GameServer),
@@ -1302,11 +1418,14 @@ mod tests {
             }],
             routes: vec![RouteConvergenceObservation {
                 source_service: ObservedService::GameProxy,
+                source_instance_id: "game-proxy".into(),
                 target_service: ObservedService::GameServer,
                 expected_instance_ids: ["game-server".into()].into(),
                 routed_instance_ids: ["game-server".into()].into(),
-                registry_changed_at_unix_ms: 19_900,
-                observed_at_unix_ms: 20_000,
+                projection_revision: 1,
+                projection_observed_at_unix_ms: 20_000,
+                projection_ttl_secs: PROXY_ROUTE_OBSERVATION_TTL_SECS,
+                projection_expires_at_unix_ms: 50_000,
             }],
             instance_metrics,
             dependency_metrics,
@@ -1326,6 +1445,106 @@ mod tests {
             instance_metrics: Vec::new(),
             dependency_metrics: Vec::new(),
         }
+    }
+
+    #[test]
+    fn readonly_acl_allows_exact_route_projection_get_without_route_store_access() {
+        assert_eq!(
+            REGISTRY_READONLY_ACL_COMMANDS,
+            ["zrange", "hget", "pttl", "zrangebyscore", "hgetall", "get"]
+        );
+        let patterns = registry_readonly_acl_key_patterns("registry:", "metrics:");
+        assert!(patterns.contains(&"registry:route-observation:game-proxy:*".into()));
+        assert!(
+            patterns
+                .iter()
+                .all(|pattern| !pattern.contains("route-store"))
+        );
+        assert!(
+            REGISTRY_READONLY_ACL_COMMANDS
+                .iter()
+                .all(|command| !matches!(*command, "set" | "del" | "scan" | "keys"))
+        );
+    }
+
+    #[test]
+    fn projection_adapter_accepts_only_sanitized_schema_and_redacts_rejections() {
+        let projection = ProxyRouteObservation::new(
+            "game-proxy",
+            "game-server",
+            ["game-server".into()],
+            3,
+            20_000,
+        )
+        .unwrap();
+        let route = project_proxy_route_observation(
+            "game-proxy".into(),
+            ["game-server".into()].into(),
+            &serde_json::to_string(&projection).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(route.routed_instance_ids, ["game-server".into()].into());
+        assert_eq!(route.projection_revision, 3);
+
+        let mut invalid = serde_json::to_value(projection).unwrap();
+        invalid
+            .as_object_mut()
+            .unwrap()
+            .insert("socket".into(), serde_json::json!("private.sock"));
+        let error = project_proxy_route_observation(
+            "game-proxy".into(),
+            ["game-server".into()].into(),
+            &serde_json::to_string(&invalid).unwrap(),
+        )
+        .unwrap_err();
+        assert_eq!(error, RegistryObservationError::MalformedRouteObservation);
+        let report_text = serde_json::to_string(&serde_json::json!({
+            "category": error.report_category(),
+            "message": error.report_message(),
+            "context": error.report_context(),
+        }))
+        .unwrap();
+        assert!(!report_text.contains("private.sock"));
+        assert!(!report_text.contains("socket"));
+    }
+
+    #[test]
+    fn each_active_proxy_requires_a_fresh_projection() {
+        let observation_request = request();
+        let mut missing = response();
+        missing.routes.clear();
+        let report = evaluate_registry_observation(&observation_request, missing, 20_200).unwrap();
+        assert!(report.holes.contains(&hole(
+            ObservationHoleKind::RegistryRouteUnconverged,
+            Some(ObservedService::GameServer),
+            None,
+        )));
+
+        let mut expired_request = request();
+        expired_request.window_start_unix_ms = 40_000;
+        expired_request.window_end_unix_ms = 50_000;
+        expired_request.config.max_heartbeat_age_ms = 31_000;
+        let mut expired = response();
+        expired.window_start_unix_ms = 40_000;
+        expired.window_end_unix_ms = 50_000;
+        expired.collection_started_unix_ms = 50_000;
+        expired.collected_at_unix_ms = 50_001;
+        for instance in &mut expired.instances {
+            instance.heartbeat_observed_at_unix_ms = 50_000;
+        }
+        for metrics in &mut expired.instance_metrics {
+            metrics.reported_at_unix_ms = 50_000;
+            metrics.received_at_unix_ms = 50_000;
+        }
+        for metrics in &mut expired.dependency_metrics {
+            metrics.reported_at_unix_ms = 50_000;
+        }
+        let report = evaluate_registry_observation(&expired_request, expired, 50_001).unwrap();
+        assert!(report.holes.contains(&hole(
+            ObservationHoleKind::RegistryRouteUnconverged,
+            Some(ObservedService::GameServer),
+            None,
+        )));
     }
 
     #[test]
