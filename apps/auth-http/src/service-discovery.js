@@ -54,7 +54,7 @@ export class ServiceDiscovery {
       game: createGameService(this.config),
       chat: this.config.publicChatDescriptor || null,
       mail: this.config.publicMailDescriptor || this.config.localMailDescriptor || null,
-      announce: null
+      announce: this.config.publicAnnounceDescriptor || null
     };
 
     if (!this.config.registryDiscoveryEnabled) {
@@ -94,7 +94,9 @@ export class ServiceDiscovery {
           this.config.publicMailDescriptor
             ? Promise.resolve(null)
             : this.discoverOneEndpoint("mail-service", "http", "client"),
-          this.discoverOneEndpoint("announce-service", "http", "client")
+          this.config.publicAnnounceDescriptor
+            ? Promise.resolve(null)
+            : this.discoverOneEndpoint("announce-service", "http", "client")
         ]
       : [Promise.resolve(null), Promise.resolve(null), Promise.resolve(null)];
 
@@ -130,7 +132,9 @@ export class ServiceDiscovery {
     if (!services.mail) {
       services.mail = createEndpointDescriptor(mailEndpoint, "http");
     }
-    services.announce = createEndpointDescriptor(announceEndpoint, "http");
+    if (!services.announce) {
+      services.announce = createEndpointDescriptor(announceEndpoint, "http");
+    }
     return services;
   }
 

@@ -23,7 +23,11 @@ const CLIENT_SERVICES = {
     port: 443,
     protocol: "https"
   },
-  announce: null
+  announce: {
+    host: "api.bevy.zergzerg.cn",
+    port: 443,
+    protocol: "https"
+  }
 };
 
 const CHARACTER = {
@@ -60,7 +64,7 @@ function publicServiceAuth() {
   };
 }
 
-test("login response returns configured public chat and mail descriptors", async () => {
+test("login response returns configured public chat, mail, and announcement descriptors", async () => {
   const authService = new AuthService(
     { localDiscoveryFallbackEnabled: false },
     {},
@@ -78,9 +82,10 @@ test("login response returns configured public chat and mail descriptors", async
   assert.deepEqual(result.services, CLIENT_SERVICES);
   assert.deepEqual(result.services.chat, CLIENT_SERVICES.chat);
   assert.deepEqual(result.services.mail, CLIENT_SERVICES.mail);
+  assert.deepEqual(result.services.announce, CLIENT_SERVICES.announce);
 });
 
-test("character selection response keeps configured public chat and mail descriptors", async () => {
+test("character selection response keeps configured public chat, mail, and announcement descriptors", async () => {
   const authStore = {
     async getSessionByAccessToken() {
       return { playerId: CHARACTER.accountPlayerId };
@@ -109,9 +114,10 @@ test("character selection response keeps configured public chat and mail descrip
   assert.deepEqual(result.services, CLIENT_SERVICES);
   assert.deepEqual(result.services.chat, CLIENT_SERVICES.chat);
   assert.deepEqual(result.services.mail, CLIENT_SERVICES.mail);
+  assert.deepEqual(result.services.announce, CLIENT_SERVICES.announce);
 });
 
-test("game-ticket issue response keeps configured public chat and mail descriptors", async () => {
+test("game-ticket issue response keeps configured public chat, mail, and announcement descriptors", async () => {
   const authStore = {
     async getSessionByAccessToken() {
       return { playerId: CHARACTER.accountPlayerId };
@@ -138,4 +144,5 @@ test("game-ticket issue response keeps configured public chat and mail descripto
   assert.deepEqual(result.services, CLIENT_SERVICES);
   assert.deepEqual(result.services.chat, CLIENT_SERVICES.chat);
   assert.deepEqual(result.services.mail, CLIENT_SERVICES.mail);
+  assert.deepEqual(result.services.announce, CLIENT_SERVICES.announce);
 });

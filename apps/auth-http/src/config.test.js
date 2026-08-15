@@ -13,6 +13,8 @@ const CONFIG_ENV_KEYS = [
   "AUTH_PUBLIC_CHAT_PORT",
   "AUTH_PUBLIC_MAIL_HOST",
   "AUTH_PUBLIC_MAIL_PORT",
+  "AUTH_PUBLIC_ANNOUNCE_HOST",
+  "AUTH_PUBLIC_ANNOUNCE_PORT",
   "AUTH_LOCAL_MAIL_HTTP_HOST",
   "AUTH_LOCAL_MAIL_HTTP_PORT",
   "AUTH_REGISTER_REQUIRE_REVIEW",
@@ -225,6 +227,23 @@ test("auth-http builds a stable public HTTPS mail descriptor from deployment con
   });
 });
 
+test("auth-http builds a stable public HTTPS announcement descriptor from deployment config", async () => {
+  await withEnv({
+    NODE_ENV: "production",
+    REGISTRY_ENABLED: "true",
+    TICKET_SECRET: "prod-ticket-secret-with-enough-entropy",
+    GAME_ADMIN_TOKEN: "prod-game-admin-token-with-enough-entropy",
+    INTERNAL_API_TOKEN: "prod-internal-api-token-with-enough-entropy",
+    AUTH_PUBLIC_ANNOUNCE_HOST: "api.bevy.zergzerg.cn"
+  }, (config) => {
+    assert.deepEqual(config.publicAnnounceDescriptor, {
+      host: "api.bevy.zergzerg.cn",
+      port: 443,
+      protocol: "https"
+    });
+  });
+});
+
 test("auth-http builds an explicit local HTTP mail descriptor outside production", async () => {
   await withEnv({
     NODE_ENV: "development",
@@ -295,6 +314,18 @@ test("auth-http leaves the public mail descriptor unset in production when deplo
   });
 });
 
+test("auth-http leaves the public announcement descriptor unset in production when deployment config is absent", async () => {
+  await withEnv({
+    NODE_ENV: "production",
+    REGISTRY_ENABLED: "true",
+    TICKET_SECRET: "prod-ticket-secret-with-enough-entropy",
+    GAME_ADMIN_TOKEN: "prod-game-admin-token-with-enough-entropy",
+    INTERNAL_API_TOKEN: "prod-internal-api-token-with-enough-entropy"
+  }, (config) => {
+    assert.equal(config.publicAnnounceDescriptor, null);
+  });
+});
+
 test("auth-http rejects malformed public chat deployment config", async () => {
   await assert.rejects(
     () => withEnv({ AUTH_PUBLIC_CHAT_HOST: "wss://chat.game.example" }, () => {}),
@@ -319,6 +350,14 @@ test("auth-http rejects malformed public chat deployment config", async () => {
   await assert.rejects(
     () => withEnv({ AUTH_PUBLIC_MAIL_HOST: "api.game.example", AUTH_PUBLIC_MAIL_PORT: "443oops" }, () => {}),
     /AUTH_PUBLIC_MAIL_PORT must be an integer/
+  );
+  await assert.rejects(
+    () => withEnv({ AUTH_PUBLIC_ANNOUNCE_HOST: "https://api.game.example" }, () => {}),
+    /AUTH_PUBLIC_ANNOUNCE_HOST must be a hostname/
+  );
+  await assert.rejects(
+    () => withEnv({ AUTH_PUBLIC_ANNOUNCE_HOST: "api.game.example", AUTH_PUBLIC_ANNOUNCE_PORT: "443oops" }, () => {}),
+    /AUTH_PUBLIC_ANNOUNCE_PORT must be an integer/
   );
 });
 

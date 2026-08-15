@@ -351,6 +351,8 @@ services:
       AUTH_PUBLIC_CHAT_PORT: "443"
       AUTH_PUBLIC_MAIL_HOST: ${CADDY_AUTH_HOST:?set CADDY_AUTH_HOST}
       AUTH_PUBLIC_MAIL_PORT: "443"
+      AUTH_PUBLIC_ANNOUNCE_HOST: ${CADDY_AUTH_HOST:?set CADDY_AUTH_HOST}
+      AUTH_PUBLIC_ANNOUNCE_PORT: "443"
     depends_on:
       postgres:
         condition: service_healthy

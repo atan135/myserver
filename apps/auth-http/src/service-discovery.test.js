@@ -81,6 +81,7 @@ function createConfig(overrides = {}) {
     authExposeInternalServiceEndpoints: false,
     publicChatDescriptor: null,
     publicMailDescriptor: null,
+    publicAnnounceDescriptor: null,
     localMailDescriptor: null,
     ...overrides
   };
@@ -334,7 +335,7 @@ test("ServiceDiscovery can expose named internal service endpoints only when exp
   });
 });
 
-test("ServiceDiscovery keeps explicit public chat and mail descriptors over internal discovery", async () => {
+test("ServiceDiscovery keeps explicit public side-service descriptors over internal discovery", async () => {
   const redis = createRedis({
     "game-proxy": [
       {
@@ -395,6 +396,26 @@ test("ServiceDiscovery keeps explicit public chat and mail descriptors over inte
           }
         ]
       }
+    ],
+    "announce-service": [
+      {
+        id: "announce-a",
+        name: "announce-service",
+        host: "10.0.0.4",
+        port: 9004,
+        endpoints: [
+          {
+            name: "http",
+            protocol: "http",
+            host: "announce-service",
+            port: 9004,
+            socket: "",
+            visibility: "internal",
+            metadata: {},
+            healthy: true
+          }
+        ]
+      }
     ]
   });
   const discovery = new ServiceDiscovery(
@@ -408,6 +429,11 @@ test("ServiceDiscovery keeps explicit public chat and mail descriptors over inte
         protocol: "wss"
       },
       publicMailDescriptor: {
+        host: "api.bevy.zergzerg.cn",
+        port: 443,
+        protocol: "https"
+      },
+      publicAnnounceDescriptor: {
         host: "api.bevy.zergzerg.cn",
         port: 443,
         protocol: "https"
@@ -427,7 +453,34 @@ test("ServiceDiscovery keeps explicit public chat and mail descriptors over inte
     port: 443,
     protocol: "https"
   });
-  assert.equal(redis.stats.indexLookupCount, 2);
+  assert.deepEqual(services.announce, {
+    host: "api.bevy.zergzerg.cn",
+    port: 443,
+    protocol: "https"
+  });
+  assert.equal(redis.stats.indexLookupCount, 1);
+});
+
+test("ServiceDiscovery returns a configured public announcement descriptor without registry discovery", async () => {
+  const discovery = new ServiceDiscovery(
+    createRedis({}),
+    createConfig({
+      registryDiscoveryEnabled: false,
+      publicAnnounceDescriptor: {
+        host: "api.bevy.zergzerg.cn",
+        port: 443,
+        protocol: "https"
+      }
+    })
+  );
+
+  const services = await discovery.discoverClientServices();
+
+  assert.deepEqual(services.announce, {
+    host: "api.bevy.zergzerg.cn",
+    port: 443,
+    protocol: "https"
+  });
 });
 
 test("ServiceDiscovery returns a configured public mail descriptor without registry discovery", async () => {

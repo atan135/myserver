@@ -39,8 +39,8 @@
         Referrer-Policy no-referrer
     }
 
-    # Auth and player mail share this public hostname. Do not record an URI
-    # (which includes query strings) or any credential-bearing headers.
+    # Auth and player mail/announcement reads share this public hostname. Do
+    # not record an URI (which includes query strings) or credentials.
     log {
         output stdout
         format filter {
@@ -50,6 +50,7 @@
                 request>headers>Authorization delete
                 request>headers>Cookie delete
                 request>headers>X-Game-Ticket delete
+                request>headers>X-Read-Token delete
                 request>headers>X-Service-Token delete
                 request>headers>X-Admin-Token delete
                 request>headers>X-Mail-Operations-Token delete
@@ -60,8 +61,8 @@
 
     log_append request_id {http.request.uuid}
 
-    # route preserves the following order: all mail-shaped requests terminate
-    # locally or at mail-service and can never fall through to auth-http.
+    # route preserves the following order: all player-service-shaped requests
+    # terminate locally or at their service and never fall through to auth-http.
     route {
         @internal_api path /api/v1/internal /api/v1/internal/*
         respond @internal_api 404
@@ -147,6 +148,80 @@
             }
         }
 
+        @announce_namespace path /api/v1/announcements*
+        handle @announce_namespace {
+            route {
+                # `orig_uri` is deliberately used for raw escaped-path checks.
+                # Exact path matchers work on decoded paths, so checking only
+                # them would allow encoded slash, dot, or backslash variants.
+                @announce_uri_too_long expression `size({http.request.orig_uri}) > 2048`
+                respond @announce_uri_too_long 414
+
+                @announce_unsafe_path expression `{http.request.orig_uri}.matches('(?i).*(?:%25)*(?:%2f|%5c|%2e).*') || {http.request.orig_uri.path}.contains("\\") || {http.request.orig_uri.path}.contains(";") || {http.request.orig_uri.path}.contains("//") || {http.request.orig_uri.path}.contains("/./") || {http.request.orig_uri.path}.contains("/../")`
+                respond @announce_unsafe_path 404
+
+                @announce_x_http_method_override header X-HTTP-Method-Override *
+                respond @announce_x_http_method_override 404
+                @announce_x_method_override header X-Method-Override *
+                respond @announce_x_method_override 404
+                @announce_query_method_override query _method=*
+                respond @announce_query_method_override 404
+
+                # The public player contract exposes only announcement reads.
+                # Keep write verbs local even when callers omit a ticket.
+                @announce_known_path_wrong_method expression `(path_regexp('^/api/v1/announcements$') && !method('GET')) || (path_regexp('^/api/v1/announcements/[A-Za-z0-9:_-]{1,64}$') && !method('GET'))`
+                respond @announce_known_path_wrong_method 405
+                @announce_unknown_path expression `!(path_regexp('^/api/v1/announcements$') || path_regexp('^/api/v1/announcements/[A-Za-z0-9:_-]{1,64}$'))`
+                respond @announce_unknown_path 404
+
+                # Reads never carry a body. Go's HTTP parser rejects duplicate
+                # Host headers before Caddy runs; reject all other singleton
+                # duplicates that affect request attribution or framing.
+                @announce_transfer_encoding header Transfer-Encoding *
+                respond @announce_transfer_encoding 400
+                @announce_repeated_singletons expression `{http.request.header.Content-Length}.contains(",") || {http.request.header.X-Request-ID}.contains(",") || {http.request.header.X-Forwarded-For}.contains(",") || {http.request.header.X-Forwarded-Proto}.contains(",") || {http.request.header.X-Forwarded-Host}.contains(",") || {http.request.header.X-Real-IP}.contains(",")`
+                respond @announce_repeated_singletons 400
+
+                # Player reads accept exactly one compact game ticket. Read,
+                # service, admin, bearer, proxy, and cookie credentials are
+                # deliberately unavailable on this public route.
+                @announce_missing_ticket expression `size({http.request.header.X-Game-Ticket}) == 0`
+                respond @announce_missing_ticket 401
+                @announce_invalid_ticket expression `size({http.request.header.X-Game-Ticket}) > 4096 || {http.request.header.X-Game-Ticket}.contains(",") || !{http.request.header.X-Game-Ticket}.matches("^[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+$")`
+                respond @announce_invalid_ticket 401
+                @announce_conflicting_credentials expression `size({http.request.header.Authorization}) > 0 || size({http.request.header.Proxy-Authorization}) > 0 || size({http.request.header.X-Read-Token}) > 0 || size({http.request.header.X-Service-Token}) > 0 || size({http.request.header.X-Admin-Token}) > 0 || size({http.request.header.Cookie}) > 0`
+                respond @announce_conflicting_credentials 400
+
+                @announce_read_with_body expression `method('GET') && size({http.request.header.Content-Length}) > 0 && {http.request.header.Content-Length} != "0"`
+                respond @announce_read_with_body 400
+                request_body {
+                    max_size 1024
+                }
+
+                @announce_player_route expression `(method('GET') && path_regexp('^/api/v1/announcements$')) || (method('GET') && path_regexp('^/api/v1/announcements/[A-Za-z0-9:_-]{1,64}$'))`
+                handle @announce_player_route {
+                    reverse_proxy announce-service:9004 {
+                        # Replace every client-supplied proxy/request-id value
+                        # at the public edge before announce-service evaluates
+                        # its trusted-proxy policy.
+                        header_up X-Forwarded-For {http.request.remote.host}
+                        header_up X-Forwarded-Proto https
+                        header_up X-Forwarded-Host {http.request.host}
+                        header_up X-Real-IP {http.request.remote.host}
+                        header_up X-Request-ID {http.request.uuid}
+                        header_down Cache-Control "private, no-store"
+                        transport http {
+                            max_response_header 16KB
+                            dial_timeout 3s
+                            response_header_timeout 5s
+                            read_timeout 12s
+                            write_timeout 5s
+                        }
+                    }
+                }
+            }
+        }
+
         handle {
             # Mail is intentionally outside this handler so player-private
             # responses cannot be Caddy-compressed.
@@ -160,6 +235,8 @@
     handle_errors {
         @mail_upstream_error path /api/v1/mails*
         respond @mail_upstream_error 503
+        @announce_upstream_error path /api/v1/announcements*
+        respond @announce_upstream_error 503
     }
 }
 

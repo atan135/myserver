@@ -115,6 +115,15 @@ function parsePublicMailDescriptor() {
   });
 }
 
+function parsePublicAnnounceDescriptor() {
+  return parsePublicServiceDescriptor({
+    hostEnvName: "AUTH_PUBLIC_ANNOUNCE_HOST",
+    portEnvName: "AUTH_PUBLIC_ANNOUNCE_PORT",
+    protocol: "https",
+    serviceName: "announce"
+  });
+}
+
 function parseLocalMailDescriptor() {
   const hostEnvName = "AUTH_LOCAL_MAIL_HTTP_HOST";
   const portEnvName = "AUTH_LOCAL_MAIL_HTTP_PORT";
@@ -467,6 +476,7 @@ export function getConfig() {
       parseBoolean(process.env.AUTH_EXPOSE_INTERNAL_SERVICE_ENDPOINTS, false),
     publicChatDescriptor: parsePublicChatDescriptor(),
     publicMailDescriptor: parsePublicMailDescriptor(),
+    publicAnnounceDescriptor: parsePublicAnnounceDescriptor(),
     localMailDescriptor: parseLocalMailDescriptor(),
     authRequireTls: parseBoolean(process.env.AUTH_REQUIRE_TLS, isProductionEnv()),
     trustProxy: parseBoolean(process.env.TRUST_PROXY, false),
