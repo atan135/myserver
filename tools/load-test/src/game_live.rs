@@ -6,7 +6,7 @@
 //! future KCP transport must drive.
 
 use std::fmt::Display;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use game_protocol::{MessageType, Packet, read_packet};
 use prost::Message;
@@ -23,7 +23,7 @@ use crate::gameplay::{
     room_reconnect_step,
 };
 use crate::pb::{
-    MatchEventPush, MatchEventStreamReq, MatchStartReq, MatchStatusReq, PlayerInputReq,
+    MatchEventPush, MatchEventStreamReq, MatchStartReq, MatchStatusReq, PingRes, PlayerInputReq,
     PlayerInputRes, RoomJoinReq, RoomJoinRes, RoomLeaveRes, RoomReadyRes, RoomReconnectReq,
     RoomReconnectRes, RoomStartRes,
 };
@@ -88,6 +88,8 @@ pub enum GameLiveError {
     Transport(&'static str),
     #[error("system clock is unavailable for live gameplay timestamps")]
     Clock,
+    #[error("live gameplay server clock calibration is invalid: {0}")]
+    ServerClockCalibration(&'static str),
     #[error("game session lifecycle failed")]
     Session(#[source] VirtualPlayerError),
     #[error("gameplay flow failed: {0}")]
@@ -390,6 +392,60 @@ struct PreparedTwoPlayerGameplay {
 const LIVE_INPUT_DELAY_FRAMES: u32 = 2;
 const LIVE_FRAME_DRAIN_MAX_PACKETS: usize = 64;
 const LIVE_FRAME_DRAIN_IDLE_MS: u64 = 1;
+const MAX_SERVER_CLOCK_CALIBRATION_AGE: Duration = Duration::from_secs(60);
+
+#[derive(Debug, Clone, Copy)]
+struct ServerClockCalibration {
+    server_time_ms: i64,
+    observed_at: Instant,
+}
+
+impl ServerClockCalibration {
+    fn from_validated_ping(
+        server_time_ms: i64,
+        observed_at: Instant,
+    ) -> Result<Self, GameLiveError> {
+        if server_time_ms <= 0 {
+            return Err(GameLiveError::ServerClockCalibration(
+                "PingRes server_time must be positive",
+            ));
+        }
+        Ok(Self {
+            server_time_ms,
+            observed_at,
+        })
+    }
+
+    fn timestamp_ms(&self) -> Result<i64, GameLiveError> {
+        self.timestamp_ms_at(Instant::now())
+    }
+
+    fn timestamp_ms_at(&self, now: Instant) -> Result<i64, GameLiveError> {
+        let elapsed = now.checked_duration_since(self.observed_at).ok_or(
+            GameLiveError::ServerClockCalibration("monotonic clock moved backwards"),
+        )?;
+        if elapsed > MAX_SERVER_CLOCK_CALIBRATION_AGE {
+            return Err(GameLiveError::ServerClockCalibration(
+                "server clock calibration expired",
+            ));
+        }
+        let elapsed_ms: i64 = elapsed
+            .as_millis()
+            .try_into()
+            .map_err(|_| GameLiveError::ServerClockCalibration("elapsed time overflow"))?;
+        self.server_time_ms
+            .checked_add(elapsed_ms)
+            .ok_or(GameLiveError::ServerClockCalibration(
+                "server clock calibration overflow",
+            ))
+    }
+}
+
+#[derive(Debug)]
+enum HeartbeatCalibrationOutcome {
+    Calibrated(ServerClockCalibration),
+    Failed,
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct GameSessionRunner {
@@ -880,26 +936,27 @@ impl GameSessionRunner {
                 return Err(error);
             }
         };
-        match session.handle_packet(pool, heartbeat_packet) {
-            Ok(VirtualPlayerEvent::HeartbeatAcknowledged) => {
-                steps.push(GameRunnerStep::HeartbeatAcknowledged)
+        let server_clock = match handle_heartbeat_and_calibrate(
+            &mut session,
+            pool,
+            &heartbeat,
+            heartbeat_packet,
+        ) {
+            Ok(HeartbeatCalibrationOutcome::Calibrated(server_clock)) => {
+                steps.push(GameRunnerStep::HeartbeatAcknowledged);
+                server_clock
             }
-            Ok(VirtualPlayerEvent::Failed) => {
+            Ok(HeartbeatCalibrationOutcome::Failed) => {
                 steps.push(GameRunnerStep::Failed);
                 transport.close();
                 return Ok(result(session, steps, None));
             }
-            Ok(_) => {
-                transport.close();
-                session.close(pool);
-                return Err(GameLiveError::UnexpectedLifecycleEvent);
-            }
             Err(error) => {
                 transport.close();
                 session.close(pool);
-                return Err(error.into());
+                return Err(error);
             }
-        }
+        };
         let gameplay_metrics = if let Some(gameplay) = gameplay.as_ref() {
             let mut tracker = RoomFlowTracker::default();
             let mut frame_bundles_after_room_start = None;
@@ -952,7 +1009,7 @@ impl GameSessionRunner {
                         pool,
                         packet,
                         Some(input_frame_id),
-                        current_unix_ms,
+                        || server_clock.timestamp_ms(),
                     ) {
                         Ok(packet) => packet,
                         Err(error) => {
@@ -1385,6 +1442,7 @@ impl GameSessionRunner {
         let mut trackers = [RoomFlowTracker::default(), RoomFlowTracker::default()];
         let mut player_match_metrics =
             [PlayerMatchMetrics::default(), PlayerMatchMetrics::default()];
+        let mut server_clocks = [None, None];
         // MatchEventPush may race the response to this player's MatchStartReq.
         // Keep at most one terminal assignment per player until the event
         // observation phase consumes it.
@@ -1502,20 +1560,36 @@ impl GameSessionRunner {
                     return Err(error);
                 }
             };
-            match sessions[player_index].handle_packet(pool, heartbeat_packet) {
-                Ok(VirtualPlayerEvent::HeartbeatAcknowledged) => {
-                    steps[player_index].push(GameRunnerStep::HeartbeatAcknowledged)
+            match handle_heartbeat_and_calibrate(
+                &mut sessions[player_index],
+                pool,
+                &heartbeat,
+                heartbeat_packet,
+            ) {
+                Ok(HeartbeatCalibrationOutcome::Calibrated(server_clock)) => {
+                    server_clocks[player_index] = Some(server_clock);
+                    steps[player_index].push(GameRunnerStep::HeartbeatAcknowledged);
                 }
-                Ok(_) => {
+                Ok(HeartbeatCalibrationOutcome::Failed) => {
                     close_two_player_sessions(&mut sessions, &mut transports, pool);
-                    return Err(GameLiveError::UnexpectedLifecycleEvent);
+                    return Err(GameLiveError::Transport(
+                        "two-player KCP heartbeat was rejected",
+                    ));
                 }
                 Err(error) => {
                     close_two_player_sessions(&mut sessions, &mut transports, pool);
-                    return Err(error.into());
+                    return Err(error);
                 }
             }
         }
+        let server_clocks = [
+            server_clocks[0].ok_or(GameLiveError::ServerClockCalibration(
+                "first player heartbeat did not establish a server clock",
+            ))?,
+            server_clocks[1].ok_or(GameLiveError::ServerClockCalibration(
+                "second player heartbeat did not establish a server clock",
+            ))?,
+        ];
 
         // Formal player matching goes through the same authenticated KCP
         // sessions as room traffic. No room id is accepted from the scenario
@@ -1797,7 +1871,7 @@ impl GameSessionRunner {
                     pool,
                     &input_packets[0].packet,
                     Some(input_frame_id),
-                    current_unix_ms,
+                    || server_clocks[0].timestamp_ms(),
                 ) {
                     Ok(packet) => packet,
                     Err(error) => {
@@ -1810,7 +1884,7 @@ impl GameSessionRunner {
                     pool,
                     &input_packets[1].packet,
                     Some(input_frame_id),
-                    current_unix_ms,
+                    || server_clocks[1].timestamp_ms(),
                 ) {
                     Ok(packet) => packet,
                     Err(error) => {
@@ -2118,6 +2192,41 @@ fn close_two_player_sessions(
     }
 }
 
+/// Accepts a clock only from the authenticated session's exact outstanding
+/// heartbeat response. The decoded server time is deliberately not returned
+/// until the lifecycle has also accepted the correlated PingRes.
+fn handle_heartbeat_and_calibrate(
+    session: &mut VirtualPlayerSession,
+    pool: &mut AccountLeasePool,
+    heartbeat: &OutboundPacket,
+    packet: Packet,
+) -> Result<HeartbeatCalibrationOutcome, GameLiveError> {
+    if heartbeat.message_type() != MessageType::PingReq
+        || packet.header.msg_type != MessageType::PingRes as u16
+        || packet.header.seq != heartbeat.seq()
+    {
+        return Err(GameLiveError::ServerClockCalibration(
+            "heartbeat response did not correlate to the outstanding PingReq",
+        ));
+    }
+    if packet.header.body_len as usize != packet.body.len() {
+        return Err(GameLiveError::ServerClockCalibration(
+            "PingRes body length is invalid",
+        ));
+    }
+    let server_time_ms = PingRes::decode(packet.body.as_slice())
+        .map_err(|_| GameLiveError::ServerClockCalibration("PingRes body is invalid"))?
+        .server_time;
+
+    match session.handle_packet(pool, packet)? {
+        VirtualPlayerEvent::HeartbeatAcknowledged => Ok(HeartbeatCalibrationOutcome::Calibrated(
+            ServerClockCalibration::from_validated_ping(server_time_ms, Instant::now())?,
+        )),
+        VirtualPlayerEvent::Failed => Ok(HeartbeatCalibrationOutcome::Failed),
+        _ => Err(GameLiveError::UnexpectedLifecycleEvent),
+    }
+}
+
 fn prepare_outbound_gameplay_packet_with_clock(
     session: &mut VirtualPlayerSession,
     pool: &mut AccountLeasePool,
@@ -2196,13 +2305,11 @@ fn prepare_admitted_outbound_gameplay_packet(
     packet: &PlannedPacket,
     checkpoint: &mut impl FnMut(GameRunnerCheckpoint) -> Result<(), GameLiveError>,
 ) -> Result<OutboundPacket, GameLiveError> {
-    prepare_admitted_outbound_gameplay_packet_with_clock(
-        session,
-        pool,
-        packet,
-        checkpoint,
-        current_unix_ms,
-    )
+    prepare_admitted_outbound_gameplay_packet_with_clock(session, pool, packet, checkpoint, || {
+        Err(GameLiveError::ServerClockCalibration(
+            "live PlayerInputReq requires a validated PingRes server clock",
+        ))
+    })
 }
 
 fn prepare_admitted_outbound_gameplay_packet_with_clock(
@@ -2250,15 +2357,6 @@ fn materialize_live_gameplay_packet(
         ),
         sequence: packet.sequence,
     })
-}
-
-fn current_unix_ms() -> Result<i64, GameLiveError> {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|_| GameLiveError::Clock)?
-        .as_millis()
-        .try_into()
-        .map_err(|_| GameLiveError::Clock)
 }
 
 fn planned_packet_with_live_sequence(
@@ -3568,6 +3666,145 @@ mod tests {
     }
 
     #[test]
+    fn validated_ping_response_establishes_a_server_clock_calibration() {
+        let mut pool = AccountLeasePool::default();
+        let mut session = active_session(&mut pool);
+        let heartbeat = session.begin_heartbeat(&mut pool, 0).unwrap();
+        let outcome = handle_heartbeat_and_calibrate(
+            &mut session,
+            &mut pool,
+            &heartbeat,
+            response(
+                MessageType::PingRes,
+                heartbeat.seq(),
+                &PingRes {
+                    server_time: 1_700_000_000_000,
+                },
+            ),
+        )
+        .unwrap();
+        let HeartbeatCalibrationOutcome::Calibrated(calibration) = outcome else {
+            panic!("valid PingRes must establish a server clock calibration");
+        };
+
+        assert_eq!(
+            calibration
+                .timestamp_ms_at(calibration.observed_at + Duration::from_millis(250))
+                .unwrap(),
+            1_700_000_000_250
+        );
+        session.close(&mut pool);
+    }
+
+    #[test]
+    fn calibrated_clock_materializes_live_player_input_timestamp() {
+        let profile = GameplayProfilePlan::from_lockstep_scenario_json(
+            crate::gameplay::PlayerProfile::Normal,
+            include_str!("../../lockstep-client/scenarios/move_stop.json"),
+        )
+        .unwrap();
+        let input = profile
+            .packet_plan_with_input_limit("approved-room", "approved-policy", 1)
+            .unwrap()
+            .remove(3);
+        let mut pool = AccountLeasePool::default();
+        let mut session = active_session(&mut pool);
+        let heartbeat = session.begin_heartbeat(&mut pool, 0).unwrap();
+        let outcome = handle_heartbeat_and_calibrate(
+            &mut session,
+            &mut pool,
+            &heartbeat,
+            response(
+                MessageType::PingRes,
+                heartbeat.seq(),
+                &PingRes {
+                    server_time: 1_700_000_000_000,
+                },
+            ),
+        )
+        .unwrap();
+        let HeartbeatCalibrationOutcome::Calibrated(calibration) = outcome else {
+            panic!("valid PingRes must establish a server clock calibration");
+        };
+
+        let outbound = prepare_outbound_gameplay_packet_with_clock_and_frame(
+            &mut session,
+            &mut pool,
+            &input,
+            Some(8),
+            || calibration.timestamp_ms_at(calibration.observed_at + Duration::from_millis(250)),
+        )
+        .unwrap();
+        let input = PlayerInputReq::decode(outbound.body()).unwrap();
+        assert_eq!(input.client_timestamp_ms, 1_700_000_000_250);
+        assert_eq!(input.frame_id, 8);
+        session.close(&mut pool);
+    }
+
+    #[test]
+    fn server_clock_calibration_rejects_uncorrelated_or_invalid_ping_response() {
+        let mut pool = AccountLeasePool::default();
+        let mut session = active_session(&mut pool);
+        let heartbeat = session.begin_heartbeat(&mut pool, 0).unwrap();
+        let error = handle_heartbeat_and_calibrate(
+            &mut session,
+            &mut pool,
+            &heartbeat,
+            response(
+                MessageType::PingRes,
+                heartbeat.seq().saturating_add(1),
+                &PingRes {
+                    server_time: 1_700_000_000_000,
+                },
+            ),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            GameLiveError::ServerClockCalibration(
+                "heartbeat response did not correlate to the outstanding PingReq"
+            )
+        ));
+        session.close(&mut pool);
+
+        let mut pool = AccountLeasePool::default();
+        let mut session = active_session(&mut pool);
+        let heartbeat = session.begin_heartbeat(&mut pool, 0).unwrap();
+        let error = handle_heartbeat_and_calibrate(
+            &mut session,
+            &mut pool,
+            &heartbeat,
+            response(
+                MessageType::PingRes,
+                heartbeat.seq(),
+                &PingRes { server_time: 0 },
+            ),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            GameLiveError::ServerClockCalibration("PingRes server_time must be positive")
+        ));
+        session.close(&mut pool);
+    }
+
+    #[test]
+    fn expired_server_clock_calibration_fails_closed() {
+        let observed_at = Instant::now();
+        let calibration =
+            ServerClockCalibration::from_validated_ping(1_700_000_000_000, observed_at).unwrap();
+        let error = calibration
+            .timestamp_ms_at(
+                observed_at + MAX_SERVER_CLOCK_CALIBRATION_AGE + Duration::from_millis(1),
+            )
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            GameLiveError::ServerClockCalibration("server clock calibration expired")
+        ));
+    }
+
+    #[test]
     fn default_match_uses_the_latest_shared_observation_plus_input_delay() {
         let mut first = RoomFlowTracker::default();
         let mut second = RoomFlowTracker::default();
@@ -3862,6 +4099,35 @@ mod tests {
             .unwrap();
         session.close(&mut pool);
         assert!(pool.acquire("account-a", "replacement", 1, 1_000).is_ok());
+    }
+
+    #[test]
+    fn uncalibrated_live_player_input_is_rejected_before_sequence_reservation() {
+        let profile = GameplayProfilePlan::from_lockstep_scenario_json(
+            crate::gameplay::PlayerProfile::Normal,
+            include_str!("../../lockstep-client/scenarios/move_stop.json"),
+        )
+        .unwrap();
+        let input = profile
+            .packet_plan_with_input_limit("approved-room", "approved-policy", 1)
+            .unwrap()
+            .remove(3);
+        let mut pool = AccountLeasePool::default();
+        let mut session = active_session(&mut pool);
+        let error =
+            prepare_admitted_outbound_gameplay_packet(&mut session, &mut pool, &input, &mut |_| {
+                Ok(())
+            })
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            GameLiveError::ServerClockCalibration(
+                "live PlayerInputReq requires a validated PingRes server clock"
+            )
+        ));
+        assert_eq!(session.pending_requests(), 0);
+        session.close(&mut pool);
     }
 
     #[test]
