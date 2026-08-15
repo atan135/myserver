@@ -4,6 +4,7 @@ mod discovery_metrics;
 pub mod health;
 mod publication;
 pub mod readiness;
+mod route_observation;
 pub mod startup_contract;
 mod types;
 
@@ -24,5 +25,10 @@ pub use health::{
     HealthMetricsSnapshot, HealthSnapshot, HealthState,
 };
 pub use publication::spawn_registry_publication;
+pub use route_observation::{
+    PROXY_ROUTE_OBSERVATION_KEY_NAMESPACE, PROXY_ROUTE_OBSERVATION_SCHEMA_VERSION,
+    PROXY_ROUTE_OBSERVATION_TTL_SECS, ProxyRouteObservation, ProxyRouteObservationPublisher,
+    RouteObservationError, proxy_route_observation_key,
+};
 pub use startup_contract::{DependencyRequirement, StartupErrorCode, StartupState};
 pub use types::{SERVICE_INSTANCE_SCHEMA_VERSION, ServiceEndpoint, ServiceInstance};
