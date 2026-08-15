@@ -37,6 +37,7 @@ use loadtest_core::config::{
     LoadTestConfig, RegistryObservationConfig, RunAccess, load_config, load_private_config,
 };
 use loadtest_core::contracts::{RunPlan, single_process_assignment};
+use loadtest_core::deadline::monotonic_deadline_from_unix_ms;
 use loadtest_core::game_kcp::{GameProxyEndpoint, KcpBackpressureMetrics, ReconnectPolicy};
 use loadtest_core::game_live::{
     GameExecutionGate, GameLiveError, GameRunnerCheckpoint, GameSessionRunner, LiveKcpConnection,
@@ -2047,8 +2048,10 @@ fn run_live(cli: &Cli) -> Result<(), String> {
 
     // This constructor makes no request. It is deliberately below every CLI,
     // profile, manifest, and secret-reference gate above.
+    let monotonic_now = Instant::now();
     let monotonic_deadline =
-        Instant::now() + Duration::from_millis(deadline_unix_ms.saturating_sub(unix_ms()));
+        monotonic_deadline_from_unix_ms(deadline_unix_ms, unix_ms(), monotonic_now)
+            .map_err(|error| format!("run deadline rejected before transport setup: {error}"))?;
     let mut transport =
         ReqwestAuthHttpTransport::new(&config.targets.auth_http, Duration::from_millis(1))?;
     let endpoint = if game_mode {

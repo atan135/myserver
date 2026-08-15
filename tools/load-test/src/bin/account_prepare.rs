@@ -20,6 +20,7 @@ use loadtest_core::auth_http::{
     AuthHttpTransport, AuthResponseBody, ReqwestAuthHttpTransport,
 };
 use loadtest_core::config::{RunAccess, load_config, load_private_config};
+use loadtest_core::deadline::monotonic_deadline_from_unix_ms;
 use loadtest_core::metrics::HistogramSnapshot;
 use loadtest_core::protection::{DryRunProtection, LiveAuthProtection, RuntimeProtection};
 use loadtest_core::side_services::AuthServicesPayload;
@@ -54,8 +55,14 @@ fn execute(arguments: Vec<String>) -> Result<(), String> {
             let account_count = existing_or_planned_account_count(&config, &manifest_path)?;
             cli.require_live_gate(&config, command, account_count)?;
             let deadline_unix_ms = prepare_deadline_unix_ms(&config, unix_ms())?;
+            let monotonic_now = Instant::now();
             let deadline =
-                Instant::now() + Duration::from_millis(deadline_unix_ms.saturating_sub(unix_ms()));
+                monotonic_deadline_from_unix_ms(deadline_unix_ms, unix_ms(), monotonic_now)
+                    .map_err(|error| {
+                        format!(
+                            "account preparation deadline rejected before transport setup: {error}"
+                        )
+                    })?;
             let private = load_private_config(
                 cli.private_config
                     .as_deref()
