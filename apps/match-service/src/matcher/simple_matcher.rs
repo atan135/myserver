@@ -652,6 +652,17 @@ impl SimpleMatcher {
             );
         }
 
+        for task in self.pool.cleanup_unjoined_match_tasks().await {
+            self.fail_matched_characters(&task.character_ids, &task.match_id, "MATCH_JOIN_TIMEOUT")
+                .await;
+            info!(
+                match_id = %task.match_id,
+                mode = %task.mode,
+                character_count = task.character_ids.len(),
+                "expired match task because no character joined the assigned room"
+            );
+        }
+
         Ok(())
     }
 
@@ -1334,6 +1345,113 @@ mod tests {
             .expect("pending match task should be recovered");
         assert_eq!(recovered.character_ids, task.character_ids);
         assert!(recovered.room_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn cleanup_releases_unjoined_match_and_preserves_joined_match() {
+        let store = new_memory_match_runtime_store();
+        let mut config = test_config();
+        config
+            .modes
+            .get_mut("1v1")
+            .expect("test mode should exist")
+            .match_timeout_secs = 0;
+        let matcher = SimpleMatcher::new_for_test(config, store.clone(), false);
+
+        let expired_match_id = "match-unjoined";
+        let expired_characters = ["character-a", "character-b"];
+        matcher
+            .pool()
+            .create_match_task(
+                expired_match_id.to_string(),
+                "1v1".to_string(),
+                expired_characters
+                    .iter()
+                    .map(|value| value.to_string())
+                    .collect(),
+            )
+            .await;
+        for character_id in expired_characters {
+            matcher
+                .character_state()
+                .set_status(character_id, CharacterMatchStatus::Matched)
+                .await;
+            matcher
+                .character_state()
+                .set_context(
+                    character_id,
+                    CharacterMatchContext {
+                        match_id: expired_match_id.to_string(),
+                        mode: "1v1".to_string(),
+                        room_id: Some("room-unjoined".to_string()),
+                        token: Some(format!("token-{character_id}")),
+                    },
+                )
+                .await;
+        }
+
+        let joined_match_id = "match-joined";
+        matcher
+            .pool()
+            .create_match_task(
+                joined_match_id.to_string(),
+                "1v1".to_string(),
+                vec!["character-c".to_string(), "character-d".to_string()],
+            )
+            .await;
+        matcher
+            .pool()
+            .mark_character_joined(joined_match_id, "character-c")
+            .await;
+
+        matcher.cleanup_timeout().await.unwrap();
+
+        assert!(
+            matcher
+                .pool()
+                .get_match_task(expired_match_id)
+                .await
+                .is_none()
+        );
+        for character_id in expired_characters {
+            assert_eq!(
+                matcher.character_state().get_status(character_id).await,
+                CharacterMatchStatus::Idle
+            );
+            assert!(
+                matcher
+                    .character_state()
+                    .get_context(character_id)
+                    .await
+                    .is_none()
+            );
+            assert_eq!(
+                matcher
+                    .character_state()
+                    .latest_event(character_id)
+                    .await
+                    .expect("expired match should emit a terminal event")
+                    .error_code,
+                "MATCH_JOIN_TIMEOUT"
+            );
+        }
+        assert!(
+            matcher
+                .pool()
+                .get_match_task(joined_match_id)
+                .await
+                .is_some()
+        );
+        assert!(
+            matcher
+                .start_match("character-a".to_string(), "1v1".to_string())
+                .await
+                .is_ok()
+        );
+
+        let snapshot = store.load_snapshot().await.unwrap();
+        assert!(!snapshot.matches.contains_key(expired_match_id));
+        assert!(snapshot.matches.contains_key(joined_match_id));
     }
 
     #[tokio::test]

@@ -2,6 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::sync::RwLock;
 
 use crate::config::ModeConfig;
@@ -19,6 +20,8 @@ pub struct MatchTask {
     pub match_id: String,
     pub mode: String,
     pub character_ids: Vec<String>,
+    /// Monotonic creation time retained across task updates and recovery.
+    pub created_at: Instant,
     pub room_id: Option<String>,
     pub joined_characters: HashSet<String>,
     pub active_characters: HashSet<String>,
@@ -31,6 +34,7 @@ impl MatchTask {
             match_id,
             mode,
             character_ids,
+            created_at: Instant::now(),
             room_id: None,
             joined_characters: HashSet::new(),
             active_characters,
@@ -470,6 +474,52 @@ impl MatchPool {
                         mode = %candidate.mode,
                         error = %error,
                         "failed to remove timed out persisted candidate"
+                    );
+                }
+            }
+        }
+
+        removed
+    }
+
+    /// Removes match tasks whose members never joined the room before the
+    /// mode's declared matching deadline. Any joined member means the room
+    /// lifecycle remains the authority for disconnect and offline-TTL cleanup.
+    pub async fn cleanup_unjoined_match_tasks(&self) -> Vec<MatchTask> {
+        let match_timeouts = {
+            let pools = self.pools.read().await;
+            pools
+                .iter()
+                .map(|(mode, pool)| (mode.clone(), pool.config.match_timeout_secs))
+                .collect::<HashMap<_, _>>()
+        };
+        let now = Instant::now();
+        let removed = {
+            let mut matches = self.matches.write().await;
+            let expired_ids = matches
+                .iter()
+                .filter_map(|(match_id, task)| {
+                    // A task for a removed mode is no longer a legal live
+                    // match and must not permanently retain its characters.
+                    let timeout_secs = match_timeouts.get(&task.mode).copied().unwrap_or(0);
+                    (task.joined_characters.is_empty()
+                        && now.duration_since(task.created_at).as_secs() >= timeout_secs)
+                        .then(|| match_id.clone())
+                })
+                .collect::<Vec<_>>();
+            expired_ids
+                .into_iter()
+                .filter_map(|match_id| matches.remove(&match_id))
+                .collect::<Vec<_>>()
+        };
+
+        if let Some(runtime_store) = &self.runtime_store {
+            for task in &removed {
+                if let Err(error) = runtime_store.remove_match_task(&task.match_id).await {
+                    tracing::warn!(
+                        match_id = %task.match_id,
+                        error = %error,
+                        "failed to remove expired unjoined match task"
                     );
                 }
             }

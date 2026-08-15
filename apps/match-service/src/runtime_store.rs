@@ -194,6 +194,7 @@ pub struct StoredMatchTask {
 impl StoredMatchTask {
     pub fn from_task(task: &MatchTask) -> Self {
         let timestamp = now_ms();
+        let created_at_ms = timestamp.saturating_sub(task.created_at.elapsed().as_millis() as u64);
         Self {
             match_id: task.match_id.clone(),
             mode: task.mode.clone(),
@@ -201,16 +202,23 @@ impl StoredMatchTask {
             room_id: task.room_id.clone(),
             joined_characters: task.joined_characters.clone(),
             active_characters: task.active_characters.clone(),
-            created_at_ms: timestamp,
+            created_at_ms,
             updated_at_ms: timestamp,
         }
     }
 
     pub fn into_task(self) -> MatchTask {
+        let now_instant = std::time::Instant::now();
+        let created_at = now_instant
+            .checked_sub(Duration::from_millis(
+                now_ms().saturating_sub(self.created_at_ms),
+            ))
+            .unwrap_or(now_instant);
         MatchTask {
             match_id: self.match_id,
             mode: self.mode,
             character_ids: self.character_ids,
+            created_at,
             room_id: self.room_id,
             joined_characters: self.joined_characters,
             active_characters: self.active_characters,
