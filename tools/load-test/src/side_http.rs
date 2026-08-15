@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 use reqwest::blocking::Client;
 use serde_json::Value;
 
+use crate::chat_wss::LiveMailNotificationListener;
 use crate::config::EnvironmentKind;
 use crate::side_services::{
     PlannedSideServiceStep, ServiceDescriptor, SideFakeOutcome, SideServiceConfig, SideServiceKind,
@@ -12,6 +13,7 @@ use crate::side_services::{
 
 const MAX_BURST_READS: usize = 8;
 const SLOW_HTTP_RESPONSE_MS: u64 = 500;
+const MAIL_LOAD_TEST_TOKEN_ENV: &str = "MYSERVER_LOADTEST_MAIL_NOTIFICATION_TOKEN";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SideHttpError {
@@ -21,6 +23,7 @@ pub enum SideHttpError {
     InvalidPlan,
     WriteGateRejected,
     MailNotifyUnsupported,
+    MailNotificationUnavailable,
     Timeout,
     Disconnect,
     RateLimited,
@@ -46,8 +49,13 @@ pub struct SideHttpMetrics {
     pub side: SideServiceMetrics,
     pub writes: u64,
     pub mail_writes: u64,
+    /// Internal mail creation is separate from player claim writes so the
+    /// report can prove the dedicated send-volume cap.
+    pub mail_internal_writes: u64,
     pub announce_writes: u64,
     pub notifications: u64,
+    pub mail_notification_outbox_published: u64,
+    pub mail_notification_delivery_ms: Vec<u64>,
     pub mail_claim_successes: u64,
     pub mail_claim_idempotent_replays: u64,
     pub mail_claim_processing: u64,
@@ -63,9 +71,17 @@ impl SideHttpMetrics {
     pub fn merge_into_metrics(&self, metrics: &mut crate::metrics::Metrics) {
         self.side.merge_into_metrics(metrics);
         metrics.increment("side_mail_writes", self.mail_writes);
+        metrics.increment("side_mail_internal_writes", self.mail_internal_writes);
         metrics.increment("side_announce_writes", self.announce_writes);
         metrics.increment("side_http_writes", self.writes);
         metrics.increment("side_mail_notifications", self.notifications);
+        metrics.increment(
+            "side_mail_notification_outbox_published",
+            self.mail_notification_outbox_published,
+        );
+        for latency_ms in &self.mail_notification_delivery_ms {
+            metrics.observe_latency("side_mail_notification_delivery_ms", *latency_ms);
+        }
         metrics.increment("side_mail_claim_successes", self.mail_claim_successes);
         metrics.increment(
             "side_mail_claim_idempotent_replays",
@@ -136,12 +152,25 @@ impl ReqwestSideHttpTransport {
         path: &str,
         body: Option<Value>,
     ) -> Result<HttpResponse, SideHttpError> {
+        self.send_with_extra_header(method, path, body, None)
+    }
+
+    fn send_with_extra_header(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<Value>,
+        extra_header: Option<(&str, &str)>,
+    ) -> Result<HttpResponse, SideHttpError> {
         let mut request = self
             .client
             .request(method, format!("{}{}", self.base_url, path))
             .header("connection", "close")
             .header("x-game-ticket", &self.ticket)
             .timeout(self.timeout);
+        if let Some((name, value)) = extra_header {
+            request = request.header(name, value);
+        }
         if let Some(body) = body {
             request = request.json(&body);
         }
@@ -224,6 +253,53 @@ fn mail_id_from(body: &Value) -> Option<String> {
         .and_then(|item| item.get("mail_id"))
         .and_then(Value::as_str)
         .map(str::to_owned)
+}
+
+fn mail_notification_from(body: &Value) -> Result<String, SideHttpError> {
+    if body
+        .get("idempotent_replay")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return Err(SideHttpError::MailNotificationUnavailable);
+    }
+    let mail_id = body
+        .get("mail_id")
+        .and_then(Value::as_str)
+        .filter(|mail_id| !mail_id.is_empty())
+        .ok_or(SideHttpError::MailNotificationUnavailable)?;
+    let notification = body
+        .get("notification")
+        .and_then(Value::as_object)
+        .ok_or(SideHttpError::MailNotificationUnavailable)?;
+    let expected_event_id = format!("mail.notify:{mail_id}");
+    if notification.get("event_id").and_then(Value::as_str) != Some(expected_event_id.as_str())
+        || notification
+            .get("outbox_published")
+            .and_then(Value::as_bool)
+            != Some(true)
+    {
+        return Err(SideHttpError::MailNotificationUnavailable);
+    }
+    Ok(mail_id.to_owned())
+}
+
+fn mail_notification_chat_config(
+    scenario: &SideServicesScenario,
+) -> Result<&SideServiceConfig, SideHttpError> {
+    let chat = scenario
+        .chat
+        .as_ref()
+        .ok_or(SideHttpError::MailNotificationUnavailable)?;
+    if !chat.live_websocket {
+        return Err(SideHttpError::LiveTransportNotEnabled);
+    }
+    chat.descriptor
+        .as_ref()
+        .ok_or(SideHttpError::DescriptorRejected)?
+        .validate(SideServiceKind::Chat)
+        .map_err(|_| SideHttpError::DescriptorRejected)?;
+    Ok(chat)
 }
 
 fn announce_id_from(body: &Value) -> Option<String> {
@@ -325,6 +401,28 @@ pub fn execute_live_mail_announce_steps(
     ticket: &str,
     steps: &[PlannedSideServiceStep],
     timeout_ms: u64,
+    admit: impl FnMut(SideHttpAdmission) -> Result<(), SideHttpError>,
+) -> Result<SideHttpMetrics, SideHttpError> {
+    execute_live_mail_announce_steps_with_mail_notification_token(
+        scenario,
+        environment,
+        selected_batch,
+        ticket,
+        steps,
+        timeout_ms,
+        std::env::var(MAIL_LOAD_TEST_TOKEN_ENV).ok(),
+        admit,
+    )
+}
+
+fn execute_live_mail_announce_steps_with_mail_notification_token(
+    scenario: &SideServicesScenario,
+    environment: EnvironmentKind,
+    selected_batch: &str,
+    ticket: &str,
+    steps: &[PlannedSideServiceStep],
+    timeout_ms: u64,
+    runtime_mail_notification_token: Option<String>,
     mut admit: impl FnMut(SideHttpAdmission) -> Result<(), SideHttpError>,
 ) -> Result<SideHttpMetrics, SideHttpError> {
     if !matches!(environment, EnvironmentKind::Local | EnvironmentKind::Test) {
@@ -341,6 +439,21 @@ pub fn execute_live_mail_announce_steps(
     }) {
         return Err(SideHttpError::InvalidPlan);
     }
+    // Validate the runtime-only secret before any descriptor lookup,
+    // admission, or transport setup. A missing secret must be side-effect
+    // free even for a live mail-notification plan.
+    let mail_notification_token = if steps
+        .iter()
+        .any(|step| step.operation == SideServiceOperation::MailNotify)
+    {
+        Some(
+            runtime_mail_notification_token
+                .filter(|token| !token.is_empty())
+                .ok_or(SideHttpError::MailNotificationUnavailable)?,
+        )
+    } else {
+        None
+    };
     let mut metrics = SideHttpMetrics::default();
     let mut mail_id = None;
     let mut announce_id = None;
@@ -349,9 +462,6 @@ pub fn execute_live_mail_announce_steps(
         let config = descriptor_for(scenario, step.service)?;
         if step.operation.is_write() {
             check_write_gate(config, environment, selected_batch)?;
-        }
-        if matches!(step.operation, SideServiceOperation::MailNotify) {
-            return Err(SideHttpError::MailNotifyUnsupported);
         }
         let descriptor = config
             .descriptor
@@ -363,6 +473,27 @@ pub fn execute_live_mail_announce_steps(
             }
             std::thread::sleep(Duration::from_millis(step.think_time_ms));
         }
+        let mut mail_listener = if step.operation == SideServiceOperation::MailNotify {
+            let chat = mail_notification_chat_config(scenario)?;
+            let descriptor = chat.descriptor.as_ref().expect("validated chat descriptor");
+            admit(SideHttpAdmission::Connection)?;
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_io()
+                .enable_time()
+                .build()
+                .map_err(|_| SideHttpError::MailNotificationUnavailable)?;
+            let listener = runtime
+                .block_on(LiveMailNotificationListener::connect(
+                    descriptor,
+                    environment,
+                    ticket.to_owned(),
+                    timeout_ms,
+                ))
+                .map_err(|_| SideHttpError::MailNotificationUnavailable)?;
+            Some((runtime, listener))
+        } else {
+            None
+        };
         let index = transports
             .iter()
             .position(|(service, _)| *service == step.service);
@@ -418,6 +549,17 @@ pub fn execute_live_mail_announce_steps(
                 ),
                 Some(serde_json::json!({})),
             ),
+            SideServiceOperation::MailNotify => {
+                let token = mail_notification_token
+                    .as_deref()
+                    .expect("mail notification token was validated before transport setup");
+                transport.send_with_extra_header(
+                    reqwest::Method::POST,
+                    "/api/v1/mails/load-test/notification",
+                    Some(serde_json::json!({ "batch": selected_batch })),
+                    Some(("x-mail-load-test-token", &token)),
+                )
+            }
             SideServiceOperation::AnnounceList | SideServiceOperation::AnnounceBurstRead => {
                 transport.send(
                     reqwest::Method::GET,
@@ -444,6 +586,30 @@ pub fn execute_live_mail_announce_steps(
                 }
                 if step.operation == SideServiceOperation::MailClaim {
                     record_mail_claim_result(&mut metrics, &response.body);
+                }
+                if step.operation == SideServiceOperation::MailNotify {
+                    let observed_mail_id = mail_notification_from(&response.body)?;
+                    let (runtime, listener) = mail_listener
+                        .as_mut()
+                        .expect("mail notification listener was connected");
+                    let delivery_started = started;
+                    runtime
+                        .block_on(
+                            listener.wait_for_mail(
+                                &observed_mail_id,
+                                timeout_ms
+                                    .saturating_sub(delivery_started.elapsed().as_millis() as u64),
+                            ),
+                        )
+                        .map_err(|_| SideHttpError::MailNotificationUnavailable)?;
+                    metrics.notifications = metrics.notifications.saturating_add(1);
+                    metrics.mail_internal_writes = metrics.mail_internal_writes.saturating_add(1);
+                    metrics.mail_notification_outbox_published =
+                        metrics.mail_notification_outbox_published.saturating_add(1);
+                    metrics
+                        .mail_notification_delivery_ms
+                        .push(delivery_started.elapsed().as_millis() as u64);
+                    mail_id = Some(observed_mail_id);
                 }
                 if matches!(
                     step.operation,
@@ -673,6 +839,65 @@ mod tests {
             snapshot.counters["side_mail_notification_observation_holes"],
             5
         );
+    }
+
+    #[test]
+    fn mail_notification_requires_a_fresh_outbox_publish_correlation() {
+        let ready = serde_json::json!({
+            "mail_id": "loadtest-mail-1",
+            "idempotent_replay": false,
+            "notification": {
+                "event_id": "mail.notify:loadtest-mail-1",
+                "outbox_published": true
+            }
+        });
+        assert_eq!(mail_notification_from(&ready).unwrap(), "loadtest-mail-1");
+
+        for rejected in [
+            serde_json::json!({
+                "mail_id": "loadtest-mail-1",
+                "idempotent_replay": true,
+                "notification": { "event_id": "mail.notify:loadtest-mail-1", "outbox_published": true }
+            }),
+            serde_json::json!({
+                "mail_id": "loadtest-mail-1",
+                "notification": { "event_id": "mail.notify:other", "outbox_published": true }
+            }),
+            serde_json::json!({
+                "mail_id": "loadtest-mail-1",
+                "notification": { "event_id": "mail.notify:loadtest-mail-1", "outbox_published": false }
+            }),
+        ] {
+            assert_eq!(
+                mail_notification_from(&rejected),
+                Err(SideHttpError::MailNotificationUnavailable)
+            );
+        }
+    }
+
+    #[test]
+    fn missing_mail_notification_token_rejects_before_admission_or_transport() {
+        let steps = [step(
+            SideServiceKind::Mail,
+            SideServiceOperation::MailNotify,
+        )];
+        let mut admissions = 0;
+        let result = execute_live_mail_announce_steps_with_mail_notification_token(
+            &SideServicesScenario::default(),
+            EnvironmentKind::Local,
+            "loadtest-local",
+            "ticket",
+            &steps,
+            10,
+            None,
+            |_| {
+                admissions += 1;
+                Ok(())
+            },
+        );
+
+        assert_eq!(result, Err(SideHttpError::MailNotificationUnavailable));
+        assert_eq!(admissions, 0, "missing token must not admit a connection");
     }
 
     #[test]

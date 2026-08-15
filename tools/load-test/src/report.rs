@@ -28,14 +28,18 @@ const PHASE_LATENCY_KEYS: [(&str, &str); 8] = [
     ("gameplay_step_ms", "Gameplay operation"),
 ];
 
-const SIDE_LATENCY_KEYS: [(&str, &str); 4] = [
+const SIDE_LATENCY_KEYS: [(&str, &str); 5] = [
     ("side_chat_ms", "Chat"),
     ("side_mail_ms", "Mail"),
+    (
+        "side_mail_notification_delivery_ms",
+        "Mail notification delivery",
+    ),
     ("side_announce_ms", "Announce"),
     ("side_match_ms", "Match"),
 ];
 
-const FLOW_COUNTER_KEYS: [(&str, &str); 13] = [
+const FLOW_COUNTER_KEYS: [(&str, &str); 15] = [
     ("connections_opened", "Connections opened"),
     ("connections_active", "Connections active"),
     ("frame_inputs_sent", "Frame inputs sent"),
@@ -48,6 +52,11 @@ const FLOW_COUNTER_KEYS: [(&str, &str); 13] = [
     ("frame_late_response", "Frame late responses"),
     ("frame_out_of_order", "Frame out of order"),
     ("gameplay_business_errors", "Gameplay business errors"),
+    ("side_mail_internal_writes", "Internal mail writes"),
+    (
+        "side_mail_notification_outbox_published",
+        "Mail notification outbox publishes",
+    ),
     ("metrics_dropped", "Metrics dropped"),
 ];
 

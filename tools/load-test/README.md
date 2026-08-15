@@ -458,6 +458,15 @@ player execution is the existing guarded two-account `default_match` chain.
 This tool has no real GM or operations-write transport; `gm_or_ops_write` and
 other prohibited operations remain fail-closed in every profile.
 
+`mail_notify` is a separately approved local/test diagnostic. It requires one
+of at most two dedicated player accounts, an exact write batch, the runtime
+only `MYSERVER_LOADTEST_MAIL_NOTIFICATION_TOKEN`, and the mail service's
+independently configured local/test allowlist. It creates one deterministic
+reward mail for each allowed player/batch, waits for the matching
+`MailNotifyPush` on that player's authenticated chat WebSocket, then reports
+internal mail writes, outbox publishes, and delivery latency separately. A
+replayed delivery, missing NATS publish, absent push, or timeout fails closed.
+
 ### Read-only Registry Observation Smoke
 
 `observe-registry` is the standalone, zero-player-traffic path for a small

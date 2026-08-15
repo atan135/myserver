@@ -8,7 +8,9 @@ use tokio::time::timeout;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
 
-use crate::chat_pb::{ChatAuthReq, ChatAuthRes, ChatGroupReq, ChatHistoryReq, ChatPrivateReq};
+use crate::chat_pb::{
+    ChatAuthReq, ChatAuthRes, ChatGroupReq, ChatHistoryReq, ChatPrivateReq, MailNotifyPush,
+};
 use crate::config::EnvironmentKind;
 use crate::game_kcp::ReconnectPolicy;
 use crate::side_services::{
@@ -373,6 +375,67 @@ impl ChatWssMetrics {
 
 pub struct LiveChatWssTransport {
     websocket: WebSocketStream<MaybeTlsStream<TcpStream>>,
+}
+
+/// A deliberately narrow chat session used only to correlate one approved
+/// mail notification smoke delivery. It neither sends chat content nor keeps
+/// player identifiers beyond the authenticated ticket boundary.
+pub struct LiveMailNotificationListener {
+    session: ChatWssSession,
+    transport: LiveChatWssTransport,
+}
+
+impl LiveMailNotificationListener {
+    pub async fn connect(
+        descriptor: &ServiceDescriptor,
+        environment: EnvironmentKind,
+        ticket: String,
+        timeout_ms: u64,
+    ) -> Result<Self, ChatWssError> {
+        let mut session = ChatWssSession::new(ReconnectPolicy {
+            max_attempts: 1,
+            base_delay_ms: 100,
+            max_delay_ms: 500,
+            max_jitter_ms: 0,
+        })?;
+        let mut transport =
+            LiveChatWssTransport::connect(descriptor, environment, true, timeout_ms).await?;
+        session.connected();
+        let auth = session.queue_auth(ticket)?;
+        drive_chat_request(&mut session, &mut transport, auth, timeout_ms).await?;
+        Ok(Self { session, transport })
+    }
+
+    pub async fn wait_for_mail(
+        &mut self,
+        expected_mail_id: &str,
+        timeout_ms: u64,
+    ) -> Result<ChatWssMetrics, ChatWssError> {
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms.max(1));
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                return Err(ChatWssError::Timeout);
+            }
+            let packet = self
+                .transport
+                .receive(remaining.as_millis().max(1) as u64)
+                .await?;
+            let notification_mail_id = if packet.message_type == MAIL_NOTIFY_PUSH {
+                Some(
+                    MailNotifyPush::decode(packet.body.as_slice())
+                        .map_err(|_| ChatWssError::PacketMalformed)?
+                        .mail_id,
+                )
+            } else {
+                None
+            };
+            self.session.handle_inbound(packet)?;
+            if notification_mail_id.as_deref() == Some(expected_mail_id) {
+                return Ok(self.session.metrics.clone());
+            }
+        }
+    }
 }
 
 /// Runs a bounded live chat flow for one authenticated account. The caller

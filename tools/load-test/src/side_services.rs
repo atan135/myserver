@@ -546,6 +546,20 @@ impl SideServicesScenario {
                     "{kind:?} writes flag must match configured operations"
                 ));
             }
+            if kind == SideServiceKind::Mail {
+                let notification_count: u32 = config
+                    .steps
+                    .iter()
+                    .filter(|step| step.operation == SideServiceOperation::MailNotify)
+                    .map(|step| step.weight)
+                    .sum();
+                if notification_count > 1 {
+                    return Err(
+                        "mail notification smoke allows at most one internal mail per player"
+                            .into(),
+                    );
+                }
+            }
         }
         if self.composition.max_operations_per_player > 10_000 {
             return Err("side-service composition operation cap is too large".into());
@@ -712,6 +726,14 @@ impl SideServicesScenario {
             }
         }
         let virtual_players = u64::from(budget.max_virtual_players);
+        let internal_mail_notifications = steps
+            .iter()
+            .filter(|step| step.operation == SideServiceOperation::MailNotify)
+            .count() as u64
+            * virtual_players;
+        if internal_mail_notifications > 2 {
+            return Err("mail notification smoke is limited to two internal mails per run".into());
+        }
         let per_player_operations: u64 = per_service.values().sum();
         let total_operations = per_player_operations
             .checked_mul(virtual_players)
@@ -1295,6 +1317,54 @@ mod tests {
             ..scenario.clone()
         };
         assert!(rejected.executable_plan(&budget()).is_err());
+    }
+
+    #[test]
+    fn mail_notification_smoke_is_limited_to_two_internal_mails_per_run() {
+        let scenario = SideServicesScenario {
+            mail: Some(SideServiceConfig {
+                descriptor: Some(descriptor(SideTransportKind::Https)),
+                steps: vec![SideServiceStep {
+                    operation: SideServiceOperation::MailNotify,
+                    weight: 1,
+                    think_time_ms: 0,
+                }],
+                writes: true,
+                live_http: true,
+                write_batch: Some("smoke-01".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let allowed = scenario
+            .executable_plan(&HardBudget {
+                max_virtual_players: 2,
+                max_total_operations: 2,
+                max_business_messages_per_second: 2.0,
+                ..budget()
+            })
+            .unwrap();
+        assert_eq!(allowed.total_operations, 2);
+
+        let error = scenario
+            .executable_plan(&HardBudget {
+                max_virtual_players: 3,
+                max_total_operations: 3,
+                max_business_messages_per_second: 3.0,
+                ..budget()
+            })
+            .unwrap_err();
+        assert_eq!(
+            error,
+            "mail notification smoke is limited to two internal mails per run"
+        );
+
+        let mut per_player_limit = scenario.clone();
+        per_player_limit.mail.as_mut().unwrap().steps[0].weight = 2;
+        assert_eq!(
+            per_player_limit.validate().unwrap_err(),
+            "mail notification smoke allows at most one internal mail per player"
+        );
     }
 
     #[test]
