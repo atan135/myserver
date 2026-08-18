@@ -193,33 +193,49 @@ async function reserveFutureInputFrame(client, timeoutMs, label = "reserveInputF
   return frameId;
 }
 
+async function waitForRoomJoinResponse(client, options, label) {
+  return client.readUntil(
+    options.timeoutMs,
+    (packet) => packet.messageType === MESSAGE_TYPE.ROOM_JOIN_RES && packet.seq === 2,
+    label
+  );
+}
+
+async function waitForResponse(client, options, messageType, seq, label) {
+  return client.readUntil(
+    options.timeoutMs,
+    (packet) => packet.messageType === messageType && (seq === undefined || packet.seq === seq),
+    label
+  );
+}
+
 async function setupMovementRoom(client, options, login, roomLabel = client.label) {
   await authenticateClient(client, options, login, 1);
 
   const policyId = options.policyId || "movement_demo";
   await client.send(MESSAGE_TYPE.ROOM_JOIN_REQ, 2, encodeRoomJoinReq(options.roomId, policyId));
-  const joinRes = printResponse(`${roomLabel}.roomJoin`, await client.readNextPacket(options.timeoutMs));
+  const joinRes = await waitForRoomJoinResponse(client, options, `${roomLabel}.roomJoin`);
   if (!joinRes.ok) {
     throw new Error(`${roomLabel} room join failed: ${joinRes.errorCode}`);
   }
 
-  printResponse(`${roomLabel}.roomStatePush(join)`, await client.readNextPacket(options.timeoutMs));
+  await waitForResponse(client, options, MESSAGE_TYPE.ROOM_STATE_PUSH, undefined, `${roomLabel}.roomStatePush(join)`);
 
   await client.send(MESSAGE_TYPE.ROOM_READY_REQ, 3, encodeRoomReadyReq(true));
-  const readyRes = printResponse(`${roomLabel}.roomReady`, await client.readNextPacket(options.timeoutMs));
+  const readyRes = await waitForResponse(client, options, MESSAGE_TYPE.ROOM_READY_RES, 3, `${roomLabel}.roomReady`);
   if (!readyRes.ok) {
     throw new Error(`${roomLabel} room ready failed: ${readyRes.errorCode}`);
   }
 
-  printResponse(`${roomLabel}.roomStatePush(ready)`, await client.readNextPacket(options.timeoutMs));
+  await waitForResponse(client, options, MESSAGE_TYPE.ROOM_STATE_PUSH, undefined, `${roomLabel}.roomStatePush(ready)`);
 
   await client.send(MESSAGE_TYPE.ROOM_START_REQ, 4, encodeRoomStartReq());
-  const startRes = printResponse(`${roomLabel}.roomStart`, await client.readNextPacket(options.timeoutMs));
+  const startRes = await waitForResponse(client, options, MESSAGE_TYPE.ROOM_START_RES, 4, `${roomLabel}.roomStart`);
   if (!startRes.ok) {
     throw new Error(`${roomLabel} room start failed: ${startRes.errorCode}`);
   }
 
-  printResponse(`${roomLabel}.roomStatePush(gameStarted)`, await client.readNextPacket(options.timeoutMs));
+  await waitForResponse(client, options, MESSAGE_TYPE.ROOM_STATE_PUSH, undefined, `${roomLabel}.roomStatePush(gameStarted)`);
 
   const initialSnapshot = await waitForMovementSnapshot(client, options.timeoutMs * 3);
   formatMovementSnapshot(`[${roomLabel}.initialSnapshot]`, initialSnapshot);
@@ -250,26 +266,26 @@ export async function runMovementDemo(client, options, login) {
 
   const policyId = options.policyId || "movement_demo";
   await client.send(MESSAGE_TYPE.ROOM_JOIN_REQ, 2, encodeRoomJoinReq(options.roomId, policyId));
-  const roomJoin = printResponse(`${client.label}.roomJoin`, await client.readNextPacket(options.timeoutMs));
+  const roomJoin = await waitForRoomJoinResponse(client, options, `${client.label}.roomJoin`);
   if (!roomJoin.ok) {
     throw new Error(`movement demo room join failed: ${roomJoin.errorCode}`);
   }
 
-  printResponse(`${client.label}.roomStatePush(join)`, await client.readNextPacket(options.timeoutMs));
+  await waitForResponse(client, options, MESSAGE_TYPE.ROOM_STATE_PUSH, undefined, `${client.label}.roomStatePush(join)`);
 
   await client.send(MESSAGE_TYPE.ROOM_READY_REQ, 3, encodeRoomReadyReq(true));
-  const readyRes = printResponse(`${client.label}.roomReady`, await client.readNextPacket(options.timeoutMs));
+  const readyRes = await waitForResponse(client, options, MESSAGE_TYPE.ROOM_READY_RES, 3, `${client.label}.roomReady`);
   if (!readyRes.ok) {
     throw new Error(`movement demo room ready failed: ${readyRes.errorCode}`);
   }
-  printResponse(`${client.label}.roomStatePush(ready)`, await client.readNextPacket(options.timeoutMs));
+  await waitForResponse(client, options, MESSAGE_TYPE.ROOM_STATE_PUSH, undefined, `${client.label}.roomStatePush(ready)`);
 
   await client.send(MESSAGE_TYPE.ROOM_START_REQ, 4, encodeRoomStartReq());
-  const startRes = printResponse(`${client.label}.roomStart`, await client.readNextPacket(options.timeoutMs));
+  const startRes = await waitForResponse(client, options, MESSAGE_TYPE.ROOM_START_RES, 4, `${client.label}.roomStart`);
   if (!startRes.ok) {
     throw new Error(`movement demo room start failed: ${startRes.errorCode}`);
   }
-  printResponse(`${client.label}.roomStatePush(gameStarted)`, await client.readNextPacket(options.timeoutMs));
+  await waitForResponse(client, options, MESSAGE_TYPE.ROOM_STATE_PUSH, undefined, `${client.label}.roomStatePush(gameStarted)`);
 
   let sawSnapshot = false;
   let sawReject = false;
@@ -388,7 +404,7 @@ export async function runMovementSyncValidation(options) {
 
     const policyId = options.policyId || "movement_demo";
     await client.send(MESSAGE_TYPE.ROOM_JOIN_REQ, 2, encodeRoomJoinReq(options.roomId, policyId));
-    const joinRes = printResponse("client.roomJoin", await client.readNextPacket(options.timeoutMs));
+    const joinRes = await waitForRoomJoinResponse(client, options, "client.roomJoin");
     if (!joinRes.ok) throw new Error(`room join failed: ${joinRes.errorCode}`);
 
     printResponse("client.roomStatePush(join)", await client.readNextPacket(options.timeoutMs));
@@ -557,38 +573,42 @@ export async function runMovementDualClientSync(options) {
     await clientA.send(MESSAGE_TYPE.ROOM_JOIN_REQ, 2, encodeRoomJoinReq(options.roomId, policyId));
     await clientB.send(MESSAGE_TYPE.ROOM_JOIN_REQ, 2, encodeRoomJoinReq(options.roomId, policyId));
 
-    const joinA = printResponse("clientA.roomJoin", await clientA.readNextPacket(options.timeoutMs));
+    const joinA = await waitForRoomJoinResponse(clientA, options, "clientA.roomJoin");
     if (!joinA.ok) throw new Error(`clientA join failed: ${joinA.errorCode}`);
-    const joinB = printResponse("clientB.roomJoin", await clientB.readNextPacket(options.timeoutMs));
+    const joinB = await waitForRoomJoinResponse(clientB, options, "clientB.roomJoin");
     if (!joinB.ok) throw new Error(`clientB join failed: ${joinB.errorCode}`);
 
-    // Drain state pushes for both
-    for (const cl of [clientA, clientB]) {
-      for (let i = 0; i < 3; i++) {
-        cl.readNextPacket(options.timeoutMs).catch(() => {});
-      }
-    }
+    await waitForResponse(clientA, options, MESSAGE_TYPE.ROOM_STATE_PUSH, undefined, "clientA.roomStatePush(join)");
+    await waitForResponse(clientB, options, MESSAGE_TYPE.ROOM_STATE_PUSH, undefined, "clientB.roomStatePush(join)");
 
     await clientA.send(MESSAGE_TYPE.ROOM_READY_REQ, 3, encodeRoomReadyReq(true));
     await clientB.send(MESSAGE_TYPE.ROOM_READY_REQ, 3, encodeRoomReadyReq(true));
 
-    for (const cl of [clientA, clientB]) {
-      printResponse(`${cl.label}.roomReady`, await cl.readNextPacket(options.timeoutMs));
-      printResponse(`${cl.label}.roomStatePush(ready)`, await cl.readNextPacket(options.timeoutMs));
-    }
+    const readyA = await waitForResponse(clientA, options, MESSAGE_TYPE.ROOM_READY_RES, 3, "clientA.roomReady");
+    if (!readyA.ok) throw new Error(`clientA ready failed: ${readyA.errorCode}`);
+    const readyB = await waitForResponse(clientB, options, MESSAGE_TYPE.ROOM_READY_RES, 3, "clientB.roomReady");
+    if (!readyB.ok) throw new Error(`clientB ready failed: ${readyB.errorCode}`);
+    const readyStateA = await waitForResponse(
+      clientA,
+      options,
+      MESSAGE_TYPE.ROOM_STATE_PUSH,
+      undefined,
+      "clientA.roomStatePush(ready)"
+    );
+    await waitForResponse(clientB, options, MESSAGE_TYPE.ROOM_STATE_PUSH, undefined, "clientB.roomStatePush(ready)");
 
     await clientA.send(MESSAGE_TYPE.ROOM_START_REQ, 4, encodeRoomStartReq());
-    const startA = printResponse("clientA.roomStart", await clientA.readNextPacket(options.timeoutMs));
+    const startA = await waitForResponse(clientA, options, MESSAGE_TYPE.ROOM_START_RES, 4, "clientA.roomStart");
     if (!startA.ok) throw new Error(`room start failed: ${startA.errorCode}`);
-    printResponse("clientA.roomStatePush(gameStarted)", await clientA.readNextPacket(options.timeoutMs));
-    printResponse("clientB.roomStatePush(gameStarted)", await clientB.readNextPacket(options.timeoutMs));
+    await waitForResponse(clientA, options, MESSAGE_TYPE.ROOM_STATE_PUSH, undefined, "clientA.roomStatePush(gameStarted)");
+    await waitForResponse(clientB, options, MESSAGE_TYPE.ROOM_STATE_PUSH, undefined, "clientB.roomStatePush(gameStarted)");
 
-    // Collect initial snapshot from both clients to confirm spawn positions
-    const snapA0 = await waitForMovementSnapshot(clientA, options.timeoutMs * 3);
-    const snapB0 = await waitForMovementSnapshot(clientB, options.timeoutMs * 3);
-
-    const entityA0 = snapA0.entities.find((e) => e.characterId === loginA.characterId);
-    const entityB0 = snapB0.entities.find((e) => e.characterId === loginB.characterId);
+    // Ready can emit a recovery snapshot before ReadyRes. readUntil consumes
+    // that asynchronous push, so use the authoritative serialized RoomState
+    // to validate initial entities instead of waiting for a duplicate snapshot.
+    const initialState = JSON.parse(readyStateA.snapshot.gameState);
+    const entityA0 = initialState.entities.find((e) => e.character_id === loginA.characterId);
+    const entityB0 = initialState.entities.find((e) => e.character_id === loginB.characterId);
     if (!entityA0 || !entityB0) throw new Error("Initial spawn entities not found");
 
     console.log(`[ASSERT] clientA spawn: (${entityA0.x.toFixed(3)}, ${entityA0.y.toFixed(3)})`);
@@ -664,10 +684,10 @@ export async function runMovementDualClientSync(options) {
 
     await delayBeforeFinalLeave(clientA, options.timeoutMs, 1000);
     await clientA.send(MESSAGE_TYPE.ROOM_LEAVE_REQ, 300, encodeRoomLeaveReq());
-    printResponse("clientA.roomLeave", await clientA.readNextPacket(options.timeoutMs));
+    await waitForResponse(clientA, options, MESSAGE_TYPE.ROOM_LEAVE_RES, 300, "clientA.roomLeave");
     await delayBeforeFinalLeave(clientB, options.timeoutMs, 1000);
     await clientB.send(MESSAGE_TYPE.ROOM_LEAVE_REQ, 301, encodeRoomLeaveReq());
-    printResponse("clientB.roomLeave", await clientB.readNextPacket(options.timeoutMs));
+    await waitForResponse(clientB, options, MESSAGE_TYPE.ROOM_LEAVE_RES, 301, "clientB.roomLeave");
   } finally {
     clientA.close();
     clientB.close();
@@ -693,7 +713,7 @@ export async function runMovementSnapshotThrottle(options) {
 
     const policyId = options.policyId || "movement_demo";
     await client.send(MESSAGE_TYPE.ROOM_JOIN_REQ, 2, encodeRoomJoinReq(options.roomId, policyId));
-    const joinRes = printResponse("client.roomJoin", await client.readNextPacket(options.timeoutMs));
+    const joinRes = await waitForRoomJoinResponse(client, options, "client.roomJoin");
     if (!joinRes.ok) throw new Error(`room join failed: ${joinRes.errorCode}`);
     printResponse("client.roomStatePush(join)", await client.readNextPacket(options.timeoutMs));
 
@@ -781,7 +801,7 @@ export async function runMovementFaceTo(options) {
 
     const policyId = options.policyId || "movement_demo";
     await client.send(MESSAGE_TYPE.ROOM_JOIN_REQ, 2, encodeRoomJoinReq(options.roomId, policyId));
-    const joinRes = printResponse("client.roomJoin", await client.readNextPacket(options.timeoutMs));
+    const joinRes = await waitForRoomJoinResponse(client, options, "client.roomJoin");
     if (!joinRes.ok) throw new Error(`room join failed: ${joinRes.errorCode}`);
     printResponse("client.roomStatePush(join)", await client.readNextPacket(options.timeoutMs));
 
