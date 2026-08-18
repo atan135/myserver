@@ -256,6 +256,10 @@ fn assert_movement_export_payload(payload: &RoomTransferPayload) {
     assert_eq!(logic_json["recipients"], serde_json::json!([PLAYER_A]));
     assert_eq!(movement_json["schema"], "room-movement-state.v1");
     assert_eq!(movement_json["scene_id"], 1);
+    assert_eq!(movement_json["correction_interval_frames"], 3);
+    assert_eq!(movement_json["correction_distance_threshold"], 0.05);
+    assert_eq!(movement_json["aoi_enabled"], false);
+    assert_eq!(movement_json["aoi_radius"], 16.0);
     assert_eq!(movement_json["last_snapshot_frame"], 1);
     assert_eq!(movement_json["last_full_sync_frame"], 0);
     assert_eq!(movement_json["movement_control_stop_frames"], 3);
@@ -274,6 +278,8 @@ fn assert_movement_export_payload(payload: &RoomTransferPayload) {
         1
     );
     assert_eq!(movement_json["entities"][0]["character_id"], PLAYER_A);
+    assert_eq!(movement_json["entities"][0]["scene_id"], 1);
+    assert_eq!(movement_json["entities"][0]["speed"], 4.0);
     assert_eq!(movement_json["entities"][0]["moving"], true);
     assert_eq!(movement_json["entities"][0]["last_input_frame"], 1);
 }
@@ -412,6 +418,22 @@ fn movement_payload_with_unsupported_schema(
     payload
 }
 
+fn movement_payload_with_legacy_aoi_enabled(
+    mut payload: RoomTransferPayload,
+) -> RoomTransferPayload {
+    let mut movement_wrapper =
+        serde_json::from_str::<serde_json::Value>(&payload.movement_state_json).unwrap();
+    let mut movement_inner = serde_json::from_str::<serde_json::Value>(
+        movement_wrapper["movementStateJson"].as_str().unwrap(),
+    )
+    .unwrap();
+    movement_inner["aoi_enabled"] = serde_json::json!(true);
+    movement_wrapper["movementStateJson"] = serde_json::json!(movement_inner.to_string());
+    payload.movement_state_json = movement_wrapper.to_string();
+    payload.checksum = room_transfer_checksum(&payload);
+    payload
+}
+
 fn combat_payload_with_invalid_json(mut payload: RoomTransferPayload) -> RoomTransferPayload {
     let mut logic_wrapper =
         serde_json::from_str::<serde_json::Value>(&payload.logic_state_json).unwrap();
@@ -497,7 +519,8 @@ async fn movement_demo_transfer_restores_movement_payload_consistently() {
         .expect("movement recovery should exist after import");
     assert_eq!(movement_recovery.frame_id, 2);
     assert_eq!(movement_recovery.reference_frame_id, 2);
-    assert!(movement_recovery.aoi_enabled);
+    assert!(!movement_recovery.aoi_enabled);
+    assert_eq!(movement_recovery.aoi_radius, 16.0);
     assert_eq!(movement_recovery.entities.len(), 1);
     assert_eq!(movement_recovery.entities[0].character_id, PLAYER_A);
     assert!(movement_recovery.entities[0].moving);
@@ -537,6 +560,18 @@ async fn movement_demo_transfer_rejects_unsupported_movement_schema() {
     assert_eq!(
         target.import_room_transfer(payload).await,
         Err("ROOM_TRANSFER_UNSUPPORTED_SCHEMA")
+    );
+}
+
+#[tokio::test]
+async fn movement_demo_transfer_rejects_legacy_aoi_contract() {
+    let fixture = setup_movement_demo_transfer().await;
+    let payload = movement_payload_with_legacy_aoi_enabled(fixture.payload);
+    let target = fresh_demo_manager(&fixture.config_tables);
+
+    assert_eq!(
+        target.import_room_transfer(payload).await,
+        Err("ROOM_TRANSFER_INCOMPATIBLE_MOVEMENT_STATE")
     );
 }
 

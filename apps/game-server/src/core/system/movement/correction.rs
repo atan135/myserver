@@ -178,10 +178,12 @@ mod tests {
     use crate::core::system::scene::query::SceneSpawnPointDefinition;
     use crate::pb::MovementCorrectionKind;
     use prost::Message;
+    use std::time::Instant;
 
     const ROOM_ID: &str = "main-world-public";
     const MAX_ROOM_MEMBERS: usize = 32;
     const ACTIVE_ROOM_FPS: usize = 20;
+    const PROCESSING_SAMPLE_ITERATIONS: usize = 2_000;
 
     fn spawn() -> SceneSpawnPointDefinition {
         SceneSpawnPointDefinition {
@@ -255,9 +257,31 @@ mod tests {
             "32-member movement sizes: snapshot={snapshot_bytes}B recovery={recovery_bytes}B \
              worst_case_room_egress_at_20hz={room_egress_bytes_per_second}B/s"
         );
+
+        let started = Instant::now();
+        let mut processed_bytes = 0usize;
+        for frame_id in 0..PROCESSING_SAMPLE_ITERATIONS as u32 {
+            let sample = full_sync_broadcast(
+                ROOM_ID,
+                &mut state,
+                frame_id,
+                MovementCorrectionReason::Periodic,
+            );
+            processed_bytes += sample.body.len();
+        }
+        let processing_elapsed = started.elapsed();
+        let average_processing_nanos =
+            processing_elapsed.as_nanos() / PROCESSING_SAMPLE_ITERATIONS as u128;
+        println!(
+            "32-member full snapshot processing sample: iterations={PROCESSING_SAMPLE_ITERATIONS} \
+             total={processing_elapsed:?} average={average_processing_nanos}ns \
+             encoded_bytes={processed_bytes}"
+        );
+
         assert!(snapshot_bytes > 32 * 20);
         assert!(recovery_bytes > 32 * 20);
         assert!(room_egress_bytes_per_second < 2 * 1024 * 1024);
+        assert!(processed_bytes > 0);
     }
 
     #[test]

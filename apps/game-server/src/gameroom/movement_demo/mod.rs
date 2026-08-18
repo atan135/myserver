@@ -13,11 +13,12 @@ use crate::core::system::movement::{
     RoomMovementState, decide_corrections, full_sync_broadcast, reject_broadcast,
     snapshot_broadcasts, tick_movement,
 };
-use crate::core::system::scene::SceneQuery;
+use crate::core::system::scene::{SceneCatalog, SceneQuery};
 use crate::pb::{MovementCorrectionReason, MovementRecoveryState};
 
 const DEFAULT_MOVE_SPEED: f32 = MOVEMENT_DEMO_DEFAULT_SPEED_METERS_PER_SECOND;
 const MOVEMENT_DEMO_TRANSFER_SCHEMA: &str = "movement-demo.logic.v1";
+const MOVEMENT_TRANSFER_CONFIG_EPSILON: f32 = 0.000_001;
 
 #[derive(Default)]
 pub struct MovementDemoLogic {
@@ -112,6 +113,52 @@ impl MovementDemoLogic {
             "movement demo player spawned"
         );
     }
+
+    fn validate_imported_movement_state(
+        &self,
+        logic_state: &MovementDemoTransferLogicState,
+        imported: &RoomMovementState,
+        scene_catalog: &SceneCatalog,
+    ) -> Result<(), &'static str> {
+        let expected = self
+            .movement_state
+            .as_ref()
+            .ok_or("ROOM_TRANSFER_INVALID_MOVEMENT_STATE")?;
+        if logic_state.default_scene_id != self.default_scene_id
+            || imported.scene_id != logic_state.default_scene_id
+            || imported.scene_id != expected.scene_id
+            || imported.correction_interval_frames != expected.correction_interval_frames
+            || imported.movement_control_stop_frames != expected.movement_control_stop_frames
+            || imported.aoi_enabled != expected.aoi_enabled
+            || !transfer_float_matches(
+                imported.correction_distance_threshold,
+                expected.correction_distance_threshold,
+            )
+            || !transfer_float_matches(imported.aoi_radius, expected.aoi_radius)
+        {
+            return Err("ROOM_TRANSFER_INCOMPATIBLE_MOVEMENT_STATE");
+        }
+
+        if scene_catalog.scene(imported.scene_id).is_none() {
+            return Err("ROOM_TRANSFER_INCOMPATIBLE_MOVEMENT_STATE");
+        }
+        for dense_index in imported.dense_indices() {
+            let entity = imported
+                .entity_state_at(dense_index)
+                .ok_or("ROOM_TRANSFER_INCOMPATIBLE_MOVEMENT_STATE")?;
+            if entity.scene_id != imported.scene_id
+                || !transfer_float_matches(entity.speed, DEFAULT_MOVE_SPEED)
+                || !scene_catalog.is_walkable(entity.scene_id, entity.position.x, entity.position.y)
+            {
+                return Err("ROOM_TRANSFER_INCOMPATIBLE_MOVEMENT_STATE");
+            }
+        }
+        Ok(())
+    }
+}
+
+fn transfer_float_matches(left: f32, right: f32) -> bool {
+    (left - right).abs() <= MOVEMENT_TRANSFER_CONFIG_EPSILON
 }
 
 impl RoomLogic for MovementDemoLogic {
@@ -348,6 +395,16 @@ impl RoomLogicTransfer for MovementDemoLogic {
         validate_transfer_recipients(&logic_state.recipients)?;
         let movement_state =
             RoomMovementState::import_transfer_state_json(&state.movement_state_json)?;
+        let config_tables = self
+            .config_tables
+            .as_ref()
+            .ok_or("ROOM_TRANSFER_INVALID_MOVEMENT_STATE")?;
+        let config = config_tables.current_snapshot();
+        self.validate_imported_movement_state(
+            &logic_state,
+            &movement_state,
+            config.scene_catalog.as_ref(),
+        )?;
 
         self.room_id = logic_state.room_id;
         self.tick_count = logic_state.tick_count;
@@ -374,9 +431,68 @@ fn validate_transfer_recipients(recipients: &[String]) -> Result<(), &'static st
 mod tests {
     use super::*;
     use crate::core::config_table::ConfigTableRuntime;
+    use crate::core::runtime::room_policy::{
+        MOVEMENT_DEMO_AOI_ENABLED, MOVEMENT_DEMO_CONTROL_STOP_FRAMES,
+        MOVEMENT_DEMO_CORRECTION_INTERVAL_FRAMES, MOVEMENT_DEMO_CORRECTION_THRESHOLD_METERS,
+    };
     use crate::core::system::movement::input::MovementCommand;
     use crate::core::system::movement::state::Vec2;
+    use crate::pb::MovementCorrectionKind;
+    use prost::Message;
     use serde_json::json;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TEMP_CONFIG_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+    struct TempConfigDir {
+        root: PathBuf,
+        csv_dir: PathBuf,
+        scene_dir: PathBuf,
+    }
+
+    impl TempConfigDir {
+        fn new() -> Self {
+            let root = std::env::temp_dir().join(format!(
+                "myserver-movement-reload-{}-{}",
+                std::process::id(),
+                TEMP_CONFIG_COUNTER.fetch_add(1, Ordering::Relaxed)
+            ));
+            let csv_dir = root.join("csv");
+            let scene_dir = root.join("scene");
+            fs::create_dir_all(&csv_dir).unwrap();
+            fs::create_dir_all(&scene_dir).unwrap();
+            let manifest_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+            copy_dir(&manifest_root.join("csv"), &csv_dir);
+            copy_dir(&manifest_root.join("scene"), &scene_dir);
+            Self {
+                root,
+                csv_dir,
+                scene_dir,
+            }
+        }
+    }
+
+    impl Drop for TempConfigDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+
+    fn copy_dir(source: &Path, target: &Path) {
+        for entry in fs::read_dir(source).unwrap() {
+            let entry = entry.unwrap();
+            let source_path = entry.path();
+            let target_path = target.join(entry.file_name());
+            if source_path.is_dir() {
+                fs::create_dir_all(&target_path).unwrap();
+                copy_dir(&source_path, &target_path);
+            } else {
+                fs::copy(source_path, target_path).unwrap();
+            }
+        }
+    }
 
     fn config_tables() -> ConfigTableRuntime {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -385,7 +501,15 @@ mod tests {
     }
 
     fn movement_demo_logic() -> MovementDemoLogic {
-        MovementDemoLogic::new(config_tables(), 1, 3, 0.35, 16.0, true, 3)
+        MovementDemoLogic::new(
+            config_tables(),
+            1,
+            MOVEMENT_DEMO_CORRECTION_INTERVAL_FRAMES,
+            MOVEMENT_DEMO_CORRECTION_THRESHOLD_METERS,
+            16.0,
+            MOVEMENT_DEMO_AOI_ENABLED,
+            MOVEMENT_DEMO_CONTROL_STOP_FRAMES,
+        )
     }
 
     fn transfer_state_with_logic(logic_state_json: String) -> RoomLogicTransferState {
@@ -533,5 +657,121 @@ mod tests {
         );
         assert_eq!(character_b_after_leave.last_input_frame, 17);
         assert!(character_b_after_leave.moving);
+    }
+
+    #[test]
+    fn offline_recovery_stops_authoritative_movement_without_losing_last_input() {
+        let mut logic = movement_demo_logic();
+        logic.on_room_created("main-world-public");
+        logic.on_character_join("character-a");
+        let state = logic.movement_state.as_mut().unwrap();
+        let dense_index = state.dense_index_by_character("character-a").unwrap();
+        state.apply_command_at(
+            dense_index,
+            27,
+            MovementCommand::MoveDir(Vec2 { x: 0.0, y: 1.0 }),
+        );
+        state.set_position_at(
+            dense_index,
+            Vec2 {
+                x: 3999.5,
+                y: 2002.0,
+            },
+        );
+
+        logic.tick_count = 30;
+        logic.on_character_offline("main-world-public", "character-a");
+        let recovery = logic
+            .movement_recovery_state(
+                Some("character-a"),
+                MovementCorrectionReason::ReconnectRecovery,
+            )
+            .unwrap();
+
+        assert_eq!(recovery.frame_id, 30);
+        assert_eq!(
+            recovery.correction_kind,
+            MovementCorrectionKind::Recovery as i32
+        );
+        assert_eq!(
+            recovery.reason_code,
+            MovementCorrectionReason::ReconnectRecovery as i32
+        );
+        assert!(!recovery.aoi_enabled);
+        assert_eq!(recovery.entities.len(), 1);
+        let entity = &recovery.entities[0];
+        assert_eq!(entity.scene_id, 1);
+        assert_eq!(entity.x, 3999.5);
+        assert_eq!(entity.y, 2002.0);
+        assert_eq!(entity.dir_x, 0.0);
+        assert_eq!(entity.dir_y, 1.0);
+        assert!(!entity.moving);
+        assert_eq!(entity.last_input_frame, 30);
+
+        let broadcasts = logic.take_pending_broadcasts();
+        assert_eq!(broadcasts.len(), 1);
+        let snapshot = crate::pb::MovementSnapshotPush::decode(broadcasts[0].body.as_slice())
+            .expect("offline correction should decode");
+        assert_eq!(
+            snapshot.reason_code,
+            MovementCorrectionReason::PlayerOffline as i32
+        );
+        assert!(!snapshot.entities[0].moving);
+    }
+
+    #[tokio::test]
+    async fn csv_reload_updates_scene_catalog_without_resetting_existing_entities() {
+        let fixture = TempConfigDir::new();
+        let runtime = ConfigTableRuntime::load_with_scene_dir(&fixture.csv_dir, &fixture.scene_dir)
+            .expect("initial config should load");
+        let mut logic = MovementDemoLogic::new(
+            runtime.clone(),
+            1,
+            MOVEMENT_DEMO_CORRECTION_INTERVAL_FRAMES,
+            MOVEMENT_DEMO_CORRECTION_THRESHOLD_METERS,
+            16.0,
+            MOVEMENT_DEMO_AOI_ENABLED,
+            MOVEMENT_DEMO_CONTROL_STOP_FRAMES,
+        );
+        logic.on_room_created("main-world-public");
+        logic.on_character_join("character-a");
+        let before = logic
+            .movement_state
+            .as_ref()
+            .unwrap()
+            .entity("character-a")
+            .unwrap();
+
+        let spawn_path = fixture.csv_dir.join("SceneSpawnPoint.csv");
+        let updated = fs::read_to_string(&spawn_path).unwrap().replace(
+            "1001,1,grassland_player_main,player,2002.0,2002.0,1.0,0.0,2.0,default|safe",
+            "1001,1,grassland_player_main,player,2003.5,2002.0,1.0,0.0,2.0,default|safe",
+        );
+        fs::write(&spawn_path, updated).unwrap();
+        runtime
+            .reload_changed(std::slice::from_ref(&spawn_path))
+            .await
+            .expect("scene spawn reload should succeed");
+
+        let existing = logic
+            .movement_state
+            .as_ref()
+            .unwrap()
+            .entity("character-a")
+            .unwrap();
+        assert_eq!(existing.entity_id, before.entity_id);
+        assert_eq!(existing.position.x, before.position.x);
+        assert_eq!(existing.position.y, before.position.y);
+        assert_eq!(existing.last_input_frame, before.last_input_frame);
+
+        logic.on_character_join("character-b");
+        let spawned_after_reload = logic
+            .movement_state
+            .as_ref()
+            .unwrap()
+            .entity("character-b")
+            .unwrap();
+        assert_eq!(spawned_after_reload.position.x, 2003.5);
+        assert_eq!(spawned_after_reload.position.y, 2002.0);
     }
 }

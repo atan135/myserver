@@ -962,8 +962,8 @@ mod tests {
     #[test]
     fn transfer_state_roundtrip_restores_runtime_fields() {
         let mut state = RoomMovementState::new(1, 3);
-        state.set_correction_config(4, 0.35, 16.0, true);
-        state.set_movement_control_stop_frames(5);
+        state.set_correction_config(3, 0.05, 16.0, false);
+        state.set_movement_control_stop_frames(3);
         state.last_snapshot_frame = 7;
         state.last_full_sync_frame = 6;
 
@@ -975,7 +975,13 @@ mod tests {
             5,
             MovementCommand::MoveDir(Vec2 { x: 0.0, y: 1.0 }),
         );
-        state.set_position_at(dense_index, Vec2 { x: 2.5, y: 3.5 });
+        state.set_position_at(
+            dense_index,
+            Vec2 {
+                x: 3999.75,
+                y: 2002.0,
+            },
+        );
         state.set_client_state_for_character(
             "player-a",
             ClientMovementState {
@@ -1017,16 +1023,16 @@ mod tests {
         assert_eq!(imported.next_entity_id, spawned.entity_id + 1);
         assert_eq!(imported.last_snapshot_frame, 7);
         assert_eq!(imported.last_full_sync_frame, 6);
-        assert_eq!(imported.correction_interval_frames, 4);
-        assert_eq!(imported.correction_distance_threshold, 0.35);
-        assert!(imported.aoi_enabled);
+        assert_eq!(imported.correction_interval_frames, 3);
+        assert_eq!(imported.correction_distance_threshold, 0.05);
+        assert!(!imported.aoi_enabled);
         assert_eq!(imported.aoi_radius, 16.0);
-        assert_eq!(imported.movement_control_stop_frames, 5);
+        assert_eq!(imported.movement_control_stop_frames, 3);
 
         let entity = imported.entity("player-a").unwrap();
         assert_eq!(entity.entity_id, spawned.entity_id);
-        assert_eq!(entity.position.x, 2.5);
-        assert_eq!(entity.position.y, 3.5);
+        assert_eq!(entity.position.x, 3999.75);
+        assert_eq!(entity.position.y, 2002.0);
         assert_eq!(entity.direction.x, 0.0);
         assert_eq!(entity.direction.y, 1.0);
         assert_eq!(entity.speed, 4.0);
