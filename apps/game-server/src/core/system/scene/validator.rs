@@ -20,6 +20,13 @@ pub fn validate_scene_catalog(catalog: &SceneCatalog) -> Result<(), SceneLoadErr
             )));
         }
 
+        if !default_spawn.x.is_finite() || !default_spawn.y.is_finite() {
+            return Err(SceneLoadError::invalid(format!(
+                "scene {} default spawn {} position must be finite",
+                scene.id, default_spawn.id
+            )));
+        }
+
         if !catalog.is_walkable(scene.id, default_spawn.x, default_spawn.y) {
             return Err(SceneLoadError::invalid(format!(
                 "scene {} default spawn {} is blocked",

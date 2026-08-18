@@ -1,6 +1,6 @@
 Id,SceneId,Code,SpawnType,X,Y,DirX,DirY,Radius,Tags
 int,int,string,string,float,float,float,float,float,Array<string>
-1001,1,grassland_player_main,player,2.0,2.0,1.0,0.0,2.0,default|safe
+1001,1,grassland_player_main,player,2002.0,2002.0,1.0,0.0,2.0,default|safe
 1002,1,grassland_player_north,player,2.0,12.0,1.0,0.0,2.0,secondary|safe
 1101,1,grassland_wolf_spawn_a,monster,10.0,4.0,-1.0,0.0,3.0,wild|melee
 1102,1,grassland_wolf_spawn_b,monster,12.0,10.0,-1.0,0.0,3.0,wild|melee

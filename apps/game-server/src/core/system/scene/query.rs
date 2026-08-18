@@ -773,6 +773,9 @@ impl SceneCatalog {
     }
 
     fn world_to_cell(&self, scene_id: i32, world_x: f32, world_y: f32) -> Option<(i32, i32)> {
+        if !world_x.is_finite() || !world_y.is_finite() {
+            return None;
+        }
         let scene = self.scene(scene_id)?;
         let cell_x = (world_x / scene.cell_size).floor() as i32;
         let cell_y = (world_y / scene.cell_size).floor() as i32;
@@ -1127,6 +1130,55 @@ mod tests {
         );
         assert_eq!(active.elements.mastery.fire, 28);
         assert_eq!(active.applied_context_codes, vec!["relic_surge"]);
+    }
+
+    #[test]
+    fn grassland_01_world_contract_matches_catalog_and_exclusive_bounds() {
+        use super::super::world_contract::{
+            GRASSLAND_01_CELL_COUNT, GRASSLAND_01_CELL_SIZE_METERS, GRASSLAND_01_CODE,
+            GRASSLAND_01_DEFAULT_SPAWN_ID, GRASSLAND_01_DEFAULT_SPAWN_X,
+            GRASSLAND_01_DEFAULT_SPAWN_Y, GRASSLAND_01_GRID_HEIGHT, GRASSLAND_01_GRID_WIDTH,
+            GRASSLAND_01_SCENE_ID, GRASSLAND_01_WORLD_SIZE_METERS,
+        };
+
+        let catalog = catalog();
+        let scene = catalog
+            .scene(GRASSLAND_01_SCENE_ID)
+            .expect("grassland scene should exist");
+        assert_eq!(scene.code, GRASSLAND_01_CODE);
+        assert_eq!(scene.width, GRASSLAND_01_GRID_WIDTH);
+        assert_eq!(scene.height, GRASSLAND_01_GRID_HEIGHT);
+        assert_eq!(scene.cell_size, GRASSLAND_01_CELL_SIZE_METERS);
+        assert_eq!(
+            usize::try_from(scene.width * scene.height).unwrap(),
+            GRASSLAND_01_CELL_COUNT
+        );
+
+        let spawn = catalog
+            .spawn_point(GRASSLAND_01_DEFAULT_SPAWN_ID)
+            .expect("default spawn should exist");
+        assert_eq!(spawn.scene_id, GRASSLAND_01_SCENE_ID);
+        assert_eq!(spawn.x, GRASSLAND_01_DEFAULT_SPAWN_X);
+        assert_eq!(spawn.y, GRASSLAND_01_DEFAULT_SPAWN_Y);
+        assert!(spawn.x.is_finite() && spawn.y.is_finite());
+
+        for (x, y) in [
+            (0.0, 0.0),
+            (2000.0, 2000.0),
+            (3999.999, 3999.999),
+            (GRASSLAND_01_DEFAULT_SPAWN_X, GRASSLAND_01_DEFAULT_SPAWN_Y),
+        ] {
+            assert!(catalog.is_walkable(GRASSLAND_01_SCENE_ID, x, y));
+        }
+        for (x, y) in [
+            (-0.001, 0.0),
+            (0.0, -0.001),
+            (GRASSLAND_01_WORLD_SIZE_METERS, 0.0),
+            (0.0, GRASSLAND_01_WORLD_SIZE_METERS),
+            (f32::NAN, 0.0),
+        ] {
+            assert!(!catalog.is_walkable(GRASSLAND_01_SCENE_ID, x, y));
+        }
     }
 }
 

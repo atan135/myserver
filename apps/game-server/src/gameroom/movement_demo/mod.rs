@@ -13,9 +13,10 @@ use crate::core::system::movement::{
     snapshot_broadcasts, tick_movement,
 };
 use crate::core::system::scene::SceneQuery;
+use crate::core::system::scene::world_contract::MOVEMENT_DEMO_TARGET_SPEED_METERS_PER_SECOND;
 use crate::pb::{MovementCorrectionReason, MovementRecoveryState};
 
-const DEFAULT_MOVE_SPEED: f32 = 4.0;
+const DEFAULT_MOVE_SPEED: f32 = MOVEMENT_DEMO_TARGET_SPEED_METERS_PER_SECOND;
 const MOVEMENT_DEMO_TRANSFER_SCHEMA: &str = "movement-demo.logic.v1";
 
 #[derive(Default)]
@@ -100,6 +101,8 @@ impl MovementDemoLogic {
             return;
         };
 
+        // Public-world players share the configured spawn. Collision and spawn offsets are not
+        // part of movement_demo, so no other character can alter this character's spawn state.
         movement_state.spawn_character(character_id, spawn, DEFAULT_MOVE_SPEED);
         info!(
             room_id = self.room_id,
@@ -370,7 +373,20 @@ fn validate_transfer_recipients(recipients: &[String]) -> Result<(), &'static st
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::config_table::ConfigTableRuntime;
+    use crate::core::system::movement::input::MovementCommand;
+    use crate::core::system::movement::state::Vec2;
     use serde_json::json;
+
+    fn config_tables() -> ConfigTableRuntime {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        ConfigTableRuntime::load_with_scene_dir(&root.join("csv"), &root.join("scene"))
+            .expect("game-server config fixture should load")
+    }
+
+    fn movement_demo_logic() -> MovementDemoLogic {
+        MovementDemoLogic::new(config_tables(), 1, 3, 0.35, 16.0, true, 3)
+    }
 
     fn transfer_state_with_logic(logic_state_json: String) -> RoomLogicTransferState {
         RoomLogicTransferState {
@@ -417,5 +433,105 @@ mod tests {
             logic.import_transfer_state(&empty_room_state),
             Err("ROOM_TRANSFER_INVALID_LOGIC_STATE")
         );
+    }
+
+    #[test]
+    fn character_states_remain_independent_through_offline_and_leave_paths() {
+        let mut logic = movement_demo_logic();
+        logic.on_room_created("main-world-public");
+        logic.on_character_join("character-a");
+        logic.on_character_join("character-b");
+
+        let character_b_before = {
+            let state = logic
+                .movement_state
+                .as_mut()
+                .expect("movement state should be initialized");
+            assert_eq!(state.entity_count(), 2);
+            let a_index = state
+                .dense_index_by_character("character-a")
+                .expect("character-a should be spawned");
+            let b_index = state
+                .dense_index_by_character("character-b")
+                .expect("character-b should be spawned");
+            let character_a_spawned = state.entity("character-a").unwrap();
+            let character_b_spawned = state.entity("character-b").unwrap();
+            assert_eq!(character_a_spawned.character_id, "character-a");
+            assert_eq!(character_b_spawned.character_id, "character-b");
+            assert_ne!(character_a_spawned.entity_id, character_b_spawned.entity_id);
+            for entity in [&character_a_spawned, &character_b_spawned] {
+                assert_eq!(entity.position.x, 2002.0);
+                assert_eq!(entity.position.y, 2002.0);
+                assert_eq!(entity.direction.x, 1.0);
+                assert_eq!(entity.direction.y, 0.0);
+                assert_eq!(entity.last_input_frame, 0);
+            }
+            assert!(state.apply_command_at(
+                a_index,
+                11,
+                MovementCommand::MoveDir(Vec2 { x: 1.0, y: 0.0 })
+            ));
+            assert!(state.apply_command_at(
+                b_index,
+                17,
+                MovementCommand::MoveDir(Vec2 { x: 0.0, y: 1.0 })
+            ));
+            let character_a = state.entity("character-a").unwrap();
+            let character_b = state.entity("character-b").unwrap();
+            assert_eq!(character_a.character_id, "character-a");
+            assert_eq!(character_a.direction.x, 1.0);
+            assert_eq!(character_a.direction.y, 0.0);
+            assert_eq!(character_a.last_input_frame, 11);
+            assert_eq!(character_b.character_id, "character-b");
+            assert_eq!(character_b.direction.x, 0.0);
+            assert_eq!(character_b.direction.y, 1.0);
+            assert_eq!(character_b.last_input_frame, 17);
+            character_b
+        };
+
+        logic.tick_count = 20;
+        logic.on_character_offline("main-world-public", "character-a");
+        {
+            let state = logic.movement_state.as_ref().unwrap();
+            let character_a = state.entity("character-a").unwrap();
+            let character_b_after_offline = state.entity("character-b").unwrap();
+            assert!(!character_a.moving);
+            assert_eq!(character_a.last_input_frame, 20);
+            assert_eq!(
+                character_b_after_offline.entity_id,
+                character_b_before.entity_id
+            );
+            assert_eq!(
+                character_b_after_offline.position.x,
+                character_b_before.position.x
+            );
+            assert_eq!(
+                character_b_after_offline.position.y,
+                character_b_before.position.y
+            );
+            assert_eq!(
+                character_b_after_offline.direction.x,
+                character_b_before.direction.x
+            );
+            assert_eq!(
+                character_b_after_offline.direction.y,
+                character_b_before.direction.y
+            );
+            assert!(character_b_after_offline.moving);
+            assert_eq!(character_b_after_offline.last_input_frame, 17);
+        }
+
+        // The room manager invokes this hook only after the offline TTL expires.
+        logic.on_character_leave("character-a");
+        let state = logic.movement_state.as_ref().unwrap();
+        assert!(state.entity("character-a").is_none());
+        assert_eq!(state.entity_count(), 1);
+        let character_b_after_leave = state.entity("character-b").unwrap();
+        assert_eq!(
+            character_b_after_leave.entity_id,
+            character_b_before.entity_id
+        );
+        assert_eq!(character_b_after_leave.last_input_frame, 17);
+        assert!(character_b_after_leave.moving);
     }
 }

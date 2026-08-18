@@ -275,7 +275,7 @@ mod tests {
                 .spawn_point(1001)
                 .expect("spawn exists")
                 .x,
-            2.0
+            2002.0
         );
 
         replace_in_file(
@@ -285,8 +285,8 @@ mod tests {
         );
         replace_in_file(
             &fixture.csv_dir.join("SceneSpawnPoint.csv"),
-            "1001,1,grassland_player_main,player,2.0,2.0,1.0,0.0,2.0,default|safe",
-            "1001,1,grassland_player_main,player,3.5,2.0,1.0,0.0,2.0,default|safe",
+            "1001,1,grassland_player_main,player,2002.0,2002.0,1.0,0.0,2.0,default|safe",
+            "1001,1,grassland_player_main,player,2003.5,2002.0,1.0,0.0,2.0,default|safe",
         );
 
         let reloaded = runtime
@@ -315,7 +315,7 @@ mod tests {
                 .spawn_point(1001)
                 .expect("spawn exists")
                 .x,
-            3.5
+            2003.5
         );
     }
 
@@ -328,8 +328,8 @@ mod tests {
 
         replace_in_file(
             &fixture.csv_dir.join("SceneTable.csv"),
-            "1,grassland_01,初心草原,grassland_01.grid.json,16,16,1.0,4,1001,pve|outdoor|safe_zone",
-            "1,grassland_broken,初心草原,grassland_01.grid.json,16,16,1.0,4,1001,pve|outdoor|safe_zone",
+            "1,grassland_01,初心草原,grassland_01.grid.json,40,40,100.0,4,1001,pve|outdoor|safe_zone",
+            "1,grassland_broken,初心草原,grassland_01.grid.json,40,40,100.0,4,1001,pve|outdoor|safe_zone",
         );
 
         let error = match runtime

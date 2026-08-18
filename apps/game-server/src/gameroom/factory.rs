@@ -1,11 +1,12 @@
 use crate::core::config_table::ConfigTableRuntime;
 use crate::core::logic::{RoomLogic, RoomLogicFactory};
+use crate::core::system::scene::world_contract::GRASSLAND_01_CODE;
 
+use super::test_room::TestRoomLogic;
 use super::{
     CombatDemoLogic, DisposableMatchLogic, LockstepSimDemoLogic, MovementDemoLogic,
     PersistentWorldLogic, RobotSyncRoomLogic, SandboxLogic, UITouchRoomLogic,
 };
-use super::test_room::TestRoomLogic;
 
 #[derive(Clone)]
 pub struct GameRoomLogicFactory {
@@ -31,7 +32,7 @@ impl RoomLogicFactory for GameRoomLogicFactory {
                 let config_tables = self.config_tables.clone();
                 let current = config_tables.current_snapshot();
                 let movement_demo_scene_id = movement_demo_scene_id(
-                    current.scene_catalog.scene_id_by_code("grassland_01"),
+                    current.scene_catalog.scene_id_by_code(GRASSLAND_01_CODE),
                 )?;
                 let policy = current
                     .room_policies
