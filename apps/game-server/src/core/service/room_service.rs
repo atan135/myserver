@@ -1292,7 +1292,7 @@ pub async fn handle_disconnect_cleanup(services: &ServiceContext, connection: &C
     if let (Some(room_id), Some(character_id)) = (cleanup_room_id, character_id) {
         let leave_result = services
             .room_manager
-            .disconnect_room_member(&room_id, &character_id)
+            .disconnect_room_member_for_sender(&room_id, &character_id, &connection.tx)
             .await;
 
         if let Some(snapshot) = leave_result.snapshot {

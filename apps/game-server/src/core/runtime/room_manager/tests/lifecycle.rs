@@ -75,6 +75,61 @@ async fn room_exists_reflects_room_creation() {
 }
 
 #[tokio::test]
+async fn delayed_disconnect_does_not_mark_rejoined_character_offline() {
+    let manager = RoomManager::with_match_client(
+        crate::match_client::create_match_client_shared(),
+        Arc::new(RecordingRoomLogicFactory::default()),
+    );
+    let (old_tx, _old_rx) = mpsc::channel(1024);
+    manager
+        .join_room(
+            TEST_ROOM_ID,
+            PLAYER_A,
+            old_tx.clone(),
+            MemberRole::Player,
+            Some(DEFAULT_POLICY),
+        )
+        .await
+        .unwrap();
+
+    let (new_tx, _new_rx) = mpsc::channel(1024);
+    manager
+        .join_room(
+            TEST_ROOM_ID,
+            PLAYER_A,
+            new_tx.clone(),
+            MemberRole::Player,
+            Some(DEFAULT_POLICY),
+        )
+        .await
+        .unwrap();
+
+    let stale_cleanup = manager
+        .disconnect_room_member_for_sender(TEST_ROOM_ID, PLAYER_A, &old_tx)
+        .await;
+    assert!(stale_cleanup.snapshot.is_none());
+    with_room_for_test(&manager, TEST_ROOM_ID, |room| {
+        let member = room.members.get(PLAYER_A).expect("member should remain");
+        assert!(!member.offline);
+        assert!(member.sender.same_channel(&new_tx));
+    })
+    .await;
+    assert_eq!(
+        character_room_index_for_test(&manager, PLAYER_A).await,
+        Some(TEST_ROOM_ID.to_string())
+    );
+
+    let current_cleanup = manager
+        .disconnect_room_member_for_sender(TEST_ROOM_ID, PLAYER_A, &new_tx)
+        .await;
+    assert!(current_cleanup.snapshot.is_some());
+    with_room_for_test(&manager, TEST_ROOM_ID, |room| {
+        assert!(room.members.get(PLAYER_A).unwrap().offline);
+    })
+    .await;
+}
+
+#[tokio::test]
 async fn join_room_rejects_unknown_policy_before_creating_room() {
     let manager = RoomManager::with_match_client(
         crate::match_client::create_match_client_shared(),

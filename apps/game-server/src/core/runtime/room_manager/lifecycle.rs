@@ -1,6 +1,7 @@
 use super::*;
 
 use super::transfer_codec::{room_frame_inputs_from_history, room_frame_inputs_from_pending};
+use crate::core::room::OutboundSender;
 
 impl RoomManager {
     pub async fn create_matched_room(
@@ -423,6 +424,26 @@ impl RoomManager {
         room_id: &str,
         character_id: &str,
     ) -> RoomLeaveResult {
+        self.disconnect_room_member_if_current_sender(room_id, character_id, None)
+            .await
+    }
+
+    pub async fn disconnect_room_member_for_sender(
+        &self,
+        room_id: &str,
+        character_id: &str,
+        expected_sender: &OutboundSender,
+    ) -> RoomLeaveResult {
+        self.disconnect_room_member_if_current_sender(room_id, character_id, Some(expected_sender))
+            .await
+    }
+
+    async fn disconnect_room_member_if_current_sender(
+        &self,
+        room_id: &str,
+        character_id: &str,
+        expected_sender: Option<&OutboundSender>,
+    ) -> RoomLeaveResult {
         info!(
             room_id = room_id,
             character_id = character_id,
@@ -450,6 +471,19 @@ impl RoomManager {
             .count();
 
         if let Some(member) = room.members.get_mut(character_id) {
+            if expected_sender
+                .is_some_and(|expected_sender| !member.sender.same_channel(expected_sender))
+            {
+                info!(
+                    room_id = room_id,
+                    character_id = character_id,
+                    "disconnect cleanup skipped because room member connection was replaced"
+                );
+                return RoomLeaveResult {
+                    snapshot: None,
+                    room_removed: false,
+                };
+            }
             member.offline = true;
             member.offline_since = Some(Instant::now());
             detach_member_outbound(member);
