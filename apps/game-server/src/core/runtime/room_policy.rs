@@ -1,6 +1,14 @@
 use std::sync::{Arc, RwLock};
 
 pub const DEFAULT_ROOM_POLICY_ID: &str = "default_match";
+pub const MOVEMENT_DEMO_POLICY_ID: &str = "movement_demo";
+pub const MOVEMENT_DEMO_MAX_MEMBERS: usize = 32;
+pub const MOVEMENT_DEMO_ACTIVE_ROOM_FPS: u16 = 20;
+pub const MOVEMENT_DEMO_DEFAULT_SPEED_METERS_PER_SECOND: f32 = 4.0;
+pub const MOVEMENT_DEMO_CORRECTION_INTERVAL_FRAMES: u32 = 3;
+pub const MOVEMENT_DEMO_CORRECTION_THRESHOLD_METERS: f32 = 0.05;
+pub const MOVEMENT_DEMO_AOI_ENABLED: bool = false;
+pub const MOVEMENT_DEMO_CONTROL_STOP_FRAMES: u32 = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputWaitStrategy {
@@ -162,13 +170,13 @@ impl RoomRuntimePolicy {
 
     pub fn movement_demo() -> Self {
         Self {
-            policy_id: "movement_demo".to_string(),
-            max_members: 32,
+            policy_id: MOVEMENT_DEMO_POLICY_ID.to_string(),
+            max_members: MOVEMENT_DEMO_MAX_MEMBERS,
             min_start_players: 1,
             allow_join_in_game: false,
             silent_room_fps: 1,
             idle_room_fps: 10,
-            active_room_fps: 20,
+            active_room_fps: MOVEMENT_DEMO_ACTIVE_ROOM_FPS,
             busy_room_fps: 20,
             busy_room_player_threshold: 4,
             destroy_enabled: true,
@@ -181,11 +189,11 @@ impl RoomRuntimePolicy {
             wait_timeout_ms: 100,
             wait_strategy: InputWaitStrategy::Optimistic,
             missing_input_strategy: MissingInputStrategy::Empty,
-            movement_correction_interval_frames: 3,
-            movement_correction_threshold: 0.35,
-            movement_aoi_enabled: true,
+            movement_correction_interval_frames: MOVEMENT_DEMO_CORRECTION_INTERVAL_FRAMES,
+            movement_correction_threshold: MOVEMENT_DEMO_CORRECTION_THRESHOLD_METERS,
+            movement_aoi_enabled: MOVEMENT_DEMO_AOI_ENABLED,
             movement_aoi_radius: 16.0,
-            movement_control_stop_frames: 3,
+            movement_control_stop_frames: MOVEMENT_DEMO_CONTROL_STOP_FRAMES,
         }
     }
 
@@ -327,7 +335,7 @@ impl Default for RoomPolicyRegistry {
         );
         policies.insert("sandbox".to_string(), RoomRuntimePolicy::sandbox());
         policies.insert(
-            "movement_demo".to_string(),
+            MOVEMENT_DEMO_POLICY_ID.to_string(),
             RoomRuntimePolicy::movement_demo(),
         );
         policies.insert("combat_demo".to_string(), RoomRuntimePolicy::combat_demo());
@@ -417,13 +425,32 @@ mod tests {
     #[test]
     fn builtin_room_policy_defaults_cover_tick_input_and_capacity() {
         let registry = RoomPolicyRegistry::default();
-        let movement = registry.resolve("movement_demo").unwrap();
-        assert_eq!(movement.max_members, 32);
+        let movement = registry.resolve(MOVEMENT_DEMO_POLICY_ID).unwrap();
+        assert_eq!(movement.policy_id, MOVEMENT_DEMO_POLICY_ID);
+        assert_eq!(movement.max_members, MOVEMENT_DEMO_MAX_MEMBERS);
         assert_eq!(movement.min_start_players, 1);
-        assert_eq!(movement.active_room_fps, 20);
+        assert_eq!(movement.active_room_fps, MOVEMENT_DEMO_ACTIVE_ROOM_FPS);
         assert_eq!(movement.input_delay_frames, 2);
         assert_eq!(movement.wait_strategy, InputWaitStrategy::Optimistic);
         assert_eq!(movement.missing_input_strategy, MissingInputStrategy::Empty);
+        assert_eq!(
+            movement.movement_correction_interval_frames,
+            MOVEMENT_DEMO_CORRECTION_INTERVAL_FRAMES
+        );
+        assert_eq!(
+            movement.movement_correction_threshold,
+            MOVEMENT_DEMO_CORRECTION_THRESHOLD_METERS
+        );
+        assert_eq!(movement.movement_aoi_enabled, MOVEMENT_DEMO_AOI_ENABLED);
+        assert_eq!(movement.movement_aoi_radius, 16.0);
+        assert_eq!(
+            movement.movement_control_stop_frames,
+            MOVEMENT_DEMO_CONTROL_STOP_FRAMES
+        );
+        assert_eq!(
+            crate::core::room::MAIN_WORLD_PUBLIC_POLICY_ID,
+            MOVEMENT_DEMO_POLICY_ID
+        );
 
         let combat = registry.resolve("combat_demo").unwrap();
         assert_eq!(combat.busy_room_fps, 30);

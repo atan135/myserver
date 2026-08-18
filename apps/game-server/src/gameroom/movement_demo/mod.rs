@@ -8,15 +8,15 @@ use crate::core::logic::{
     RoomLogicTransferState,
 };
 use crate::core::room::PlayerInputRecord;
+use crate::core::runtime::room_policy::MOVEMENT_DEMO_DEFAULT_SPEED_METERS_PER_SECOND;
 use crate::core::system::movement::{
     RoomMovementState, decide_corrections, full_sync_broadcast, reject_broadcast,
     snapshot_broadcasts, tick_movement,
 };
 use crate::core::system::scene::SceneQuery;
-use crate::core::system::scene::world_contract::MOVEMENT_DEMO_TARGET_SPEED_METERS_PER_SECOND;
 use crate::pb::{MovementCorrectionReason, MovementRecoveryState};
 
-const DEFAULT_MOVE_SPEED: f32 = MOVEMENT_DEMO_TARGET_SPEED_METERS_PER_SECOND;
+const DEFAULT_MOVE_SPEED: f32 = MOVEMENT_DEMO_DEFAULT_SPEED_METERS_PER_SECOND;
 const MOVEMENT_DEMO_TRANSFER_SCHEMA: &str = "movement-demo.logic.v1";
 
 #[derive(Default)]

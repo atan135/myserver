@@ -170,3 +170,177 @@ pub fn correction_reason_label(reason: MovementCorrectionReason) -> &'static str
         MovementCorrectionReason::ControlTimeout => "control_timeout",
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::system::movement::state::ClientStateSample;
+    use crate::core::system::scene::query::SceneSpawnPointDefinition;
+    use crate::pb::MovementCorrectionKind;
+    use prost::Message;
+
+    const ROOM_ID: &str = "main-world-public";
+    const MAX_ROOM_MEMBERS: usize = 32;
+    const ACTIVE_ROOM_FPS: usize = 20;
+
+    fn spawn() -> SceneSpawnPointDefinition {
+        SceneSpawnPointDefinition {
+            id: 1001,
+            scene_id: 1,
+            code: "main_spawn".to_string(),
+            spawn_type: "player".to_string(),
+            x: 2002.0,
+            y: 2002.0,
+            dir_x: 1.0,
+            dir_y: 0.0,
+            radius: 0.0,
+            tags: Vec::new(),
+        }
+    }
+
+    fn full_public_room_state() -> (RoomMovementState, Vec<String>) {
+        let mut state = RoomMovementState::new(1, 3);
+        state.set_correction_config(3, 0.05, 16.0, false);
+        let spawn = spawn();
+        let recipients = (0..MAX_ROOM_MEMBERS)
+            .map(|index| format!("character-{index:02}"))
+            .collect::<Vec<_>>();
+        for character_id in &recipients {
+            state.spawn_character(character_id, &spawn, 4.0);
+        }
+        (state, recipients)
+    }
+
+    fn decode_snapshot(broadcast: &RoomLogicBroadcast) -> MovementSnapshotPush {
+        MovementSnapshotPush::decode(broadcast.body.as_slice())
+            .expect("movement snapshot body should decode")
+    }
+
+    #[test]
+    fn aoi_disabled_full_sync_and_recovery_include_all_32_entities() {
+        let (mut state, recipients) = full_public_room_state();
+
+        let broadcast = full_sync_broadcast(
+            ROOM_ID,
+            &mut state,
+            30,
+            MovementCorrectionReason::GameStarted,
+        );
+        let snapshot = decode_snapshot(&broadcast);
+        assert!(broadcast.target_character_ids.is_empty());
+        assert!(snapshot.target_character_ids.is_empty());
+        assert!(snapshot.full_sync);
+        assert_eq!(
+            snapshot.correction_kind,
+            MovementCorrectionKind::FullSync as i32
+        );
+        assert_eq!(snapshot.entities.len(), MAX_ROOM_MEMBERS);
+
+        let recovery = state.recovery_state_for_character(
+            Some(&recipients[0]),
+            31,
+            MovementCorrectionReason::ReconnectRecovery,
+        );
+        assert!(!recovery.aoi_enabled);
+        assert_eq!(recovery.entities.len(), MAX_ROOM_MEMBERS);
+        assert_eq!(
+            recovery.correction_kind,
+            MovementCorrectionKind::Recovery as i32
+        );
+
+        let snapshot_bytes = snapshot.encoded_len();
+        let recovery_bytes = recovery.encoded_len();
+        let room_egress_bytes_per_second = snapshot_bytes * MAX_ROOM_MEMBERS * ACTIVE_ROOM_FPS;
+        println!(
+            "32-member movement sizes: snapshot={snapshot_bytes}B recovery={recovery_bytes}B \
+             worst_case_room_egress_at_20hz={room_egress_bytes_per_second}B/s"
+        );
+        assert!(snapshot_bytes > 32 * 20);
+        assert!(recovery_bytes > 32 * 20);
+        assert!(room_egress_bytes_per_second < 2 * 1024 * 1024);
+    }
+
+    #[test]
+    fn aoi_disabled_periodic_snapshot_broadcasts_changed_entities_to_whole_room() {
+        let (mut state, recipients) = full_public_room_state();
+        let changed = state.all_transforms()[..2].to_vec();
+        let result = SimulationTickResult {
+            changed_entities: changed.clone(),
+            ..SimulationTickResult::default()
+        };
+
+        let first = decide_corrections(&mut state, 1, &recipients, &result);
+        assert_eq!(first.len(), 1);
+        let first_broadcast = snapshot_broadcasts(ROOM_ID, first).remove(0);
+        let first_snapshot = decode_snapshot(&first_broadcast);
+        assert_eq!(first_broadcast.target_character_ids, recipients);
+        assert_eq!(first_snapshot.target_character_ids, recipients);
+        assert_eq!(first_snapshot.entities, changed);
+        assert!(!first_snapshot.full_sync);
+        assert_eq!(
+            first_snapshot.correction_kind,
+            MovementCorrectionKind::Incremental as i32
+        );
+
+        assert!(decide_corrections(&mut state, 2, &recipients, &result).is_empty());
+        assert!(decide_corrections(&mut state, 3, &recipients, &result).is_empty());
+        assert_eq!(
+            decide_corrections(&mut state, 4, &recipients, &result).len(),
+            1
+        );
+    }
+
+    #[test]
+    fn aoi_disabled_reject_and_strong_correction_only_target_rejected_character() {
+        let (mut state, recipients) = full_public_room_state();
+        let rejected_character = recipients[0].clone();
+        let corrected = state
+            .entity(&rejected_character)
+            .expect("rejected character should exist")
+            .to_proto();
+        let reject = MovementRejectRecord {
+            character_id: rejected_character.clone(),
+            error_code: "MOVEMENT_INVALID_INPUT".to_string(),
+            corrected,
+            reason_code: MovementCorrectionReason::MovementRejected as i32,
+            client_state: Some(ClientStateSample {
+                frame_id: 8,
+                x: 2100.0,
+                y: 2100.0,
+            }),
+            server_x: 2002.0,
+            server_y: 2002.0,
+        };
+        let result = SimulationTickResult {
+            rejects: vec![reject.clone()],
+            ..SimulationTickResult::default()
+        };
+
+        let reject_message = reject_broadcast(ROOM_ID, 9, &reject);
+        assert_eq!(
+            reject_message.target_character_ids,
+            vec![rejected_character.clone()]
+        );
+        let decoded_reject = MovementRejectPush::decode(reject_message.body.as_slice())
+            .expect("movement reject body should decode");
+        assert_eq!(decoded_reject.character_id, rejected_character);
+        assert_eq!(decoded_reject.reference_frame_id, 8);
+        assert!(decoded_reject.has_client_state);
+
+        let correction = decide_corrections(&mut state, 9, &recipients, &result);
+        assert_eq!(correction.len(), 1);
+        let correction_message = snapshot_broadcasts(ROOM_ID, correction).remove(0);
+        let snapshot = decode_snapshot(&correction_message);
+        assert_eq!(
+            correction_message.target_character_ids,
+            vec![recipients[0].clone()]
+        );
+        assert_eq!(snapshot.target_character_ids, vec![recipients[0].clone()]);
+        assert_eq!(snapshot.entities.len(), MAX_ROOM_MEMBERS);
+        assert!(snapshot.full_sync);
+        assert_eq!(
+            snapshot.correction_kind,
+            MovementCorrectionKind::Strong as i32
+        );
+    }
+}

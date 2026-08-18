@@ -97,6 +97,28 @@ async fn join_room_rejects_unknown_policy_before_creating_room() {
 }
 
 #[tokio::test]
+async fn fixed_public_world_rejects_non_movement_policy_before_first_creation() {
+    let manager = RoomManager::with_match_client(
+        crate::match_client::create_match_client_shared(),
+        Arc::new(RecordingRoomLogicFactory::default()),
+    );
+
+    assert_eq!(
+        manager
+            .join_room(
+                "main-world-public",
+                PLAYER_A,
+                mpsc::channel(1024).0,
+                MemberRole::Player,
+                Some(DEFAULT_POLICY),
+            )
+            .await,
+        Err("ROOM_POLICY_MISMATCH")
+    );
+    assert!(!manager.room_exists("main-world-public").await);
+}
+
+#[tokio::test]
 async fn join_room_rejects_policy_mismatch_for_existing_room() {
     let manager = RoomManager::with_match_client(
         crate::match_client::create_match_client_shared(),

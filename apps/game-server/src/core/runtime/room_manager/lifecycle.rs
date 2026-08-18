@@ -191,6 +191,11 @@ impl RoomManager {
             .policies
             .resolve(&requested_policy_id)
             .ok_or("ROOM_POLICY_UNSUPPORTED")?;
+        if room_id == MAIN_WORLD_PUBLIC_ROOM_ID
+            && requested_policy_id != MAIN_WORLD_PUBLIC_POLICY_ID
+        {
+            return Err("ROOM_POLICY_MISMATCH");
+        }
         let mut outbound = Some(outbound);
         let (snapshot, match_id, room_count) = if let Some(room_entry) =
             self.get_room_entry(room_id).await
