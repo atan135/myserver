@@ -80,7 +80,8 @@ pub fn tick_movement<S: SceneQuery>(
                     error_code: error.error_code.to_string(),
                     corrected: corrected.clone(),
                     reason_code: MovementCorrectionReason::MovementRejected as i32,
-                    client_state: state.client_state_for_character(&input.character_id),
+                    // Parsing failed, so no client coordinates from this input are trusted.
+                    client_state: None,
                     server_x: corrected.x,
                     server_y: corrected.y,
                 });
@@ -251,7 +252,7 @@ mod tests {
     use std::time::Instant;
 
     use crate::core::room::PlayerInputRecord;
-    use crate::core::system::movement::state::RoomMovementState;
+    use crate::core::system::movement::state::{RoomMovementState, Vec2};
     use crate::core::system::scene::SceneQuery;
     use crate::core::system::scene::query::{
         ClampPositionResult, SceneDefinition, SceneSpawnPointDefinition,
@@ -478,5 +479,151 @@ mod tests {
         let result = tick_movement(&mut state, 2, 20, &[repeated_move_dir], &OpenScene);
         assert_eq!(result.control_timeout_entities.len(), 1);
         assert!(!state.entity("player-a").unwrap().moving);
+    }
+
+    #[test]
+    fn oversized_direction_is_normalized_to_authoritative_four_meters_per_second() {
+        let mut state = RoomMovementState::new(1, 3);
+        let spawn = build_spawn();
+        state.spawn_character("player-a", &spawn, 4.0);
+        let input = movement_input(
+            1,
+            "player-a",
+            "move_dir",
+            "{\"dirX\":3000.0,\"dirY\":4000.0}",
+            false,
+        );
+
+        let result = tick_movement(&mut state, 1, 20, &[input], &OpenScene);
+        assert!(result.rejects.is_empty());
+        let entity = state.entity("player-a").unwrap();
+        assert!((entity.direction.x - 0.6).abs() < 0.000_001);
+        assert!((entity.direction.y - 0.8).abs() < 0.000_001);
+        assert!((entity.position.x - 1.12).abs() < 0.000_001);
+        assert!((entity.position.y - 1.16).abs() < 0.000_001);
+    }
+
+    #[test]
+    fn client_state_detects_drift_without_overwriting_authoritative_position() {
+        let mut state = RoomMovementState::new(1, 3);
+        state.set_correction_config(3, 0.05, 0.0, false);
+        let spawn = build_spawn();
+        state.spawn_character("player-a", &spawn, 4.0);
+        let input = movement_input(
+            1,
+            "player-a",
+            "move_dir",
+            "{\"dirX\":1.0,\"dirY\":0.0,\"hasClientState\":true,\"clientX\":3000.0,\"clientY\":3000.0,\"clientFrameId\":1}",
+            false,
+        );
+
+        let result = tick_movement(&mut state, 1, 20, &[input], &OpenScene);
+        let entity = state.entity("player-a").unwrap();
+        assert!((entity.position.x - 1.2).abs() < 0.000_001);
+        assert!((entity.position.y - 1.0).abs() < 0.000_001);
+        assert_eq!(result.drifted_players.len(), 1);
+        assert_eq!(result.drifted_players[0].client_state.frame_id, 1);
+        assert_eq!(result.drifted_players[0].authoritative.x, entity.position.x);
+        assert!(result.drifted_players[0].drift_distance > 4000.0);
+    }
+
+    #[test]
+    fn exclusive_world_boundary_blocks_movement_before_4000_meters() {
+        struct MainWorldBoundary;
+
+        impl SceneQuery for MainWorldBoundary {
+            fn scene(&self, _scene_id: i32) -> Option<&SceneDefinition> {
+                None
+            }
+
+            fn spawn_point(&self, _spawn_id: i32) -> Option<&SceneSpawnPointDefinition> {
+                None
+            }
+
+            fn is_walkable(&self, _scene_id: i32, x: f32, y: f32) -> bool {
+                x >= 0.0 && y >= 0.0 && x < 4000.0 && y < 4000.0
+            }
+
+            fn clamp_position(
+                &self,
+                scene_id: i32,
+                from_x: f32,
+                from_y: f32,
+                to_x: f32,
+                to_y: f32,
+            ) -> ClampPositionResult {
+                if self.is_walkable(scene_id, to_x, to_y) {
+                    ClampPositionResult {
+                        x: to_x,
+                        y: to_y,
+                        blocked: false,
+                    }
+                } else {
+                    ClampPositionResult {
+                        x: from_x,
+                        y: from_y,
+                        blocked: true,
+                    }
+                }
+            }
+        }
+
+        let mut state = RoomMovementState::new(1, 3);
+        let mut spawn = build_spawn();
+        spawn.x = 3999.9;
+        spawn.y = 2002.0;
+        state.spawn_character("player-a", &spawn, 4.0);
+        let input = movement_input(
+            1,
+            "player-a",
+            "move_dir",
+            "{\"dirX\":1.0,\"dirY\":0.0}",
+            false,
+        );
+
+        let result = tick_movement(&mut state, 1, 20, &[input], &MainWorldBoundary);
+        let entity = state.entity("player-a").unwrap();
+        assert_eq!(entity.position.x, 3999.9);
+        assert!(entity.position.x < 4000.0);
+        assert!(!entity.moving);
+        assert_eq!(result.rejects.len(), 1);
+        assert_eq!(result.rejects[0].error_code, "MOVEMENT_BLOCKED");
+        assert_eq!(result.rejects[0].corrected.x, 3999.9);
+    }
+
+    #[test]
+    fn invalid_input_reject_does_not_reuse_stale_client_state() {
+        let mut state = RoomMovementState::new(1, 3);
+        let spawn = build_spawn();
+        state.spawn_character("player-a", &spawn, 4.0);
+        state.set_client_state_for_character(
+            "player-a",
+            crate::core::system::movement::input::ClientMovementState {
+                frame_id: 7,
+                position: Vec2 { x: 8.0, y: 9.0 },
+            },
+        );
+        let invalid = movement_input(
+            8,
+            "player-a",
+            "move_dir",
+            "{\"dirX\":0.0,\"dirY\":0.0,\"hasClientState\":true,\"clientX\":99.0,\"clientY\":99.0}",
+            false,
+        );
+
+        let result = tick_movement(&mut state, 8, 20, &[invalid], &OpenScene);
+        assert_eq!(result.rejects.len(), 1);
+        let reject = &result.rejects[0];
+        assert_eq!(reject.error_code, "MOVE_DIRECTION_ZERO");
+        assert!(reject.client_state.is_none());
+        assert_eq!(reject.server_x, 1.0);
+        assert_eq!(reject.server_y, 1.0);
+        assert_eq!(
+            state
+                .client_state_for_character("player-a")
+                .unwrap()
+                .frame_id,
+            7
+        );
     }
 }

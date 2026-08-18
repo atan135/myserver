@@ -326,6 +326,20 @@ mod tests {
         assert_eq!(decoded_reject.character_id, rejected_character);
         assert_eq!(decoded_reject.reference_frame_id, 8);
         assert!(decoded_reject.has_client_state);
+        assert_eq!(
+            decoded_reject.correction_kind,
+            MovementCorrectionKind::Strong as i32
+        );
+        assert_eq!(
+            decoded_reject.reason_code,
+            MovementCorrectionReason::MovementRejected as i32
+        );
+        assert_eq!(decoded_reject.corrected.as_ref().unwrap().x, 2002.0);
+        assert_eq!(decoded_reject.corrected.as_ref().unwrap().y, 2002.0);
+        assert_eq!(decoded_reject.client_x, 2100.0);
+        assert_eq!(decoded_reject.client_y, 2100.0);
+        assert_eq!(decoded_reject.server_x, 2002.0);
+        assert_eq!(decoded_reject.server_y, 2002.0);
 
         let correction = decide_corrections(&mut state, 9, &recipients, &result);
         assert_eq!(correction.len(), 1);

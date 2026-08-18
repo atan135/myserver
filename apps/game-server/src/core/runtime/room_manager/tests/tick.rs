@@ -586,6 +586,37 @@ async fn expired_input_frame_is_rejected() {
 }
 
 #[tokio::test]
+async fn input_rejects_unknown_room_and_non_member_with_stable_codes() {
+    let (manager, _factory, _receivers) =
+        setup_started_room(MOVEMENT_DEMO_POLICY, &[PLAYER_A]).await;
+
+    assert_eq!(
+        manager
+            .accept_player_input(
+                "room-missing",
+                PLAYER_A,
+                1,
+                "move_dir",
+                "{\"dirX\":1,\"dirY\":0}",
+            )
+            .await,
+        Err("ROOM_NOT_FOUND")
+    );
+    assert_eq!(
+        manager
+            .accept_player_input(
+                TEST_ROOM_ID,
+                PLAYER_B,
+                1,
+                "move_dir",
+                "{\"dirX\":1,\"dirY\":0}",
+            )
+            .await,
+        Err("ROOM_MEMBER_NOT_FOUND")
+    );
+}
+
+#[tokio::test]
 async fn input_too_far_is_rejected() {
     let (manager, _factory, _receivers) =
         setup_started_room(DEFAULT_POLICY, &[PLAYER_A, PLAYER_B]).await;

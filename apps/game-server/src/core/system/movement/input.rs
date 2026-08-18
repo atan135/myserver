@@ -326,4 +326,50 @@ mod tests {
         let error = parse_player_input(&record).unwrap_err();
         assert_eq!(error.error_code, "MOVE_DIRECTION_OUT_OF_RANGE");
     }
+
+    #[test]
+    fn move_input_req_rejects_unknown_type_and_zero_direction() {
+        let mut request = MoveInputReq {
+            frame_id: 3,
+            input_type: MoveInputType::Unknown as i32,
+            dir_x: 0.0,
+            dir_y: 0.0,
+            has_client_state: false,
+            client_x: 0.0,
+            client_y: 0.0,
+            client_frame_id: 0,
+            client_timestamp_ms: 0,
+        };
+
+        assert_eq!(
+            player_input_from_move_req(&request).unwrap_err().error_code,
+            "MOVE_INPUT_TYPE_UNKNOWN"
+        );
+
+        request.input_type = MoveInputType::MoveDir as i32;
+        assert_eq!(
+            player_input_from_move_req(&request).unwrap_err().error_code,
+            "MOVE_DIRECTION_ZERO"
+        );
+    }
+
+    #[test]
+    fn move_input_req_rejects_out_of_range_client_state() {
+        let request = MoveInputReq {
+            frame_id: 3,
+            input_type: MoveInputType::MoveStop as i32,
+            dir_x: 0.0,
+            dir_y: 0.0,
+            has_client_state: true,
+            client_x: MAX_SAFE_MOVEMENT_NUMBER_ABS * 2.0,
+            client_y: 12.0,
+            client_frame_id: 3,
+            client_timestamp_ms: 0,
+        };
+
+        assert_eq!(
+            player_input_from_move_req(&request).unwrap_err().error_code,
+            "CLIENT_POSITION_OUT_OF_RANGE"
+        );
+    }
 }
