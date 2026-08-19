@@ -70,6 +70,12 @@ const routes = [
     meta: { requiresAuth: true, permission: ADMIN_PERMISSIONS.MONITORING_READ }
   },
   {
+    path: "/rollout-drain",
+    name: "RolloutDrain",
+    component: () => import("../views/admin/RolloutDrain.vue"),
+    meta: { requiresAuth: true, permission: ADMIN_PERMISSIONS.GAME_CONFIG_WRITE }
+  },
+  {
     path: "/global-id",
     name: "GlobalId",
     component: () => import("../views/GlobalId.vue"),

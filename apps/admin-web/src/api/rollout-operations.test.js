@@ -64,3 +64,23 @@ test("approval API carries a request id and supports approval and rejection evid
   });
   assert.match(highRiskRequestBody({}).requestId, /^admin-web-/);
 });
+
+test("rollout read APIs use admin-api paths and never receive endpoint input", async () => {
+  const seen = [];
+  const previousAdapter = api.defaults.adapter;
+  api.defaults.adapter = async (config) => {
+    seen.push(config);
+    return { data: { ok: true }, status: 200, statusText: "OK", headers: {}, config };
+  };
+  try {
+    await rolloutApi.getInstances();
+    await rolloutApi.getDrainStatus("game-server-a");
+  } finally {
+    api.defaults.adapter = previousAdapter;
+  }
+  assert.deepEqual(seen.map((config) => config.url), [
+    "/rollouts/game-server/instances",
+    "/rollouts/game-server/game-server-a/drain-status"
+  ]);
+  assert.equal(seen.every((config) => config.baseURL === "/api/v1"), true);
+});

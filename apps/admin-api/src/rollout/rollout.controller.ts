@@ -1,11 +1,11 @@
-import { Body, Controller, HttpCode, HttpStatus, Inject, Param, Post, Req, UseGuards } from "@nestjs/common";
+import { Body, Controller, Get, HttpCode, HttpStatus, Inject, Param, Post, Req, UseGuards } from "@nestjs/common";
 import { ApiBearerAuth, ApiTags } from "@nestjs/swagger";
 
 import { JwtAuthGuard } from "../auth/jwt-auth.guard.js";
 import { AdminPolicyGuard } from "../auth/admin-policy.guard.js";
 import { Permissions, PolicyScopeResolver } from "../auth/roles.decorator.js";
 import { ApiHttpException } from "../common/http-exception.js";
-import { ADMIN_GAME_ADMIN_CLIENT, ADMIN_HIGH_RISK_OPERATIONS } from "../tokens.js";
+import { ADMIN_GAME_ADMIN_CLIENT, ADMIN_HIGH_RISK_OPERATIONS, ADMIN_POLICY } from "../tokens.js";
 import { RoomTransferService } from "./room-transfer.service.js";
 
 function rolloutError(error: any) {
@@ -64,6 +64,17 @@ function gameServerShutdownPolicyScope(request: any) {
   };
 }
 
+function gameServerInstanceListPolicyScope() {
+  return {
+    worldId: "*",
+    serviceName: "game-server",
+    instanceId: "*",
+    targetType: "config",
+    targetIds: ["drain_mode"],
+    targetCount: 1
+  };
+}
+
 function gameServerAssertionContext(
   req: any,
   body: any,
@@ -93,16 +104,91 @@ function gameServerAssertionContext(
 
 @ApiTags("rollouts")
 @ApiBearerAuth()
-@UseGuards(JwtAuthGuard, AdminPolicyGuard)
 @Controller("/api/v1/rollouts")
 export class RolloutController {
   constructor(
     private readonly roomTransfer: RoomTransferService,
     @Inject(ADMIN_HIGH_RISK_OPERATIONS) private readonly highRiskOperations: any,
-    @Inject(ADMIN_GAME_ADMIN_CLIENT) private readonly gameAdminClient: any
+    @Inject(ADMIN_GAME_ADMIN_CLIENT) private readonly gameAdminClient: any,
+    @Inject(ADMIN_POLICY) private readonly adminPolicy: any
   ) {}
 
+  @Get("game-server/instances")
+  @UseGuards(JwtAuthGuard)
+  @Permissions("game.config.write")
+  @PolicyScopeResolver(gameServerInstanceListPolicyScope)
+  @HttpCode(HttpStatus.OK)
+  async listGameServerInstances(@Req() req: any) {
+    try {
+      const endpoints = await this.gameAdminClient.listAdminEndpoints();
+      const instances = [];
+      for (const endpoint of Array.isArray(endpoints) ? endpoints : []) {
+        let instanceId = "";
+        try {
+          instanceId = requireInstanceId(endpoint?.instanceId || endpoint?.instance_id);
+        } catch {
+          continue;
+        }
+        if (!instanceId || endpoint?.source === "fallback" || endpoint?.fallback === true) continue;
+        const decision = await this.adminPolicy.authorize(req.admin?.sub, "game.config.write", {
+          worldId: "*",
+          serviceName: "game-server",
+          instanceId,
+          targetType: "config",
+          targetIds: ["drain_mode"],
+          targetCount: 1
+        });
+        if (!decision?.allowed) continue;
+        instances.push({
+          instanceId,
+          status: endpoint.healthy === false ? "unhealthy" : "healthy",
+          healthy: endpoint.healthy !== false
+        });
+      }
+      return { ok: true, instances };
+    } catch (error: any) {
+      throw rolloutError(error);
+    }
+  }
+
+  @Get("game-server/:instanceId/drain-status")
+  @UseGuards(JwtAuthGuard, AdminPolicyGuard)
+  @Permissions("game.config.write")
+  @PolicyScopeResolver(gameServerDrainPolicyScope)
+  @HttpCode(HttpStatus.OK)
+  async getGameServerDrainStatus(@Param("instanceId") rawInstanceId: string) {
+    try {
+      const instanceId = requireInstanceId(rawInstanceId);
+      const status = await this.gameAdminClient.getRolloutDrainStatus({
+        targetInstanceId: instanceId,
+        requireRegistryTarget: true
+      });
+      return {
+        ok: status?.ok === true,
+        instanceId,
+        errorCode: status?.errorCode || "",
+        rolloutEpoch: status?.rolloutEpoch || "",
+        ownedRoomCount: status?.ownedRoomCount || 0,
+        migratingRoomCount: status?.migratingRoomCount || 0,
+        connectionCount: status?.connectionCount || 0,
+        drainModeEnabled: status?.drainModeEnabled === true,
+        drainModeEnteredAtMs: status?.drainModeEnteredAtMs || 0,
+        transferableEmptyRoomCount: status?.transferableEmptyRoomCount || 0,
+        retiredRoomCount: status?.retiredRoomCount || 0,
+        drainModeReason: status?.drainModeReason || "",
+        drainModeSource: status?.drainModeSource || "",
+        routeCount: Array.isArray(status?.routes) ? status.routes.length : 0,
+        transferableEmptyRoomSampleCount: Array.isArray(status?.transferableEmptyRoomSamples)
+          ? status.transferableEmptyRoomSamples.length
+          : 0
+      };
+    } catch (error: any) {
+      throw rolloutError(error);
+    }
+  }
+
   @Post("game-server/:instanceId/drain")
+  @UseGuards(JwtAuthGuard, AdminPolicyGuard)
   @Permissions("game.config.write")
   @PolicyScopeResolver(gameServerDrainPolicyScope)
   @HttpCode(HttpStatus.OK)
@@ -162,6 +248,7 @@ export class RolloutController {
   }
 
   @Post("game-server/:instanceId/shutdown")
+  @UseGuards(JwtAuthGuard, AdminPolicyGuard)
   @Permissions("service.shutdown")
   @PolicyScopeResolver(gameServerShutdownPolicyScope)
   @HttpCode(HttpStatus.OK)
@@ -224,6 +311,7 @@ export class RolloutController {
   }
 
   @Post("room-transfer")
+  @UseGuards(JwtAuthGuard, AdminPolicyGuard)
   @Permissions("game.room.transfer")
   @HttpCode(HttpStatus.OK)
   async transferRoom(@Body() body: any, @Req() req: any) {

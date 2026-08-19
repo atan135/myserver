@@ -14,6 +14,8 @@ const MESSAGE_TYPE = {
   ADMIN_SERVER_STATUS_RES: 2002,
   ADMIN_UPDATE_CONFIG_REQ: 2003,
   ADMIN_UPDATE_CONFIG_RES: 2004,
+  GET_ROLLOUT_DRAIN_STATUS_REQ: 1609,
+  GET_ROLLOUT_DRAIN_STATUS_RES: 1610,
   REQUEST_SERVER_SHUTDOWN_REQ: 1617,
   REQUEST_SERVER_SHUTDOWN_RES: 1618,
   ADMIN_OPERATION_ASSERTION_REQ: 2098,
@@ -142,7 +144,11 @@ function decodeSimpleProtobuf(body) {
       offset = length.offset;
       const end = offset + Number(length.value);
       if (end > bytes.length) throw createAdminError("INVALID_PROTOBUF", "protobuf field is truncated");
-      fields.set(fieldNumber, Buffer.from(bytes.subarray(offset, end)));
+      const value = Buffer.from(bytes.subarray(offset, end));
+      const previous = fields.get(fieldNumber);
+      fields.set(fieldNumber, previous === undefined
+        ? value
+        : Array.isArray(previous) ? [...previous, value] : [previous, value]);
       offset = end;
       continue;
     }
@@ -168,6 +174,12 @@ function protobufString(fields, number) {
   return Buffer.isBuffer(value) ? value.toString("utf8") : "";
 }
 
+function protobufBytesList(fields, number) {
+  const value = fields.get(number);
+  if (Buffer.isBuffer(value)) return [value];
+  return Array.isArray(value) ? value.filter((item) => Buffer.isBuffer(item)) : [];
+}
+
 function protobufCount(fields, number) {
   const value = fields.get(number);
   return typeof value === "bigint" ? Number(value) : 0;
@@ -189,6 +201,40 @@ function decodeRequestServerShutdownRes(body) {
     drain_mode_enabled: protobufBool(fields, 6),
     retired_room_count: protobufCount(fields, 7),
     shutdown_armed: protobufBool(fields, 8)
+  };
+}
+
+function decodeRolloutRouteStatus(body) {
+  const fields = decodeSimpleProtobuf(body);
+  return {
+    roomId: protobufString(fields, 1),
+    ownerServerId: protobufString(fields, 2),
+    migrationState: protobufCount(fields, 3),
+    memberCount: protobufCount(fields, 4),
+    onlineMemberCount: protobufCount(fields, 5),
+    emptySinceMs: protobufCount(fields, 6),
+    roomVersion: protobufCount(fields, 7)
+  };
+}
+
+function decodeRolloutDrainStatusRes(body) {
+  const fields = decodeSimpleProtobuf(body);
+  return {
+    ok: protobufBool(fields, 1),
+    errorCode: protobufString(fields, 2),
+    rolloutEpoch: protobufString(fields, 3),
+    ownerServerId: protobufString(fields, 4),
+    ownedRoomCount: protobufCount(fields, 5),
+    migratingRoomCount: protobufCount(fields, 6),
+    connectionCount: protobufCount(fields, 7),
+    routes: protobufBytesList(fields, 8).slice(0, 50).map(decodeRolloutRouteStatus),
+    drainModeEnabled: protobufBool(fields, 9),
+    drainModeEnteredAtMs: protobufCount(fields, 10),
+    transferableEmptyRoomCount: protobufCount(fields, 11),
+    transferableEmptyRoomSamples: protobufBytesList(fields, 12).slice(0, 50).map(decodeRolloutRouteStatus),
+    drainModeReason: protobufString(fields, 13),
+    drainModeSource: protobufString(fields, 14),
+    retiredRoomCount: protobufCount(fields, 15)
   };
 }
 
@@ -783,6 +829,22 @@ export class GameAdminClient {
     }
     const endpointSummary = describeAdminEndpoint(endpoint);
     return { ok: true, instanceId: endpointSummary?.instanceId || "", endpoint: endpointSummary };
+  }
+
+  async getRolloutDrainStatus(options = {}) {
+    const endpoint = await this.resolveAdminEndpoint({ ...options, requireExplicitTarget: true });
+    try {
+      const body = await sendRequest(
+        this.config,
+        MESSAGE_TYPE.GET_ROLLOUT_DRAIN_STATUS_REQ,
+        Buffer.alloc(0),
+        MESSAGE_TYPE.GET_ROLLOUT_DRAIN_STATUS_RES,
+        { ...options, endpoint }
+      );
+      return decodeRolloutDrainStatusRes(body);
+    } catch (error) {
+      throw attachEndpointToError(error, endpoint);
+    }
   }
 
   async writeRequestOptions(endpoint, messageType, payload, options) {

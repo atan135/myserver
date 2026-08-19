@@ -38,6 +38,9 @@
             <el-menu-item v-if="authStore.hasPermission(P.MONITORING_READ)" index="/monitoring">
               <span>服务监控</span>
             </el-menu-item>
+            <el-menu-item v-if="authStore.hasPermission(P.GAME_CONFIG_WRITE)" index="/rollout-drain">
+              <span>排空操作台</span>
+            </el-menu-item>
             <el-menu-item v-if="authStore.hasAnyPermission(MYFORGE_ENTRY_PERMISSIONS)" index="/myforge">
               <span>MyForge 蓝图</span>
             </el-menu-item>
@@ -75,6 +78,9 @@ const GM_MENU_PERMISSIONS = [
 const activeMenu = computed(() => {
   if (route.path.startsWith("/monitoring")) {
     return "/monitoring";
+  }
+  if (route.path.startsWith("/rollout-drain")) {
+    return "/rollout-drain";
   }
   if (route.path.startsWith("/global-id")) {
     return "/global-id";

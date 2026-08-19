@@ -9,6 +9,7 @@ process.env.TS_NODE_TRANSPILE_ONLY ??= "true";
 register("ts-node/esm", pathToFileURL("./"));
 
 const { RolloutController } = await import("./rollout.controller.ts");
+const { JwtAuthGuard } = await import("../auth/jwt-auth.guard.ts");
 const { AdminPolicyGuard } = await import("../auth/admin-policy.guard.ts");
 const { AdminPolicyService } = await import("../auth/admin-policy.service.ts");
 const { AdminOperationService } = await import("../operations/admin-operation.service.ts");
@@ -16,6 +17,7 @@ const { AdminHighRiskOperationService } = await import("../operations/admin-high
 const { AdminBreakglassService } = await import("../operations/admin-breakglass.service.ts");
 const { AdminOperationController } = await import("../operations/admin-operation.controller.ts");
 const { PERMISSIONS_KEY, POLICY_SCOPE_RESOLVER_KEY } = await import("../auth/roles.decorator.ts");
+const GUARDS_METADATA = "__guards__";
 
 test("admin-api shutdown assertion permission matches the Rust game-server contract", () => {
   const source = readFileSync(
@@ -52,7 +54,7 @@ function body(overrides = {}) {
   };
 }
 
-function createController({ client = {}, run } = {}) {
+function createController({ client = {}, run, policy } = {}) {
   let captured;
   const highRisk = {
     async run(input) {
@@ -62,7 +64,7 @@ function createController({ client = {}, run } = {}) {
     }
   };
   return {
-    controller: new RolloutController({}, highRisk, client),
+    controller: new RolloutController({}, highRisk, client, policy),
     captured: () => captured
   };
 }
@@ -108,6 +110,22 @@ function routeGuard(handler, request, grants) {
   return { guard: new AdminPolicyGuard(reflector, new AdminPolicyService(store), store, {}), context };
 }
 
+test("game-server instance list allows narrow per-instance grants and skips unauthorized instances", async () => {
+  const request = {
+    admin: { sub: "admin-7", username: "operator" },
+    params: {},
+    query: {},
+    body: {},
+    headers: {},
+    method: "GET",
+    url: "/api/v1/rollouts/game-server/instances"
+  };
+  const methodGuards = Reflect.getMetadata(GUARDS_METADATA, RolloutController.prototype.listGameServerInstances);
+  const classGuards = Reflect.getMetadata(GUARDS_METADATA, RolloutController);
+  assert.deepEqual(methodGuards, [JwtAuthGuard]);
+  assert.equal(classGuards, undefined);
+});
+
 test("game-server drain control binds registry target, assertion scope, and audit-safe payload", async () => {
   let options;
   const { controller, captured } = createController({
@@ -138,6 +156,82 @@ test("game-server drain control binds registry target, assertion scope, and audi
   assert.equal(captured().scope.targetType, "config");
   assert.equal(captured().payload.instanceId, "game-server-a");
   assert.doesNotMatch(JSON.stringify(captured().payload), /token|assertion|host|port|password/i);
+});
+
+test("game-server drain status is read-only, registry-targeted, and endpoint-safe", async () => {
+  let options;
+  const { controller } = createController({
+    client: {
+      async getRolloutDrainStatus(inputOptions) {
+        options = inputOptions;
+        return {
+          ok: true,
+          errorCode: "",
+          connectionCount: 3,
+          ownedRoomCount: 2,
+          migratingRoomCount: 1,
+          drainModeEnabled: true,
+          drainModeEnteredAtMs: 12,
+          transferableEmptyRoomCount: 1,
+          retiredRoomCount: 4,
+          routes: [{ roomId: "must-not-leak" }],
+          endpoint: { host: "10.0.0.1", port: 7500 }
+        };
+      }
+    }
+  });
+
+  const result = await controller.getGameServerDrainStatus("game-server-a");
+  assert.deepEqual(result, {
+    ok: true,
+    instanceId: "game-server-a",
+    errorCode: "",
+    rolloutEpoch: "",
+    ownedRoomCount: 2,
+    migratingRoomCount: 1,
+    connectionCount: 3,
+    drainModeEnabled: true,
+    drainModeEnteredAtMs: 12,
+    transferableEmptyRoomCount: 1,
+    retiredRoomCount: 4,
+    drainModeReason: "",
+    drainModeSource: "",
+    routeCount: 1,
+    transferableEmptyRoomSampleCount: 0
+  });
+  assert.deepEqual(options, { targetInstanceId: "game-server-a", requireRegistryTarget: true });
+  assert.doesNotMatch(JSON.stringify(result), /host|port|endpoint|must-not-leak/i);
+  assert.equal(Reflect.getMetadata(PERMISSIONS_KEY, RolloutController.prototype.getGameServerDrainStatus)[0], "game.config.write");
+  assert.equal(typeof Reflect.getMetadata(POLICY_SCOPE_RESOLVER_KEY, RolloutController.prototype.getGameServerDrainStatus), "function");
+});
+
+test("game-server instance list filters registry candidates without exposing endpoints", async () => {
+  const { controller } = createController({
+    client: {
+      async listAdminEndpoints() {
+        return [
+          { instanceId: "game-server-a", source: "registry", healthy: true, host: "10.0.0.1", port: 7500 },
+          { instanceId: "game-server-b", source: "registry", healthy: false, host: "10.0.0.2", port: 7500 },
+          { instanceId: "local-fallback", source: "fallback", fallback: true, host: "127.0.0.1", port: 7500 },
+          { instanceId: "../invalid", source: "registry" }
+        ];
+      }
+    },
+    policy: {
+      async authorize(_adminId, _permission, scope) {
+        return { allowed: scope.instanceId === "game-server-a" };
+      }
+    }
+  });
+  const result = await controller.listGameServerInstances({ admin: { sub: "admin-7" } });
+  assert.deepEqual(result, {
+    ok: true,
+    instances: [
+      { instanceId: "game-server-a", status: "healthy", healthy: true }
+    ]
+  });
+  assert.doesNotMatch(JSON.stringify(result), /host|port|endpoint|fallback/i);
+  assert.equal(Reflect.getMetadata(PERMISSIONS_KEY, RolloutController.prototype.listGameServerInstances)[0], "game.config.write");
 });
 
 test("game-server shutdown preserves immediate, armed, and blocked result fields", async (t) => {

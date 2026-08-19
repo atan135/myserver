@@ -120,6 +120,10 @@ export const monitoringApi = {
 // These clients stay on the authenticated admin-api boundary. They never accept
 // or expose game-server endpoints, assertion tokens, or downstream credentials.
 export const rolloutApi = {
+  getInstances: (config = {}) =>
+    api.get("/rollouts/game-server/instances", config),
+  getDrainStatus: (instanceId, config = {}) =>
+    api.get(`/rollouts/game-server/${encodeURIComponent(String(instanceId))}/drain-status`, config),
   setDrain: (instanceId, data = {}, config = {}) =>
     api.post(
       `/rollouts/game-server/${encodeURIComponent(String(instanceId))}/drain`,

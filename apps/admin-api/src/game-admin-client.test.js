@@ -451,6 +451,66 @@ test("GameAdminClient encodes drain protobuf and preserves shutdown blocker stat
   }
 });
 
+test("GameAdminClient reads registry-targeted rollout drain protobuf status without endpoint fields", async () => {
+  const server = net.createServer((socket) => {
+    let buffer = Buffer.alloc(0);
+    socket.on("data", (chunk) => {
+      buffer = Buffer.concat([buffer, chunk]);
+      while (buffer.length >= HEADER_LEN) {
+        const bodyLen = buffer.readUInt32BE(10);
+        const packetLen = HEADER_LEN + bodyLen;
+        if (buffer.length < packetLen) return;
+        const messageType = buffer.readUInt16BE(4);
+        const seq = buffer.readUInt32BE(6);
+        buffer = buffer.subarray(packetLen);
+        if (messageType === MESSAGE_TYPE.GET_ROLLOUT_DRAIN_STATUS_REQ) {
+          const route = Buffer.concat([protoString(1, "room-1"), protoString(2, "game-server-a"), protoUint(4, 2)]);
+          socket.write(encodeTestPacket(
+            MESSAGE_TYPE.GET_ROLLOUT_DRAIN_STATUS_RES,
+            seq,
+            Buffer.concat([
+              protoBool(1, true),
+              protoUint(5, 2),
+              protoUint(6, 1),
+              protoUint(7, 3),
+              protoBool(9, true),
+              protoUint(11, 1),
+              protoUint(15, 4),
+              protoString(13, "rollout"),
+              protoString(14, "admin"),
+              protoString(8, route)
+            ])
+          ));
+        }
+      }
+    });
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = server.address().port;
+  const client = new GameAdminClient({
+    registryDiscoveryEnabled: true,
+    registryDiscoveryRequired: true,
+    gameAdminConnectTimeoutMs: 1000,
+    gameAdminWriteTimeoutMs: 1000,
+    gameAdminReadTimeoutMs: 1000,
+    gameAdminMaxResponseBytes: 4096
+  }, createDiscoveryRedis([gameServerInstance("game-server-a", "127.0.0.1", port)]));
+  try {
+    const result = await client.getRolloutDrainStatus({ targetInstanceId: "game-server-a", requireRegistryTarget: true });
+    assert.equal(result.ok, true);
+    assert.equal(result.connectionCount, 3);
+    assert.equal(result.ownedRoomCount, 2);
+    assert.equal(result.migratingRoomCount, 1);
+    assert.equal(result.drainModeEnabled, true);
+    assert.equal(result.transferableEmptyRoomCount, 1);
+    assert.equal(result.retiredRoomCount, 4);
+    assert.equal(result.routes[0].roomId, "room-1");
+    assert.equal(Object.hasOwn(result, "endpoint"), false);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
 test("GameAdminClient registry-only writes reject direct endpoint overrides", async () => {
   const client = new GameAdminClient({
     registryDiscoveryEnabled: true,
