@@ -8,10 +8,26 @@ process.env.TS_NODE_TRANSPILE_ONLY ??= "true";
 register("ts-node/esm", pathToFileURL("./"));
 
 const { AdminOperationController } = await import("./admin-operation.controller.ts");
+const { POLICY_SCOPE_RESOLVER_KEY } = await import("../auth/roles.decorator.ts");
 
 function request() {
   return { admin: { sub: 7, username: "approver" } };
 }
+
+test("operation detail and approval routes derive requestId scope for narrow grants", () => {
+  const detailResolver = Reflect.getMetadata(POLICY_SCOPE_RESOLVER_KEY, AdminOperationController.prototype.getOperation);
+  const approvalResolver = Reflect.getMetadata(POLICY_SCOPE_RESOLVER_KEY, AdminOperationController.prototype.decideApproval);
+  assert.equal(typeof detailResolver, "function");
+  assert.equal(typeof approvalResolver, "function");
+  assert.deepEqual(detailResolver({ params: { requestId: "request-a" } }, "admin.permissions.manage"), {
+    targetIds: ["request-a"],
+    targetCount: 1
+  });
+  assert.deepEqual(approvalResolver({ params: { requestId: "request-b" } }, "admin.permissions.manage"), {
+    targetIds: ["request-b"],
+    targetCount: 1
+  });
+});
 
 test("approval uses an independent actor and rejects self-approval before state mutation", async () => {
   let decisions = 0;

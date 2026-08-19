@@ -3,7 +3,7 @@ import { ApiBearerAuth, ApiTags } from "@nestjs/swagger";
 
 import { JwtAuthGuard } from "../auth/jwt-auth.guard.js";
 import { AdminPolicyGuard } from "../auth/admin-policy.guard.js";
-import { Permissions } from "../auth/roles.decorator.js";
+import { Permissions, PolicyScopeResolver } from "../auth/roles.decorator.js";
 import { ApiHttpException } from "../common/http-exception.js";
 import { ADMIN_BREAKGLASS, ADMIN_OPERATIONS, ADMIN_POLICY, ADMIN_STORE } from "../tokens.js";
 import { containsSensitiveAuditReason } from "./audit-reason.js";
@@ -146,6 +146,11 @@ function operationReadView(operation: any) {
   };
 }
 
+function operationApprovalPolicyScope(request: any) {
+  const requestId = typeof request?.params?.requestId === "string" ? request.params.requestId.trim() : "";
+  return { targetIds: requestId ? [requestId] : ["*"], targetCount: 1 };
+}
+
 @ApiTags("admin-operations")
 @ApiBearerAuth()
 @Controller("/api/v1/admin-operations")
@@ -178,6 +183,7 @@ export class AdminOperationController {
   @Get(":requestId")
   @UseGuards(JwtAuthGuard, AdminPolicyGuard)
   @Permissions("admin.permissions.manage")
+  @PolicyScopeResolver(operationApprovalPolicyScope)
   @HttpCode(HttpStatus.OK)
   async getOperation(@Param("requestId") requestId: string) {
     const operation = await this.adminStore.getAdminOperationByRequestId(requestId);
@@ -190,6 +196,7 @@ export class AdminOperationController {
   @Post(":requestId/approval")
   @UseGuards(JwtAuthGuard, AdminPolicyGuard)
   @Permissions("admin.permissions.manage")
+  @PolicyScopeResolver(operationApprovalPolicyScope)
   @HttpCode(HttpStatus.OK)
   async decideApproval(@Param("requestId") requestId: string, @Body() body: any, @Req() req: any) {
     try {
