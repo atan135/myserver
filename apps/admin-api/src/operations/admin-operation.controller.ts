@@ -1,11 +1,12 @@
-import { Body, Controller, HttpCode, HttpStatus, Inject, Param, Post, Req, UseGuards } from "@nestjs/common";
+import { Body, Controller, Get, HttpCode, HttpStatus, Inject, Param, Post, Query, Req, UseGuards } from "@nestjs/common";
 import { ApiBearerAuth, ApiTags } from "@nestjs/swagger";
 
 import { JwtAuthGuard } from "../auth/jwt-auth.guard.js";
 import { AdminPolicyGuard } from "../auth/admin-policy.guard.js";
 import { Permissions } from "../auth/roles.decorator.js";
 import { ApiHttpException } from "../common/http-exception.js";
-import { ADMIN_BREAKGLASS, ADMIN_OPERATIONS, ADMIN_STORE } from "../tokens.js";
+import { ADMIN_BREAKGLASS, ADMIN_OPERATIONS, ADMIN_POLICY, ADMIN_STORE } from "../tokens.js";
+import { containsSensitiveAuditReason } from "./audit-reason.js";
 
 function approvalError(error: any) {
   const code = typeof error?.code === "string" ? error.code : "ADMIN_OPERATION_APPROVAL_FAILED";
@@ -46,18 +47,148 @@ function requiredReason(value: unknown) {
   return normalized;
 }
 
+const SENSITIVE_EVIDENCE_KEY = /password|passwd|pwd|token|secret|api[-_]?key|private[-_]?key|authorization|cookie|session(?:[-_]?id)?|nonce|payload|assertion|credential/i;
+const SENSITIVE_EVIDENCE_VALUE = /\b(?:password|passwd|pwd|token|secret|api[-_]?key|private[-_]?key|authorization|cookie|session(?:[-_]?id)?)\b\s*(?:=|:)|\b(?:bearer|basic)\s+[A-Za-z0-9._~+/=-]{8,}\b|-----BEGIN(?: [A-Z0-9]+)* PRIVATE KEY-----|\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/i;
+
+function approvalEvidenceSummary(value: unknown) {
+  if (!value || typeof value !== "object" || Array.isArray(value) || Object.keys(value).length === 0) {
+    throw Object.assign(new Error("Approval evidence summary is required"), {
+      code: "ADMIN_OPERATION_APPROVAL_EVIDENCE_REQUIRED"
+    });
+  }
+  const inspect = (entry: unknown, depth = 0) => {
+    if (depth > 6) throw Object.assign(new Error("Approval evidence is too deep"), { code: "ADMIN_OPERATION_APPROVAL_EVIDENCE_INVALID" });
+    if (typeof entry === "string") {
+      if (!entry.trim() || SENSITIVE_EVIDENCE_VALUE.test(entry)) {
+        throw Object.assign(new Error("Approval evidence contains a credential-like value"), { code: "ADMIN_OPERATION_APPROVAL_EVIDENCE_INVALID" });
+      }
+      return;
+    }
+    if (entry === null || typeof entry === "boolean" || typeof entry === "number") return;
+    if (Array.isArray(entry)) {
+      entry.forEach((item) => inspect(item, depth + 1));
+      return;
+    }
+    if (!entry || typeof entry !== "object") {
+      throw Object.assign(new Error("Approval evidence is invalid"), { code: "ADMIN_OPERATION_APPROVAL_EVIDENCE_INVALID" });
+    }
+    for (const [key, nested] of Object.entries(entry as Record<string, unknown>)) {
+      if (SENSITIVE_EVIDENCE_KEY.test(key)) {
+        throw Object.assign(new Error("Approval evidence contains a sensitive key"), { code: "ADMIN_OPERATION_APPROVAL_EVIDENCE_INVALID" });
+      }
+      inspect(nested, depth + 1);
+    }
+  };
+  inspect(value);
+  return value as Record<string, unknown>;
+}
+
+function pendingLimit(value: unknown) {
+  if (value === undefined || value === null || value === "") return 50;
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 1 || parsed > 100) {
+    throw new ApiHttpException(400, { ok: false, error: "ADMIN_OPERATION_LIST_LIMIT_INVALID", message: "limit is invalid" });
+  }
+  return parsed;
+}
+
+const SENSITIVE_SUMMARY_KEY = /password|token|secret|private.?key|authorization|cookie|ticket|nonce|payload|assertion|endpoint|host|port|credential/i;
+
+function safeOperationSummary(value: unknown, depth = 0): unknown {
+  if (depth > 6) return "[TRUNCATED]";
+  if (value === null || typeof value === "string" || typeof value === "boolean" || typeof value === "number") return value;
+  if (Array.isArray(value)) return value.slice(0, 100).map((entry) => safeOperationSummary(entry, depth + 1));
+  if (!value || typeof value !== "object") return "[REDACTED]";
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>)
+      .slice(0, 100)
+      .map(([key, entry]) => [key, SENSITIVE_SUMMARY_KEY.test(key) ? "[REDACTED]" : safeOperationSummary(entry, depth + 1)])
+  );
+}
+
+function operationReadView(operation: any) {
+  return {
+    operationId: operation?.operationId || null,
+    requestId: operation?.requestId || null,
+    requester: {
+      adminId: operation?.actorAdminId ?? null,
+      subject: operation?.actorSubject || null
+    },
+    permissionKey: operation?.permissionKey || null,
+    riskLevel: operation?.riskLevel || null,
+    status: operation?.status || null,
+    approvalStatus: operation?.approvalStatus || null,
+    reason: containsSensitiveAuditReason(operation?.reason) ? "[REDACTED: potential credential]" : operation?.reason || null,
+    targetSummary: safeOperationSummary(operation?.targetSummary || {}),
+    impactSummary: safeOperationSummary(operation?.preview?.impactSummary || {}),
+    preview: operation?.preview ? {
+      expiresAt: operation.preview.expiresAt || null,
+      consumedAt: operation.preview.consumedAt || null
+    } : null,
+    approval: operation?.approval ? {
+      status: operation.approval.status || null,
+      requestedAt: operation.approval.requestedAt || null,
+      decidedAt: operation.approval.decidedAt || null,
+      decidedByAdminId: operation.approval.decidedByAdminId ?? null,
+      decidedBySubject: operation.approval.decidedBySubject || null,
+      evidenceSummary: safeOperationSummary(operation.approval.evidenceSummary || {}),
+      rejectionReason: operation.approval.rejectionReason || null
+    } : null,
+    resultSummary: operation?.resultSummary === null || operation?.resultSummary === undefined
+      ? null
+      : safeOperationSummary(operation.resultSummary),
+    errorSummary: operation?.errorSummary === null || operation?.errorSummary === undefined
+      ? null
+      : safeOperationSummary(operation.errorSummary),
+    createdAt: operation?.createdAt || null,
+    updatedAt: operation?.updatedAt || null,
+    completedAt: operation?.completedAt || null
+  };
+}
+
 @ApiTags("admin-operations")
 @ApiBearerAuth()
-@UseGuards(JwtAuthGuard, AdminPolicyGuard)
 @Controller("/api/v1/admin-operations")
 export class AdminOperationController {
   constructor(
     @Inject(ADMIN_OPERATIONS) private readonly operations: any,
     @Inject(ADMIN_BREAKGLASS) private readonly breakglass: any,
-    @Inject(ADMIN_STORE) private readonly adminStore: any
+    @Inject(ADMIN_STORE) private readonly adminStore: any,
+    @Inject(ADMIN_POLICY) private readonly adminPolicy: any
   ) {}
 
+  @Get("pending-approvals")
+  @UseGuards(JwtAuthGuard)
+  @Permissions("admin.permissions.manage")
+  @HttpCode(HttpStatus.OK)
+  async listPendingApprovals(@Query() query: any, @Req() req: any) {
+    const operations = await this.adminStore.listPendingAdminOperations({ limit: pendingLimit(query?.limit) });
+    const visible = [];
+    for (const operation of operations) {
+      const decision = await this.adminPolicy?.authorize?.(
+        req.admin?.sub,
+        "admin.permissions.manage",
+        { targetIds: [operation.requestId], targetCount: 1 }
+      );
+      if (decision?.allowed) visible.push(operationReadView(operation));
+    }
+    return { ok: true, operations: visible };
+  }
+
+  @Get(":requestId")
+  @UseGuards(JwtAuthGuard, AdminPolicyGuard)
+  @Permissions("admin.permissions.manage")
+  @HttpCode(HttpStatus.OK)
+  async getOperation(@Param("requestId") requestId: string) {
+    const operation = await this.adminStore.getAdminOperationByRequestId(requestId);
+    if (!operation) {
+      throw new ApiHttpException(404, { ok: false, error: "ADMIN_OPERATION_NOT_FOUND", message: "Operation was not found" });
+    }
+    return { ok: true, operation: operationReadView(operation) };
+  }
+
   @Post(":requestId/approval")
+  @UseGuards(JwtAuthGuard, AdminPolicyGuard)
   @Permissions("admin.permissions.manage")
   @HttpCode(HttpStatus.OK)
   async decideApproval(@Param("requestId") requestId: string, @Body() body: any, @Req() req: any) {
@@ -76,7 +207,7 @@ export class AdminOperationController {
           subject: `admin:${String(req.admin?.sub ?? "").trim()}`
         },
         status: body?.status,
-        evidenceSummary: body?.evidenceSummary ?? body?.evidence_summary ?? {},
+        evidenceSummary: approvalEvidenceSummary(body?.evidenceSummary ?? body?.evidence_summary),
         rejectionReason: body?.rejectionReason ?? body?.rejection_reason ?? null
       });
       return {
@@ -95,6 +226,7 @@ export class AdminOperationController {
   }
 
   @Post("breakglass/activate")
+  @UseGuards(JwtAuthGuard, AdminPolicyGuard)
   @Permissions("breakglass.activate")
   @HttpCode(HttpStatus.CREATED)
   async activateBreakglass(@Body() body: any, @Req() req: any) {
@@ -155,6 +287,7 @@ export class AdminOperationController {
   }
 
   @Post("breakglass/:grantId/revoke")
+  @UseGuards(JwtAuthGuard, AdminPolicyGuard)
   @Permissions("breakglass.activate")
   @HttpCode(HttpStatus.OK)
   async revokeBreakglass(@Param("grantId") grantId: string, @Body() body: any, @Req() req: any) {

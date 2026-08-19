@@ -41,6 +41,9 @@
             <el-menu-item v-if="authStore.hasPermission(P.GAME_CONFIG_WRITE)" index="/rollout-drain">
               <span>排空操作台</span>
             </el-menu-item>
+            <el-menu-item v-if="authStore.hasPermission(P.ADMIN_PERMISSIONS_MANAGE)" index="/operation-approvals">
+              <span>操作审批</span>
+            </el-menu-item>
             <el-menu-item v-if="authStore.hasAnyPermission(MYFORGE_ENTRY_PERMISSIONS)" index="/myforge">
               <span>MyForge 蓝图</span>
             </el-menu-item>
@@ -81,6 +84,9 @@ const activeMenu = computed(() => {
   }
   if (route.path.startsWith("/rollout-drain")) {
     return "/rollout-drain";
+  }
+  if (route.path.startsWith("/operation-approvals")) {
+    return "/operation-approvals";
   }
   if (route.path.startsWith("/global-id")) {
     return "/global-id";

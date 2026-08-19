@@ -39,6 +39,70 @@ test("approval uses an independent actor and rejects self-approval before state 
   );
   assert.equal(decisions, 1);
 });
+
+test("approval read models return only redacted summaries and require evidence for every decision", async () => {
+  const operation = {
+    operationId: "op-1",
+    requestId: "request-1",
+    actorAdminId: 3,
+    actorSubject: "admin:3",
+    permissionKey: "game.config.write",
+    riskLevel: "high",
+    status: "preflighted",
+    approvalStatus: "pending",
+    reason: "graceful replacement",
+    targetSummary: { instanceId: "game-server-a", endpoint: { host: "10.0.0.1", port: 7500 } },
+    preview: {
+      nonce: "must-not-leak",
+      summarySha256: "must-not-leak",
+      impactSummary: { connectionCount: 2 },
+      expiresAt: "2026-07-19T12:00:00.000Z",
+      consumedAt: null
+    },
+    payload: { token: "must-not-leak" },
+    approval: { status: "pending", evidenceSummary: {} }
+  };
+  const controller = new AdminOperationController({
+    async decideApproval() { throw new Error("should not decide"); }
+  }, {}, {
+    async listPendingAdminOperations() { return [operation]; },
+    async getAdminOperationByRequestId() { return operation; }
+  }, {
+    async authorize() { return { allowed: true }; }
+  });
+  const listed = await controller.listPendingApprovals({ limit: "10" }, request());
+  const detail = await controller.getOperation("request-1");
+  assert.equal(listed.operations.length, 1);
+  assert.equal(detail.operation.preview.expiresAt, "2026-07-19T12:00:00.000Z");
+  assert.doesNotMatch(JSON.stringify({ listed, detail }), /must-not-leak|10\.0\.0\.1|7500|nonce|payload|token/i);
+  await assert.rejects(
+    () => controller.decideApproval("request-1", { status: "approved" }, request()),
+    (error) => error.getStatus() === 400 && error.getResponse().error === "ADMIN_OPERATION_APPROVAL_EVIDENCE_REQUIRED"
+  );
+  await assert.rejects(
+    () => controller.decideApproval("request-1", { status: "approved", evidenceSummary: { token: "must-not-leak" } }, request()),
+    (error) => error.getStatus() === 400 && error.getResponse().error === "ADMIN_OPERATION_APPROVAL_EVIDENCE_INVALID"
+  );
+});
+
+test("pending approval list filters each operation against the approver's narrow server-side grant", async () => {
+  const controller = new AdminOperationController({}, {}, {
+    async listPendingAdminOperations() {
+      return [
+        { requestId: "request-a", actorAdminId: 3, actorSubject: "admin:3", status: "preflighted", approvalStatus: "pending" },
+        { requestId: "request-b", actorAdminId: 4, actorSubject: "admin:4", status: "preflighted", approvalStatus: "pending" }
+      ];
+    }
+  }, {
+    async authorize(adminId, permission, scope) {
+      assert.equal(adminId, 7);
+      assert.equal(permission, "admin.permissions.manage");
+      return { allowed: scope.targetIds[0] === "request-a" };
+    }
+  });
+  const result = await controller.listPendingApprovals({}, request());
+  assert.deepEqual(result.operations.map((operation) => operation.requestId), ["request-a"]);
+});
 test("break-glass activation derives actor and normalized target scope from the endpoint input", async () => {
   let activation = null;
   const controller = new AdminOperationController({}, {

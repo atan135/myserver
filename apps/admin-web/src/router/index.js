@@ -76,6 +76,12 @@ const routes = [
     meta: { requiresAuth: true, permission: ADMIN_PERMISSIONS.GAME_CONFIG_WRITE }
   },
   {
+    path: "/operation-approvals",
+    name: "OperationApprovals",
+    component: () => import("../views/admin/OperationApprovals.vue"),
+    meta: { requiresAuth: true, permission: ADMIN_PERMISSIONS.ADMIN_PERMISSIONS_MANAGE }
+  },
+  {
     path: "/global-id",
     name: "GlobalId",
     component: () => import("../views/GlobalId.vue"),

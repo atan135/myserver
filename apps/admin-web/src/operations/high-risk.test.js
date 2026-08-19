@@ -7,6 +7,7 @@ import {
   highRiskState,
   normalizeHighRiskError,
   preflightDetails,
+  resumeHighRiskOperation,
   runHighRiskOperation
 } from "./high-risk.js";
 
@@ -128,4 +129,40 @@ test("high-risk helper does not execute an already expired local preview", async
 
   assert.equal(result.phase, "expired");
   assert.equal(calls, 1);
+});
+
+test("high-risk helper preserves the original preflight when approval is pending and resumes it later", async () => {
+  const calls = [];
+  const preflight = {
+    operation: { requestId: "approval-request-1" },
+    nonce: "n".repeat(32),
+    summarySha256: "a".repeat(64),
+    approvalStatus: "pending"
+  };
+  const approvalError = { response: { status: 409, data: { error: "ADMIN_OPERATION_APPROVAL_REQUIRED" } } };
+  const first = await runHighRiskOperation({
+    invoke: async (payload) => {
+      calls.push(payload);
+      if (calls.length === 1) return { data: { state: "preflighted", preflight } };
+      throw approvalError;
+    },
+    payload: { enabled: true },
+    requestId: "approval-request-1",
+    confirm: async () => true
+  });
+  assert.equal(first.phase, "approval_required");
+  const resumed = await resumeHighRiskOperation({
+    invoke: async (payload) => {
+      calls.push(payload);
+      return { data: { state: "terminal", operation: { status: "succeeded" } } };
+    },
+    payload: { enabled: true },
+    requestId: first.requestId,
+    preflight: first.preflight
+  });
+  assert.equal(resumed.phase, "terminal");
+  assert.equal(calls[1].requestId, "approval-request-1");
+  assert.equal(calls[2].requestId, "approval-request-1");
+  assert.equal(calls[2].preflightNonce, preflight.nonce);
+  assert.equal(calls[2].preflightSummarySha256, preflight.summarySha256);
 });

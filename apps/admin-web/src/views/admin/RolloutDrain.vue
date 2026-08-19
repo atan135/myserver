@@ -139,6 +139,13 @@
       >
         <div>{{ operation.message }}</div>
         <div v-if="operation.requestId" class="request-id">请求 ID：{{ operation.requestId }}</div>
+        <el-button
+          v-if="operation.phase === 'approval_required' && operation.pendingPreflight"
+          type="primary"
+          size="small"
+          :loading="operation.loading"
+          @click="resumeApprovedDrain"
+        >审批后确认执行</el-button>
       </el-alert>
     </div>
   </AdminLayout>
@@ -149,7 +156,7 @@ import { computed, onMounted, onUnmounted, reactive, ref } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import AdminLayout from "../../components/AdminLayout.vue";
 import { monitoringApi, rolloutApi } from "../../api";
-import { normalizeHighRiskError, formatHighRiskPreview, runHighRiskOperation } from "../../operations/high-risk";
+import { normalizeHighRiskError, formatHighRiskPreview, resumeHighRiskOperation, runHighRiskOperation } from "../../operations/high-risk";
 import {
   gameServerInstances,
   normalizeDrainStatus,
@@ -174,7 +181,9 @@ const operation = reactive({
   title: "",
   message: "",
   requestId: "",
-  alertType: "info"
+  alertType: "info",
+  pendingPreflight: null,
+  pendingPayload: null
 });
 let poller = null;
 
@@ -236,6 +245,49 @@ function resetOperation() {
   operation.targetEnabled = null;
 }
 
+async function resumeApprovedDrain() {
+  if (operation.loading || !operation.pendingPreflight || !operation.pendingPayload) return;
+  operation.loading = true;
+  operation.phase = "preflight";
+  operation.title = "审批已通过，确认执行";
+  operation.message = "将复用原请求 ID、预检 nonce 和摘要哈希执行，不会创建新操作。";
+  operation.alertType = "warning";
+  try {
+    const outcome = await resumeHighRiskOperation({
+      invoke: (body) => rolloutApi.setDrain(operation.pendingPayload.instanceId, body),
+      payload: operation.pendingPayload.payload,
+      requestId: operation.pendingPayload.requestId,
+      preflight: operation.pendingPreflight
+    });
+    operation.phase = outcome.phase;
+    operation.requestId = outcome.requestId;
+    if (outcome.phase !== "approval_required") {
+      operation.pendingPreflight = null;
+      operation.pendingPayload = null;
+    }
+    if (outcome.phase === "approval_required") {
+      operation.title = "仍在等待独立审批";
+      operation.message = "审批尚未完成，原预检凭据已保留，不会自动重试。";
+      operation.alertType = "warning";
+    } else {
+      operation.title = outcome.phase === "execution_uncertain" ? "执行结果待核实" : "排空操作已提交";
+      operation.message = outcome.phase === "execution_uncertain"
+        ? "服务端无法确认最终结果，请以审计和监控状态为准。"
+        : "审批后的原操作已提交执行。";
+      operation.alertType = outcome.phase === "execution_uncertain" ? "warning" : "success";
+      await fetchState();
+    }
+  } catch (error) {
+    const normalized = normalizeHighRiskError(error);
+    operation.phase = normalized.kind;
+    operation.title = normalized.title;
+    operation.message = normalized.description;
+    operation.alertType = "warning";
+  } finally {
+    resetOperation();
+  }
+}
+
 async function submitDrain(enabled) {
   if (!canSubmit.value || operation.loading) return;
   operation.loading = true;
@@ -266,7 +318,17 @@ async function submitDrain(enabled) {
     });
     operation.phase = outcome.phase;
     operation.requestId = outcome.requestId || "";
-    if (outcome.phase === "cancelled") {
+    if (outcome.phase === "approval_required") {
+      operation.pendingPreflight = outcome.preflight;
+      operation.pendingPayload = {
+        instanceId: selectedInstance.value,
+        requestId: outcome.requestId,
+        payload: { enabled, reason: requestReason }
+      };
+      operation.title = "等待独立审批";
+      operation.message = "操作已提交审批。审批通过后可在此复用同一预检凭据执行，不会自动重试。";
+      operation.alertType = "warning";
+    } else if (outcome.phase === "cancelled") {
       operation.title = "已取消预检";
       operation.message = "未执行任何服务端变更。";
       operation.alertType = "info";

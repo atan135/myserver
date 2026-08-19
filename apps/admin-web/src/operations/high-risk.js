@@ -89,6 +89,10 @@ function operationErrorCode(error) {
   return typeof data?.error === "string" ? data.error : "";
 }
 
+function isApprovalRequiredError(error) {
+  return operationErrorCode(error) === "ADMIN_OPERATION_APPROVAL_REQUIRED";
+}
+
 export function classifyHighRiskError(error) {
   const code = operationErrorCode(error);
   const status = error?.response?.status;
@@ -145,15 +149,44 @@ export async function runHighRiskOperation({
     return { phase: "cancelled", requestId, preflight };
   }
 
-  const executionResponse = await invoke({
-    ...basePayload,
-    preflightNonce: preflight.nonce,
-    preflightSummarySha256: preflight.summarySha256
-  });
+  let executionResponse;
+  try {
+    executionResponse = await invoke({
+      ...basePayload,
+      preflightNonce: preflight.nonce,
+      preflightSummarySha256: preflight.summarySha256
+    });
+  } catch (error) {
+    if (isApprovalRequiredError(error)) {
+      return { phase: "approval_required", requestId, preflight, response: responseData(error?.response) };
+    }
+    throw error;
+  }
   return {
     phase: highRiskState(executionResponse),
     requestId,
     preflight,
     response: responseData(executionResponse)
   };
+}
+
+export async function resumeHighRiskOperation({ invoke, payload, requestId, preflight }) {
+  if (typeof invoke !== "function") throw new TypeError("invoke is required");
+  if (!preflight?.nonce || !preflight?.summarySha256 || !requestId) {
+    throw new Error("ADMIN_OPERATION_PREFLIGHT_INVALID");
+  }
+  try {
+    const response = await invoke({
+      ...payload,
+      requestId,
+      preflightNonce: preflight.nonce,
+      preflightSummarySha256: preflight.summarySha256
+    });
+    return { phase: highRiskState(response), requestId, preflight, response: responseData(response) };
+  } catch (error) {
+    if (isApprovalRequiredError(error)) {
+      return { phase: "approval_required", requestId, preflight, response: responseData(error?.response) };
+    }
+    throw error;
+  }
 }

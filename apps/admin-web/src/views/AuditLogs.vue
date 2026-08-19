@@ -31,6 +31,27 @@
         @current-change="fetchLogs"
       />
     </el-card>
+
+    <el-card class="operation-audit-card">
+      <template #header>
+        <div class="card-header">
+          <span>高风险操作事件</span>
+          <el-button size="small" :loading="operationAuditLoading" @click="fetchOperationEvents">刷新</el-button>
+        </div>
+      </template>
+      <el-table :data="operationEvents" v-loading="operationAuditLoading" stripe>
+        <el-table-column prop="createdAt" label="时间" width="180">
+          <template #default="{ row }">{{ formatTime(row.createdAt) }}</template>
+        </el-table-column>
+        <el-table-column prop="requestId" label="请求 ID" min-width="160" show-overflow-tooltip />
+        <el-table-column prop="eventType" label="事件" min-width="150">
+          <template #default="{ row }"><el-tag size="small">{{ row.eventType }}</el-tag></template>
+        </el-table-column>
+        <el-table-column prop="permissionKey" label="权限" min-width="150" />
+        <el-table-column prop="result" label="终态" width="140" />
+      </el-table>
+      <el-empty v-if="!operationAuditLoading && !operationEvents.length" description="当前时间窗口没有操作事件" :image-size="56" />
+    </el-card>
   </AdminLayout>
 </template>
 
@@ -42,6 +63,8 @@ import { auditApi } from "../api";
 
 const logs = ref([]);
 const loading = ref(false);
+const operationAuditLoading = ref(false);
+const operationEvents = ref([]);
 const pagination = ref({
   page: 1,
   limit: 50,
@@ -68,7 +91,29 @@ async function fetchLogs() {
   }
 }
 
+async function fetchOperationEvents() {
+  operationAuditLoading.value = true;
+  try {
+    const { data } = await auditApi.getOperationEvents({
+      from: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString(),
+      to: new Date().toISOString(),
+      limit: 100
+    });
+    operationEvents.value = Array.isArray(data?.events) ? data.events : [];
+  } catch (error) {
+    ElMessage.error(error?.response?.data?.message || "获取操作审计事件失败");
+  } finally {
+    operationAuditLoading.value = false;
+  }
+}
+
 onMounted(() => {
   fetchLogs();
+  fetchOperationEvents();
 });
 </script>
+
+<style scoped>
+.operation-audit-card { margin-top: 20px; }
+.card-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+</style>

@@ -51,7 +51,9 @@ export const authApi = {
 
 export const auditApi = {
   getLogs: (params) =>
-    api.get("/audit-logs", { params })
+    api.get("/audit-logs", { params }),
+  getOperationEvents: (params, config = {}) =>
+    api.get("/operation-audit-events", { ...config, params })
 };
 
 export const assetApi = {
@@ -133,6 +135,10 @@ export const rolloutApi = {
 };
 
 export const adminOperationApi = {
+  getPendingApprovals: (params = {}, config = {}) =>
+    api.get("/admin-operations/pending-approvals", { ...config, params }),
+  get: (requestId, config = {}) =>
+    api.get(`/admin-operations/${encodeURIComponent(String(requestId ?? "").trim())}`, config),
   decideApproval: (requestId, data = {}, config = {}) => {
     const normalizedRequestId = String(requestId ?? "").trim();
     return api.post(

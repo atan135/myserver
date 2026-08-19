@@ -55,6 +55,13 @@ class OperationTransactionPool {
   async query(sql, params = []) {
     this.calls.push({ sql, params });
     if (sql === "BEGIN" || sql === "COMMIT" || sql === "ROLLBACK") return { rows: [], rowCount: 0 };
+    if (sql.includes("WHERE r.approval_status = 'pending'")) {
+      const rows = [...this.operations.values()]
+        .filter((operation) => operation.approval_status === "pending" && operation.status === "preflighted")
+        .slice(0, params[0])
+        .map((operation) => this.operationRow(operation.request_id, { withPreview: true, withApproval: true }));
+      return { rows, rowCount: rows.length };
+    }
     if (sql.includes("FROM admin_operation_requests r") && sql.includes("WHERE r.request_id = $1")) {
       const row = this.operationRow(params[0], { withPreview: true, withApproval: sql.includes("admin_operation_approvals") });
       return { rows: row ? [row] : [], rowCount: row ? 1 : 0 };
@@ -346,6 +353,25 @@ test("AdminStore approval decisions use explicitly typed PostgreSQL status param
   );
 });
 
+test("AdminStore pending approval list is bounded and returns no preflight nonce or payload material", async () => {
+  const pool = new OperationTransactionPool();
+  const store = new AdminStore(pool);
+  await store.reserveAdminOperationPreflight(preflightInput({ approvalStatus: "pending" }));
+  await store.reserveAdminOperationPreflight(preflightInput({
+    operationId: "44444444-4444-4444-8444-444444444444",
+    requestId: "request-transaction-2",
+    semanticSha256: NEXT_HASH,
+    approvalStatus: "not_required"
+  }));
+  const operations = await store.listPendingAdminOperations({ limit: 1000 });
+  assert.deepEqual(operations.map((operation) => operation.requestId), ["request-transaction-1"]);
+  assert.equal(operations[0].preview.summarySha256, HASH);
+  assert.equal(Object.hasOwn(operations[0].preview, "nonce"), false);
+  assert.equal(Object.hasOwn(operations[0], "payload"), false);
+  const query = pool.calls.find((call) => call.sql.includes("WHERE r.approval_status = 'pending'"));
+  assert.equal(query.params[0], 100);
+});
+
 test("AdminStore rejection cancels the operation and persists a bounded rejection summary atomically", async () => {
   const pool = new OperationTransactionPool();
   const store = new AdminStore(pool);
@@ -392,7 +418,11 @@ test("AdminStore operation audit queries are parameterized, keyset ordered, and 
           risk_level: "high",
           trace_id: "trace-transaction-1",
           reason: "Authorization: Bearer never-return-this-value",
-          target_summary_json: { targetIds: ["player-1"], token: "must-not-leak" },
+          target_summary_json: {
+            targetIds: ["player-1"],
+            token: "must-not-leak",
+            endpoint: { host: "10.0.0.1", port: 7500 }
+          },
           result_summary_json: { itemDelta: 1, payload: { content: "must-not-leak" } },
           details_json: { nonce: "must-not-leak", businessRecord: "ledger-unavailable" },
           operation_status: "succeeded",
@@ -417,6 +447,7 @@ test("AdminStore operation audit queries are parameterized, keyset ordered, and 
   });
 
   assert.equal(events[0].targetSummary.token, "[REDACTED]");
+  assert.equal(events[0].targetSummary.endpoint, "[REDACTED]");
   assert.equal(events[0].resultSummary.payload, "[REDACTED]");
   assert.equal(events[0].details.nonce, "[REDACTED]");
   assert.equal(events[0].reason, "[REDACTED: potential credential]");

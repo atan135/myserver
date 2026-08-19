@@ -42,21 +42,28 @@ test("rollout API sends high-risk drain requests only through the authenticated 
   });
 });
 
-test("approval API carries a request id and supports approval and rejection evidence", async () => {
-  let request;
+test("approval API uses admin-api-only pending/detail reads and carries approval evidence", async () => {
+  const requests = [];
   const previousAdapter = api.defaults.adapter;
   api.defaults.adapter = async (config) => {
-    request = config;
+    requests.push(config);
     return { data: { ok: true }, status: 200, statusText: "OK", headers: {}, config };
   };
   try {
+    await adminOperationApi.getPendingApprovals({ limit: 20 });
+    await adminOperationApi.get("request / 1");
     await adminOperationApi.reject("request / 1", "unsafe target", { ticket: "OPS-1" });
   } finally {
     api.defaults.adapter = previousAdapter;
   }
 
-  assert.equal(request.url, "/admin-operations/request%20%2F%201/approval");
-  assert.deepEqual(JSON.parse(request.data), {
+  assert.deepEqual(requests.map((request) => request.url), [
+    "/admin-operations/pending-approvals",
+    "/admin-operations/request%20%2F%201",
+    "/admin-operations/request%20%2F%201/approval"
+  ]);
+  assert.equal(requests.every((request) => request.baseURL === "/api/v1"), true);
+  assert.deepEqual(JSON.parse(requests[2].data), {
     status: "rejected",
     evidenceSummary: { ticket: "OPS-1" },
     rejectionReason: "unsafe target",

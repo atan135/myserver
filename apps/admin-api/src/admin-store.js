@@ -124,13 +124,23 @@ function toAdminOperation(row) {
     preview: row.preview_id ? {
       previewId: row.preview_id,
       summarySha256: row.summary_sha256,
+      impactSummary: redactOperationAuditValue(normalizeJson(row.preview_impact_summary_json) || {}),
       expiresAt: toIsoString(row.preview_expires_at),
       consumedAt: toIsoString(row.preview_consumed_at)
+    } : null,
+    approval: row.approval_record_status ? {
+      status: row.approval_record_status,
+      requestedAt: toIsoString(row.approval_requested_at),
+      decidedAt: toIsoString(row.approval_decided_at),
+      decidedByAdminId: toNumericId(row.approval_decided_by_admin_id),
+      decidedBySubject: row.approval_decided_by_subject || null,
+      evidenceSummary: redactOperationAuditValue(normalizeJson(row.approval_evidence_summary_json) || {}),
+      rejectionReason: redactAuditReason(row.approval_rejection_reason)
     } : null
   };
 }
 
-const OPERATION_AUDIT_SENSITIVE_KEY = /password|token|secret|private.?key|authorization|cookie|ticket|nonce|payload/i;
+const OPERATION_AUDIT_SENSITIVE_KEY = /password|token|secret|private.?key|authorization|cookie|ticket|nonce|payload|assertion|endpoint|host|port|credential/i;
 const OPERATION_AUDIT_UNBOUNDED_TEXT_KEY = /content|message|prompt|broadcast|body/i;
 
 function redactOperationAuditValue(value, key = "", depth = 0) {
@@ -1375,14 +1385,50 @@ export class AdminStore {
     const { rows } = await this.pool.query(
       `SELECT r.*,
               p.preview_id, p.summary_sha256, p.expires_at AS preview_expires_at,
-              p.consumed_at AS preview_consumed_at
+              p.consumed_at AS preview_consumed_at,
+              p.impact_summary_json AS preview_impact_summary_json,
+              a.status AS approval_record_status,
+              a.requested_at AS approval_requested_at,
+              a.decided_at AS approval_decided_at,
+              a.decided_by_admin_id AS approval_decided_by_admin_id,
+              a.decided_by_subject AS approval_decided_by_subject,
+              a.evidence_summary_json AS approval_evidence_summary_json,
+              a.rejection_reason AS approval_rejection_reason
        FROM admin_operation_requests r
        LEFT JOIN admin_operation_previews p ON p.operation_id = r.operation_id
+       LEFT JOIN admin_operation_approvals a ON a.operation_id = r.operation_id
        WHERE r.request_id = $1
        LIMIT 1`,
       [requestId]
     );
     return rows.length > 0 ? toAdminOperation(rows[0]) : null;
+  }
+
+  async listPendingAdminOperations({ limit = 100 } = {}) {
+    const boundedLimit = Math.max(1, Math.min(Number(limit) || 1, 100));
+    const { rows } = await this.pool.query(
+      `SELECT r.*,
+              p.preview_id, p.summary_sha256, p.expires_at AS preview_expires_at,
+              p.consumed_at AS preview_consumed_at,
+              p.impact_summary_json AS preview_impact_summary_json,
+              a.status AS approval_record_status,
+              a.requested_at AS approval_requested_at,
+              a.decided_at AS approval_decided_at,
+              a.decided_by_admin_id AS approval_decided_by_admin_id,
+              a.decided_by_subject AS approval_decided_by_subject,
+              a.evidence_summary_json AS approval_evidence_summary_json,
+              a.rejection_reason AS approval_rejection_reason
+       FROM admin_operation_requests r
+       JOIN admin_operation_approvals a ON a.operation_id = r.operation_id
+       LEFT JOIN admin_operation_previews p ON p.operation_id = r.operation_id
+       WHERE r.approval_status = 'pending'
+         AND r.status = 'preflighted'
+         AND a.status = 'pending'
+       ORDER BY r.created_at DESC
+       LIMIT $1`,
+      [boundedLimit]
+    );
+    return rows.map(toAdminOperation);
   }
 
   async claimAdminOperationExecution({ requestId, semanticSha256, nonceSha256, summarySha256, now = new Date() }) {
