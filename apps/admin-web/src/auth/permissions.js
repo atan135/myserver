@@ -17,6 +17,8 @@ export const ADMIN_PERMISSIONS = Object.freeze({
   MAINTENANCE_WRITE: "maintenance.write",
   MONITORING_READ: "monitoring.read",
   MONITORING_ARCHIVE: "monitoring.archive",
+  GAME_CONFIG_WRITE: "game.config.write",
+  ADMIN_PERMISSIONS_MANAGE: "admin.permissions.manage",
   ID_READ: "id.read",
   ID_MANAGE: "id.manage",
   MYFORGE_AGENT_READ: "myforge.agent.read",

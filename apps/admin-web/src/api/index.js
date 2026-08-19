@@ -1,9 +1,20 @@
 import axios from "axios";
+import { createAdminRequestId } from "../operations/high-risk.js";
 
 const api = axios.create({
   baseURL: "/api/v1",
   timeout: 10000
 });
+
+function highRiskRequestBody(data = {}) {
+  const body = data && typeof data === "object" && !Array.isArray(data) ? data : {};
+  return {
+    ...body,
+    requestId: typeof body.requestId === "string" && body.requestId.trim()
+      ? body.requestId.trim()
+      : createAdminRequestId()
+  };
+}
 
 // Add auth token to requests
 api.interceptors.request.use((config) => {
@@ -105,6 +116,41 @@ export const monitoringApi = {
   triggerArchive: () =>
     api.post("/archive", undefined, { baseURL: "/api/admin/monitoring" })
 };
+
+// These clients stay on the authenticated admin-api boundary. They never accept
+// or expose game-server endpoints, assertion tokens, or downstream credentials.
+export const rolloutApi = {
+  setDrain: (instanceId, data = {}, config = {}) =>
+    api.post(
+      `/rollouts/game-server/${encodeURIComponent(String(instanceId))}/drain`,
+      highRiskRequestBody(data),
+      config
+    )
+};
+
+export const adminOperationApi = {
+  decideApproval: (requestId, data = {}, config = {}) => {
+    const normalizedRequestId = String(requestId ?? "").trim();
+    return api.post(
+      `/admin-operations/${encodeURIComponent(normalizedRequestId)}/approval`,
+      { ...data, requestId: normalizedRequestId },
+      config
+    );
+  },
+  approve: (requestId, evidenceSummary = {}, config = {}) =>
+    adminOperationApi.decideApproval(requestId, {
+      status: "approved",
+      evidenceSummary
+    }, config),
+  reject: (requestId, rejectionReason, evidenceSummary = {}, config = {}) =>
+    adminOperationApi.decideApproval(requestId, {
+      status: "rejected",
+      evidenceSummary,
+      rejectionReason
+    }, config)
+};
+
+export { highRiskRequestBody };
 
 export const globalIdApi = {
   decode: (id) =>

@@ -16,3 +16,14 @@ test("frontend permissions use server effective permissions and never expand a l
   assert.equal(hasPermission(scopedOperator, P.GM_SEND_ITEM), true);
   assert.equal(hasPermission(scopedOperator, P.GM_BAN_PLAYER), false);
 });
+
+test("rollout and approval permissions are recognized only when returned by the server", () => {
+  const operator = {
+    permissions: [P.GAME_CONFIG_WRITE, P.ADMIN_PERMISSIONS_MANAGE]
+  };
+
+  assert.equal(hasPermission(operator, P.GAME_CONFIG_WRITE), true);
+  assert.equal(hasPermission(operator, P.ADMIN_PERMISSIONS_MANAGE), true);
+  assert.equal(hasPermission({}, P.GAME_CONFIG_WRITE), false);
+  assert.equal(hasPermission({}, P.ADMIN_PERMISSIONS_MANAGE), false);
+});
