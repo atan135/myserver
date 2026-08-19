@@ -24,6 +24,7 @@ const MOVEMENT_TRANSFER_CONFIG_EPSILON: f32 = 0.000_001;
 pub struct MovementDemoLogic {
     pub room_id: String,
     pub tick_count: u64,
+    pub current_frame: u32,
     pub default_scene_id: i32,
     pub config_tables: Option<ConfigTableRuntime>,
     pub movement_state: Option<RoomMovementState>,
@@ -38,6 +39,8 @@ struct MovementDemoTransferLogicState {
     schema_version: u32,
     room_id: String,
     tick_count: u64,
+    #[serde(default)]
+    current_frame: u32,
     default_scene_id: i32,
     recipients: Vec<String>,
 }
@@ -64,6 +67,7 @@ impl MovementDemoLogic {
         Self {
             room_id: String::new(),
             tick_count: 0,
+            current_frame: 0,
             default_scene_id,
             config_tables: Some(config_tables),
             movement_state: Some(movement_state),
@@ -168,6 +172,7 @@ impl RoomLogic for MovementDemoLogic {
     }
 
     fn on_character_join(&mut self, character_id: &str) {
+        let existing_recipients = self.recipients.clone();
         if !self
             .recipients
             .iter()
@@ -176,6 +181,23 @@ impl RoomLogic for MovementDemoLogic {
             self.recipients.push(character_id.to_string());
         }
         self.spawn_character_if_needed(character_id);
+
+        if existing_recipients.is_empty() {
+            return;
+        }
+        let frame_id = self.authority_frame();
+        let Some(movement_state) = self.movement_state.as_mut() else {
+            return;
+        };
+        let entities = movement_state.all_transforms();
+        let correction = movement_state.incremental_correction(
+            frame_id,
+            MovementCorrectionReason::Periodic,
+            existing_recipients,
+            entities,
+        );
+        self.pending_broadcasts
+            .extend(snapshot_broadcasts(&self.room_id, vec![correction]));
     }
 
     fn on_character_leave(&mut self, character_id: &str) {
@@ -186,13 +208,11 @@ impl RoomLogic for MovementDemoLogic {
     }
 
     fn on_character_offline(&mut self, _room_id: &str, character_id: &str) {
+        let frame_id = self.authority_frame();
         let Some(movement_state) = self.movement_state.as_mut() else {
             return;
         };
 
-        let frame_id = movement_state
-            .last_snapshot_frame
-            .max(self.tick_count as u32);
         let Some(corrected) = movement_state.stop_character(character_id, frame_id) else {
             return;
         };
@@ -212,9 +232,12 @@ impl RoomLogic for MovementDemoLogic {
     }
 
     fn on_game_started(&mut self, _room_id: &str) {
+        self.tick_count = 0;
+        self.current_frame = 0;
         let Some(movement_state) = self.movement_state.as_mut() else {
             return;
         };
+        movement_state.reset_authority_epoch(0);
         self.pending_broadcasts.push(full_sync_broadcast(
             &self.room_id,
             movement_state,
@@ -225,6 +248,7 @@ impl RoomLogic for MovementDemoLogic {
 
     fn on_tick(&mut self, frame_id: u32, fps: u16, inputs: &[PlayerInputRecord]) {
         self.tick_count += 1;
+        self.current_frame = frame_id;
         let Some(config_tables) = self.config_tables.as_ref() else {
             return;
         };
@@ -318,15 +342,11 @@ impl RoomLogic for MovementDemoLogic {
         reason: MovementCorrectionReason,
     ) -> Option<MovementRecoveryState> {
         let movement_state = self.movement_state.as_ref()?;
-        Some(
-            movement_state.recovery_state_for_character(
-                requester_character_id,
-                movement_state
-                    .last_snapshot_frame
-                    .max(self.tick_count as u32),
-                reason,
-            ),
-        )
+        Some(movement_state.recovery_state_for_character(
+            requester_character_id,
+            self.authority_frame(),
+            reason,
+        ))
     }
 
     fn take_pending_broadcasts(&mut self) -> Vec<RoomLogicBroadcast> {
@@ -345,6 +365,7 @@ impl RoomLogicTransfer for MovementDemoLogic {
             schema_version: ROOM_TRANSFER_SCHEMA_VERSION,
             room_id: self.room_id.clone(),
             tick_count: self.tick_count,
+            current_frame: self.current_frame,
             default_scene_id: self.default_scene_id,
             recipients: self.recipients.clone(),
         };
@@ -408,12 +429,21 @@ impl RoomLogicTransfer for MovementDemoLogic {
 
         self.room_id = logic_state.room_id;
         self.tick_count = logic_state.tick_count;
+        self.current_frame = logic_state
+            .current_frame
+            .max(movement_state.last_snapshot_frame);
         self.default_scene_id = logic_state.default_scene_id;
         self.recipients = logic_state.recipients;
         self.movement_state = Some(movement_state);
         self.pending_broadcasts.clear();
 
         Ok(())
+    }
+}
+
+impl MovementDemoLogic {
+    fn authority_frame(&self) -> u32 {
+        self.current_frame
     }
 }
 
@@ -614,6 +644,7 @@ mod tests {
         };
 
         logic.tick_count = 20;
+        logic.current_frame = 20;
         logic.on_character_offline("main-world-public", "character-a");
         {
             let state = logic.movement_state.as_ref().unwrap();
@@ -660,6 +691,41 @@ mod tests {
     }
 
     #[test]
+    fn joining_character_queues_membership_snapshot_for_existing_recipients() {
+        let mut logic = movement_demo_logic();
+        logic.on_room_created("main-world-public");
+        logic.on_character_join("character-a");
+        assert!(logic.take_pending_broadcasts().is_empty());
+
+        logic.tick_count = 999;
+        logic.current_frame = 12;
+        logic.on_character_join("character-b");
+
+        let broadcasts = logic.take_pending_broadcasts();
+        assert_eq!(broadcasts.len(), 1);
+        assert_eq!(
+            broadcasts[0].target_character_ids,
+            vec!["character-a".to_string()]
+        );
+        let snapshot = crate::pb::MovementSnapshotPush::decode(broadcasts[0].body.as_slice())
+            .expect("join membership snapshot should decode");
+        assert_eq!(snapshot.frame_id, 12);
+        assert!(!snapshot.full_sync);
+        assert_eq!(
+            snapshot.correction_kind,
+            MovementCorrectionKind::Incremental as i32
+        );
+        assert_eq!(
+            snapshot
+                .entities
+                .iter()
+                .map(|entity| entity.character_id.as_str())
+                .collect::<std::collections::BTreeSet<_>>(),
+            std::collections::BTreeSet::from(["character-a", "character-b"])
+        );
+    }
+
+    #[test]
     fn offline_recovery_stops_authoritative_movement_without_losing_last_input() {
         let mut logic = movement_demo_logic();
         logic.on_room_created("main-world-public");
@@ -679,7 +745,8 @@ mod tests {
             },
         );
 
-        logic.tick_count = 30;
+        logic.tick_count = 999;
+        logic.current_frame = 30;
         logic.on_character_offline("main-world-public", "character-a");
         let recovery = logic
             .movement_recovery_state(

@@ -181,6 +181,30 @@ async fn optimistic_strategy_advances_with_partial_inputs() {
 }
 
 #[tokio::test]
+async fn movement_demo_advances_empty_frames_without_waiting_for_old_timeout() {
+    let (manager, factory, _receivers) =
+        setup_started_room(MOVEMENT_DEMO_POLICY, &[PLAYER_A]).await;
+
+    tokio::time::sleep(Duration::from_millis(
+        crate::core::runtime::room_policy::MOVEMENT_DEMO_WAIT_TIMEOUT_MS + 2,
+    ))
+    .await;
+
+    let first = manager.process_room_tick(TEST_ROOM_ID, 20).await;
+    assert!(first.is_some());
+    assert_eq!(first.expect("first empty movement frame").0.frame_id, 1);
+
+    assert!(manager.process_room_tick(TEST_ROOM_ID, 20).await.is_none());
+    tokio::time::sleep(Duration::from_millis(
+        crate::core::runtime::room_policy::MOVEMENT_DEMO_WAIT_TIMEOUT_MS + 2,
+    ))
+    .await;
+    let second = manager.process_room_tick(TEST_ROOM_ID, 20).await;
+    assert_eq!(second.expect("second empty movement frame").0.frame_id, 2);
+    assert_eq!(factory.recorded_ticks().len(), 2);
+}
+
+#[tokio::test]
 async fn future_inputs_are_buffered_until_their_frame_is_ready() {
     let (manager, factory, _receivers) =
         setup_started_room(DEFAULT_POLICY, &[PLAYER_A, PLAYER_B]).await;

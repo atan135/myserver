@@ -184,6 +184,18 @@ impl RoomMovementState {
         }
     }
 
+    /// Resets frame-scoped movement bookkeeping when a room starts a new
+    /// authority epoch. Entity identity and spatial state remain intact, but
+    /// acknowledgements and correction cadence must not carry old-room frames.
+    pub fn reset_authority_epoch(&mut self, frame_id: u32) {
+        self.last_snapshot_frame = frame_id;
+        self.last_full_sync_frame = frame_id;
+        self.latest_client_state_by_character.clear();
+        self.last_sent_frame_by_character.clear();
+        self.missing_control_frames_by_character.clear();
+        self.last_input_frames.fill(frame_id);
+    }
+
     pub fn spawn_character(
         &mut self,
         character_id: &str,

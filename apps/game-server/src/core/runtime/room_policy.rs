@@ -4,6 +4,7 @@ pub const DEFAULT_ROOM_POLICY_ID: &str = "default_match";
 pub const MOVEMENT_DEMO_POLICY_ID: &str = "movement_demo";
 pub const MOVEMENT_DEMO_MAX_MEMBERS: usize = 32;
 pub const MOVEMENT_DEMO_ACTIVE_ROOM_FPS: u16 = 20;
+pub const MOVEMENT_DEMO_WAIT_TIMEOUT_MS: u64 = 1;
 pub const MOVEMENT_DEMO_DEFAULT_SPEED_METERS_PER_SECOND: f32 = 4.0;
 pub const MOVEMENT_DEMO_CORRECTION_INTERVAL_FRAMES: u32 = 3;
 pub const MOVEMENT_DEMO_CORRECTION_THRESHOLD_METERS: f32 = 0.05;
@@ -186,7 +187,7 @@ impl RoomRuntimePolicy {
             offline_ttl_secs: 120,
             snapshot_interval_frames: 15,
             input_delay_frames: 2,
-            wait_timeout_ms: 100,
+            wait_timeout_ms: MOVEMENT_DEMO_WAIT_TIMEOUT_MS,
             wait_strategy: InputWaitStrategy::Optimistic,
             missing_input_strategy: MissingInputStrategy::Empty,
             movement_correction_interval_frames: MOVEMENT_DEMO_CORRECTION_INTERVAL_FRAMES,
@@ -431,6 +432,7 @@ mod tests {
         assert_eq!(movement.min_start_players, 1);
         assert_eq!(movement.active_room_fps, MOVEMENT_DEMO_ACTIVE_ROOM_FPS);
         assert_eq!(movement.input_delay_frames, 2);
+        assert_eq!(movement.wait_timeout_ms, MOVEMENT_DEMO_WAIT_TIMEOUT_MS);
         assert_eq!(movement.wait_strategy, InputWaitStrategy::Optimistic);
         assert_eq!(movement.missing_input_strategy, MissingInputStrategy::Empty);
         assert_eq!(
