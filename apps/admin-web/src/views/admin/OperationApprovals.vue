@@ -105,14 +105,14 @@
                 <el-button
                   type="success"
                   :loading="decisionLoading && decisionType === 'approved'"
-                  :disabled="decisionLoading || !evidenceSummary"
+                  :disabled="decisionLoading || !canApprove"
                   @click="decide('approved')"
                 >批准</el-button>
                 <el-button
                   type="danger"
                   plain
                   :loading="decisionLoading && decisionType === 'rejected'"
-                  :disabled="decisionLoading || !evidenceSummary || !safeRejectionReason"
+                  :disabled="decisionLoading || !canReject"
                   @click="decide('rejected')"
                 >拒绝</el-button>
               </div>
@@ -151,10 +151,11 @@ import { ADMIN_PERMISSIONS as P } from "../../auth/permissions";
 import { useAuthStore } from "../../stores/auth";
 import {
   approvalEvidenceSummary,
+  approvalDecisionPayload,
   approvalStatusType,
+  canDecideApproval,
   isSelfApproval,
-  operationStatusType,
-  rejectionReason
+  operationStatusType
 } from "../../operations/operation-approval";
 
 const authStore = useAuthStore();
@@ -172,9 +173,10 @@ const decisionLoading = ref(false);
 const decisionType = ref("");
 
 const evidenceSummary = computed(() => approvalEvidenceSummary(evidence.value));
-const safeRejectionReason = computed(() => rejectionReason(rejection.value));
 const selfApproval = computed(() => isSelfApproval(detail.value, authStore.user?.id));
 const canDecide = computed(() => detail.value?.approvalStatus === "pending" && !selfApproval.value);
+const canApprove = computed(() => canDecideApproval(detail.value, authStore.user?.id, evidence.value));
+const canReject = computed(() => canDecideApproval(detail.value, authStore.user?.id, evidence.value, rejection.value, "rejected"));
 
 function formatTime(value) {
   return value ? new Date(value).toLocaleString("zh-CN") : "--";
@@ -249,8 +251,11 @@ async function refresh() {
 }
 
 async function decide(status) {
-  if (!detail.value || !evidenceSummary.value || decisionLoading.value) return;
-  if (status === "rejected" && !safeRejectionReason.value) return;
+  if (!detail.value || decisionLoading.value) return;
+  if (status === "approved" && !canApprove.value) return;
+  if (status === "rejected" && !canReject.value) return;
+  const payload = approvalDecisionPayload(status, evidence.value, rejection.value);
+  if (!payload) return;
   decisionLoading.value = true;
   decisionType.value = status;
   try {
@@ -260,9 +265,9 @@ async function decide(status) {
       { type: status === "approved" ? "warning" : "error", confirmButtonText: "确认", cancelButtonText: "取消" }
     );
     if (status === "approved") {
-      await adminOperationApi.approve(detail.value.requestId, evidenceSummary.value);
+      await adminOperationApi.approve(detail.value.requestId, payload.evidenceSummary);
     } else {
-      await adminOperationApi.reject(detail.value.requestId, safeRejectionReason.value, evidenceSummary.value);
+      await adminOperationApi.reject(detail.value.requestId, payload.rejectionReason, payload.evidenceSummary);
     }
     ElMessage.success(status === "approved" ? "已批准操作" : "已拒绝操作");
     await refresh();

@@ -19,6 +19,23 @@ export function isSelfApproval(operation, currentAdminId) {
   return requesterId !== undefined && requesterId !== null && String(requesterId) === String(currentAdminId ?? "");
 }
 
+export function canDecideApproval(operation, currentAdminId, evidence, rejection = "", status = "approved") {
+  if (operation?.approvalStatus !== "pending" || isSelfApproval(operation, currentAdminId)) return false;
+  if (!approvalEvidenceSummary(evidence)) return false;
+  return status !== "rejected" || Boolean(rejectionReason(rejection));
+}
+
+export function approvalDecisionPayload(status, evidence, rejection = "") {
+  const evidenceSummary = approvalEvidenceSummary(evidence);
+  if (!evidenceSummary || !["approved", "rejected"].includes(status)) return null;
+  if (status === "rejected") {
+    const rejectionReasonText = rejectionReason(rejection);
+    if (!rejectionReasonText) return null;
+    return { status, evidenceSummary, rejectionReason: rejectionReasonText };
+  }
+  return { status, evidenceSummary };
+}
+
 export function approvalStatusType(status) {
   return {
     pending: "warning",

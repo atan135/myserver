@@ -4,6 +4,8 @@ import test from "node:test";
 import {
   approvalEvidenceSummary,
   approvalStatusType,
+  approvalDecisionPayload,
+  canDecideApproval,
   isSelfApproval,
   rejectionReason
 } from "./operation-approval.js";
@@ -23,4 +25,24 @@ test("approval UI blocks self review based on the server-provided requester iden
   assert.equal(isSelfApproval(operation, 17), true);
   assert.equal(isSelfApproval(operation, 18), false);
   assert.equal(approvalStatusType("pending"), "warning");
+});
+
+test("approval decisions require a pending operation, an independent approver, and complete safe evidence", () => {
+  const pending = { approvalStatus: "pending", requester: { adminId: 17 } };
+  assert.equal(canDecideApproval(pending, 18, "checked change request"), true);
+  assert.equal(canDecideApproval(pending, 17, "checked change request"), false);
+  assert.equal(canDecideApproval({ ...pending, approvalStatus: "approved" }, 18, "checked change request"), false);
+  assert.equal(canDecideApproval(pending, 18, "token: should-not-be-accepted"), false);
+  assert.equal(canDecideApproval(pending, 18, "checked change request", "", "rejected"), false);
+  assert.equal(canDecideApproval(pending, 18, "checked change request", "outside window", "rejected"), true);
+  assert.deepEqual(approvalDecisionPayload("approved", "checked change request"), {
+    status: "approved",
+    evidenceSummary: { summary: "checked change request" }
+  });
+  assert.deepEqual(approvalDecisionPayload("rejected", "checked change request", "outside window"), {
+    status: "rejected",
+    evidenceSummary: { summary: "checked change request" },
+    rejectionReason: "outside window"
+  });
+  assert.equal(approvalDecisionPayload("rejected", "checked change request"), null);
 });

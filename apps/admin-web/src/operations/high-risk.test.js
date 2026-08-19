@@ -96,6 +96,7 @@ test("high-risk error classification preserves safe next steps for control-plane
     status: 409
   });
   assert.equal(classifyHighRiskError({ response: { status: 403, data: {} } }), "permission_denied");
+  assert.equal(classifyHighRiskError({ response: { status: 403, data: { error: "ADMIN_OPERATION_SCOPE_DENIED" } } }), "permission_denied");
   assert.equal(
     classifyHighRiskError({ response: { status: 400, data: { error: "ADMIN_OPERATION_PREVIEW_EXPIRED" } } }),
     "preflight_expired"
@@ -103,6 +104,10 @@ test("high-risk error classification preserves safe next steps for control-plane
   assert.equal(
     classifyHighRiskError({ response: { status: 503, data: { error: "ADMIN_OPERATION_PERSISTENCE_FAILED" } } }),
     "execution_uncertain"
+  );
+  assert.equal(
+    classifyHighRiskError({ response: { status: 400, data: { error: "ADMIN_OPERATION_NONCE_REPLAYED" } } }),
+    "nonce_replayed"
   );
 });
 
