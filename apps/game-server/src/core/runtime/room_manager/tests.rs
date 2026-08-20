@@ -13,7 +13,8 @@ pub(super) use crate::core::room::PlayerInputRecord;
 pub(super) use crate::core::runtime::room_policy::{MissingInputStrategy, RoomRuntimePolicy};
 pub(super) use crate::gameroom::GameRoomLogicFactory;
 pub(super) use crate::pb::{
-    GameMessagePush, RoomFrameRatePush, RoomMigrationState, RoomTransferPayload, ServerRedirectPush,
+    GameMessagePush, RoomFrameRatePush, RoomMemberOfflinePush, RoomMigrationState,
+    RoomTransferPayload, ServerRedirectPush,
 };
 pub(super) use crate::protocol::MessageType;
 

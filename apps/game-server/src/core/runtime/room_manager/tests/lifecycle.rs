@@ -422,9 +422,9 @@ async fn observer_leave_preserves_started_room_until_owner_ends_game() {
 }
 
 #[tokio::test]
-async fn player_leave_keeps_existing_started_room_reset_semantics() {
-    let (manager, _factory, _receivers) =
-        setup_started_room(DEFAULT_POLICY, &[PLAYER_A, PLAYER_B]).await;
+async fn player_leave_keeps_started_room_running_for_remaining_players() {
+    let (manager, factory, _receivers) =
+        setup_started_room(MOVEMENT_DEMO_POLICY, &[PLAYER_A, PLAYER_B]).await;
     manager
         .accept_player_input(TEST_ROOM_ID, PLAYER_A, 1, "move", "{}")
         .await
@@ -432,16 +432,41 @@ async fn player_leave_keeps_existing_started_room_reset_semantics() {
 
     let leave = manager.leave_room(TEST_ROOM_ID, PLAYER_B).await;
     let snapshot = leave.snapshot.expect("player leave should return snapshot");
-    assert_eq!(snapshot.state, "waiting");
+    assert_eq!(snapshot.state, "in_game");
 
     with_room_for_test(&manager, TEST_ROOM_ID, |room| {
-        assert_eq!(room.phase, RoomPhase::Waiting);
-        assert!(room.pending_inputs.is_empty());
+        assert_eq!(room.phase, RoomPhase::InGame);
+        assert_eq!(room.pending_inputs_for_frame(1).len(), 1);
         assert_eq!(room.owner_character_id, PLAYER_A);
-        assert!(!room.members.get(PLAYER_A).unwrap().ready);
+        assert!(room.members.get(PLAYER_A).unwrap().ready);
         let leaving_player = room.members.get(PLAYER_B).unwrap();
         assert!(leaving_player.offline);
-        assert!(!leaving_player.ready);
+        assert!(leaving_player.ready);
     })
     .await;
+
+    let progressed = manager.process_room_tick(TEST_ROOM_ID, 20).await;
+    assert!(progressed.is_some());
+    assert_eq!(factory.recorded_ticks().len(), 1);
+    assert_eq!(factory.recorded_ticks()[0].0, 1);
+    assert_eq!(factory.recorded_ticks()[0].1.len(), 1);
+    assert_eq!(factory.recorded_ticks()[0].1[0].character_id, PLAYER_A);
+}
+
+#[tokio::test]
+async fn disconnect_broadcasts_offline_presence_to_remaining_players() {
+    let (manager, _factory, mut receivers) =
+        setup_started_room(MOVEMENT_DEMO_POLICY, &[PLAYER_A, PLAYER_B]).await;
+
+    manager.disconnect_room_member(TEST_ROOM_ID, PLAYER_B).await;
+
+    let pushes = drain_messages_of_type(&mut receivers[0], MessageType::RoomMemberOfflinePush);
+    assert_eq!(pushes.len(), 1);
+    let push = RoomMemberOfflinePush::decode(pushes[0].body.as_slice()).unwrap();
+    assert_eq!(push.room_id, TEST_ROOM_ID);
+    assert_eq!(push.character_id, PLAYER_B);
+    assert!(push.offline);
+    assert!(
+        drain_messages_of_type(&mut receivers[1], MessageType::RoomMemberOfflinePush).is_empty()
+    );
 }

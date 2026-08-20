@@ -1,6 +1,6 @@
 use super::*;
 
-use crate::pb::RoomStatePush;
+use crate::pb::{RoomMemberOfflinePush, RoomStatePush};
 use crate::protocol::{MessageType, encode_body};
 
 impl RoomManager {
@@ -190,6 +190,22 @@ impl RoomManager {
                 .broadcast_message(room_id, &target_character_ids, message_type, body)
                 .await;
         }
+    }
+
+    pub(super) async fn broadcast_room_member_presence(
+        &self,
+        room_id: &str,
+        character_id: &str,
+        offline: bool,
+    ) {
+        let body = encode_body(&RoomMemberOfflinePush {
+            room_id: room_id.to_string(),
+            character_id: character_id.to_string(),
+            offline,
+        });
+        let _ = self
+            .broadcast_to_room(room_id, MessageType::RoomMemberOfflinePush, body)
+            .await;
     }
 
     pub async fn send_to_character(

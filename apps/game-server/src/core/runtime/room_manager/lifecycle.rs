@@ -382,7 +382,9 @@ impl RoomManager {
             }
         }
 
-        if leaving_role == MemberRole::Player {
+        // An active player remains recoverable until the offline TTL expires;
+        // keep the simulation running for the remaining online players.
+        if leaving_role == MemberRole::Player && room.phase != RoomPhase::InGame {
             room.reset_to_waiting();
         }
 
@@ -398,6 +400,8 @@ impl RoomManager {
         self.set_character_index(character_id, room_id, true).await;
 
         self.broadcast_logic_broadcasts(room_id, pending_broadcasts)
+            .await;
+        self.broadcast_room_member_presence(room_id, character_id, true)
             .await;
         self.update_room_fps(room_id).await;
 
@@ -539,6 +543,8 @@ impl RoomManager {
 
         self.broadcast_logic_broadcasts(room_id, pending_broadcasts)
             .await;
+        self.broadcast_room_member_presence(room_id, character_id, true)
+            .await;
         self.update_room_fps(room_id).await;
 
         if let Some(ref mid) = match_id {
@@ -615,6 +621,8 @@ impl RoomManager {
             self.remove_offline_character_index(character_id, room_id)
                 .await;
             self.set_character_index(character_id, room_id, false).await;
+            self.broadcast_room_member_presence(room_id, character_id, false)
+                .await;
 
             if let Some(ref mid) = match_id {
                 self.notify_player_joined(mid, character_id, room_id).await;
