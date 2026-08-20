@@ -38,7 +38,7 @@ pub struct ServiceInstance {
     pub endpoints: Vec<ServiceEndpoint>,
     #[serde(skip)]
     endpoints_provided: bool,
-    /// 注册时间戳
+    /// 注册时间戳（Unix epoch 毫秒）
     #[serde(default)]
     pub registered_at: i64,
     /// 是否健康
@@ -102,7 +102,7 @@ impl ServiceInstance {
             metadata: serde_json::Value::Object(serde_json::Map::new()),
             endpoints: Vec::new(),
             endpoints_provided: false,
-            registered_at: chrono_timestamp(),
+            registered_at: unix_timestamp_millis(),
             healthy: true,
         };
         instance.normalize();
@@ -165,7 +165,7 @@ impl ServiceInstance {
 
         self.schema_version = SERVICE_INSTANCE_SCHEMA_VERSION;
         if self.registered_at == 0 {
-            self.registered_at = chrono_timestamp();
+            self.registered_at = unix_timestamp_millis();
         }
         if self.metadata.is_null() {
             self.metadata = serde_json::Value::Object(serde_json::Map::new());
@@ -378,9 +378,29 @@ fn legacy_endpoint_protocols(service_name: &str) -> (&'static str, &'static str)
     }
 }
 
-fn chrono_timestamp() -> i64 {
+fn unix_timestamp_millis() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
+        .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ServiceInstance;
+
+    #[test]
+    fn new_instance_uses_unix_milliseconds_for_registered_at() {
+        let instance = ServiceInstance::new(
+            "test-001".to_string(),
+            "game-server".to_string(),
+            "127.0.0.1".to_string(),
+            7000,
+        );
+
+        assert!(
+            instance.registered_at >= 1_000_000_000_000,
+            "registered_at must be a Unix timestamp in milliseconds"
+        );
+    }
 }
