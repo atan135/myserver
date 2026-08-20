@@ -112,6 +112,6 @@ gameservice/character_element/mod.rs
 
 - `docs/游戏服与接入层/游戏业务模块开发规范.md`
 - `docs/游戏服与接入层/Rust游戏服开发指南.md`
-- `docs/游戏服与接入层/角色体系与四属性设计.md`
-- `docs/游戏服与接入层/checklists/角色体系P1四属性基础_checklist.md`
+- `docs/游戏服与接入层/角色与成长/角色体系与四属性设计.md`
+- `docs/游戏服与接入层/角色与成长/checklists/角色体系P1四属性基础_checklist.md`
 - `summary/角色永久四属性模块迁移_checklist.md`

@@ -23,7 +23,7 @@
 - 开发总结：建立可复用资产领域模型并接入现有物品堆叠判定；以代码路径记录现有资产写入口、JSONB 快照与并发边界，明确首期只覆盖物品资产。
 - 验证记录：静态审核 `asset.rs`、`item.rs` 和写入口基线文档；`cargo test asset --manifest-path apps/game-server/Cargo.toml` 与 `cargo test inventory --manifest-path apps/game-server/Cargo.toml` 均通过，后者执行 30 项测试且 0 failed。
 
-- [x] 盘点 inventory、warehouse、equipment、邮件附件、GM grant、职业学习消耗、角色进度和测试 `ItemAddReq` 的全部写入口。（验证：`docs/游戏服与接入层/统一资产模型与写入口基线.md`“已发现写入口基线”逐项记录代码路径与风险）
+- [x] 盘点 inventory、warehouse、equipment、邮件附件、GM grant、职业学习消耗、角色进度和测试 `ItemAddReq` 的全部写入口。（验证：`docs/游戏服与接入层/背包与物品/统一资产模型与写入口基线.md`“已发现写入口基线”逐项记录代码路径与风险）
 - [x] 记录 `character_inventory` JSONB 模型、在线内存副本、邮件 grant 事务和普通 `save_player` 整体覆盖的并发方式。（验证：基线文档“当前持久化与并发事实”关联 `db/init.sql`、`db_player_store.rs` 与 `player_manager.rs`）
 - [x] 定义资产类型、容器、堆叠身份、绑定状态、锁定状态和配置版本。（验证：`apps/game-server/src/core/inventory/asset.rs` 定义 `AssetType`、`AssetContainer`、`ItemStackIdentity`、`AssetBinding`、`AssetLockState`、`AssetConfigVersion`，并由 `Item::can_stack_with` 接线）
 - [x] 定义业务来源枚举与稳定来源 ID，至少覆盖 achievement、quest、battle、scene_pickup、activity、ranking、world_event 和 gm。（验证：`asset.rs` 的 `AssetOriginType` / `AssetOrigin` 覆盖全部目标来源并拒绝空 `origin_id`）

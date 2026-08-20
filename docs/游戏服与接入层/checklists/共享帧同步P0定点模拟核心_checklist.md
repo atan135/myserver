@@ -134,7 +134,7 @@
 
 - [x] 为 `Fp`、`Vec2Fp`、`QuantizedDir`、`SimWorld`、`SimInput`、`step` 补充必要文档注释。（验证：`packages/sim-core/src/math.rs` 覆盖 `Fp`/`Vec2Fp`/`QuantizedDir`，`state.rs` 覆盖 `SimWorld`，`input.rs` 覆盖 `SimInput`，`tick.rs` 覆盖 `step`）
 - [x] 在 `lib.rs` 中整理 public exports，避免外部依赖内部模块路径。（验证：`packages/sim-core/src/lib.rs` 顶层 re-export `Fp`、`Vec2Fp`、`QuantizedDir`、`SimWorld`、`SimInput`、`step`、`SimConfig`、`SimSnapshot` 等 P0 API）
-- [x] 检查 public API 命名是否与 [共享帧同步移动战斗核心设计](../docs/游戏服与接入层/共享帧同步移动战斗核心设计.md) 保持一致。（验证：顶层 API 沿用设计中的 `sim-core`、`Fp`、`Vec2Fp`、`QuantizedDir`、`SimWorld`、`SimInput`、`step`、`SimHash`、`SimSnapshot` 命名）
+- [x] 检查 public API 命名是否与 [共享帧同步移动战斗核心设计](../共享帧同步移动战斗核心设计.md) 保持一致。（验证：顶层 API 沿用设计中的 `sim-core`、`Fp`、`Vec2Fp`、`QuantizedDir`、`SimWorld`、`SimInput`、`step`、`SimHash`、`SimSnapshot` 命名）
 - [x] 记录 P0 不支持战斗、碰撞、服务端接入和客户端接入。（验证：`packages/sim-core/src/lib.rs` crate doc 明确 P0 不实现 full combat、entity/map collision、server room policy integration、Bevy scene/client integration）
 - [x] 运行 `cargo test --manifest-path packages/sim-core/Cargo.toml`。（验证：31 个 unit tests 和 doc-tests 通过）
 - [x] 如仓库有格式化要求，运行对应 Rust format 检查。（验证：`cargo fmt --manifest-path packages/sim-core/Cargo.toml -- --check` 通过）

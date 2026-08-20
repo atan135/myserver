@@ -1,6 +1,6 @@
 # 角色体系 P2 称号与职业阶位 Checklist
 
-来源文档：`docs/游戏服与接入层/角色体系与四属性设计.md`
+来源文档：`docs/游戏服与接入层/角色与成长/角色体系与四属性设计.md`
 
 ## 目标
 
@@ -115,10 +115,10 @@ P2 完成后应达到：服务端可以按 `character_id` 查询角色已拥有�
 - [x] 增加 `game-server` 单元测试，覆盖称号授予、重复授予、撤销、装备唯一性、过期处理、日志写入和错误码。（验证：阶段 2 已在 `apps/game-server/src/core/character_title.rs` 覆盖授予/重复/撤销/装备/过期/日志/错误码，阶段 6 复跑 `cargo test character_ --manifest-path apps/game-server/Cargo.toml` 32 passed）
 - [x] 增加 `TitleUnlockService` 单元测试，覆盖 `manual`、`discipline_tier`、`element_mastery`、`element_affinity` 和 `all_of` 规则。（验证：阶段 3 已在 `apps/game-server/src/core/character_title_unlock.rs` 覆盖对应规则，阶段 6 复跑 `cargo test character_title_unlock --manifest-path apps/game-server/Cargo.toml` 7 passed）
 - [x] 增加协议编解码和 mock-client 场景测试，覆盖称号查询、debug 授予、装备、职业阶位触发解锁和 JSON 输出。（验证：`tests/mock-client/mock-client-protocol.test.mjs:244` 覆盖 1417-1424，`tests/mock-client/mock-client-protocol.test.mjs:260` 覆盖请求编码，`tests/mock-client/mock-client-protocol.test.mjs:294` 覆盖响应解码，`tests/mock-client/mock-client-protocol.test.mjs:414` 覆盖场景异步匹配和 JSON 字段，node 测试 24 passed）
-- [x] 同步更新 `docs/游戏服与接入层/角色体系与四属性设计.md` 的 P2 当前实现状态、称号规则、职业阶位边界和手动联调步骤。（验证：`docs/游戏服与接入层/角色体系与四属性设计.md:14` 记录 P2 当前实现，`docs/游戏服与接入层/角色体系与四属性设计.md:906` 说明 P2 范围，`docs/游戏服与接入层/角色体系与四属性设计.md:976` 增加 P2 手动联调步骤）
+- [x] 同步更新 `docs/游戏服与接入层/角色与成长/角色体系与四属性设计.md` 的 P2 当前实现状态、称号规则、职业阶位边界和手动联调步骤。（验证：`docs/游戏服与接入层/角色与成长/角色体系与四属性设计.md:14` 记录 P2 当前实现，`docs/游戏服与接入层/角色与成长/角色体系与四属性设计.md:906` 说明 P2 范围，`docs/游戏服与接入层/角色与成长/角色体系与四属性设计.md:976` 增加 P2 手动联调步骤）
 - [x] 同步更新 `docs/协议与客户端/协议设计.md` 和 `docs/协议与客户端/外部客户端接入说明.md`，明确新增协议、异步响应匹配、装备称号展示和错误码。（验证：`docs/协议与客户端/协议设计.md:176` 新增 1417-1424，`docs/协议与客户端/协议设计.md:323` 起说明新增消息结构和错误码，`docs/协议与客户端/外部客户端接入说明.md:53`/`60`/`77` 说明称号/职业协议和异步匹配）
 - [x] 同步更新 `tools/mock-client/README.md` 和 `help.txt`，给出称号和职业阶位调试命令示例。（验证：`tools/mock-client/README.md:293`/`303` 给出场景示例，`tools/mock-client/README.md:432` 补充 `--discipline-points`，`tools/mock-client/help.txt:107`/`111` 给出命令）
-- [x] 整理手动联调步骤，列出 PostgreSQL、Redis、NATS、auth-http、game-proxy、game-server 和可选 admin-api/admin-web 依赖，并等待用户确认后再执行。（验证：`docs/游戏服与接入层/角色体系与四属性设计.md:976` 明确未确认前不启动服务或联调，`docs/游戏服与接入层/角色体系与四属性设计.md:980`-`989` 列出 PostgreSQL/Redis/Core NATS/auth-http/game-proxy/game-server/可选 admin-api，并说明 admin-web 本阶段无页面，`tools/mock-client/README.md:314` 再次提示执行真实联调前需用户确认）
+- [x] 整理手动联调步骤，列出 PostgreSQL、Redis、NATS、auth-http、game-proxy、game-server 和可选 admin-api/admin-web 依赖，并等待用户确认后再执行。（验证：`docs/游戏服与接入层/角色与成长/角色体系与四属性设计.md:976` 明确未确认前不启动服务或联调，`docs/游戏服与接入层/角色与成长/角色体系与四属性设计.md:980`-`989` 列出 PostgreSQL/Redis/Core NATS/auth-http/game-proxy/game-server/可选 admin-api，并说明 admin-web 本阶段无页面，`tools/mock-client/README.md:314` 再次提示执行真实联调前需用户确认）
 
 ## 真实联调记录
 
@@ -143,9 +143,9 @@ P2 完成后应达到：服务端可以按 `character_id` 查询角色已拥有�
 - [x] 已选角进入游戏的连接可以查询当前角色职业阶位和称号列表。（验证：`apps/game-server/src/core/service/character_title_service.rs:29`/`161` 定义查询 handler 并使用当前鉴权 identity，`packages/proto/game.proto:709`/`740` 定义查询协议，`cargo test character_title_service --manifest-path apps/game-server/Cargo.toml` 2 passed）
 - [x] debug/GM 入口可以授予称号、撤销称号、设置职业阶位并触发称号解锁检查。（验证：`apps/game-server/src/core/service/character_title_service.rs:202` 处理 debug 请求，`apps/game-server/src/core/service/character_title_service.rs:260`/`265`/`270`/`279` 分发 grant/revoke/set_discipline/check_unlock，`tests/mock-client/mock-client-protocol.test.mjs:260` 覆盖 debug 编码）
 - [x] 同一角色同一时间最多只有一个主展示称号处于装备状态。（验证：`apps/game-server/src/core/character_title.rs` 的装备切换测试随 `cargo test character_ --manifest-path apps/game-server/Cargo.toml` 32 passed，`db/init.sql:397` 记录服务事务边界）
-- [x] 已过期称号不能继续装备；已装备称号过期后查询结果不再显示为当前装备称号。（验证：`apps/game-server/src/core/character_title.rs` 过期装备测试随 `cargo test character_ --manifest-path apps/game-server/Cargo.toml` 32 passed，`docs/游戏服与接入层/角色体系与四属性设计.md:906` 记录 P2 范围）
+- [x] 已过期称号不能继续装备；已装备称号过期后查询结果不再显示为当前装备称号。（验证：`apps/game-server/src/core/character_title.rs` 过期装备测试随 `cargo test character_ --manifest-path apps/game-server/Cargo.toml` 32 passed，`docs/游戏服与接入层/角色与成长/角色体系与四属性设计.md:906` 记录 P2 范围）
 - [x] 职业阶位达到称号配置要求后，可以通过解锁检查器授予对应称号。（验证：`apps/game-server/src/core/character_title_unlock.rs` 的 discipline_tier 测试随 `cargo test character_title_unlock --manifest-path apps/game-server/Cargo.toml` 7 passed，`tools/mock-client/src/scenarios/character.js:501` 实现职业阶位 debug 场景）
 - [x] 称号授予、撤销、装备、卸下和过期处理均写入完整 `character_title_logs`。（验证：`db/init.sql:415` 定义日志表，`apps/game-server/src/core/character_title.rs` 日志写入测试随 `cargo test character_ --manifest-path apps/game-server/Cargo.toml` 32 passed）
 - [x] mock-client 可以完成称号查询、测试授予、装备和结果验证流程。（验证：`tools/mock-client/src/scenarios/character.js:430` 实现 `character-titles-debug`，`tools/mock-client/README.md:293` 给出命令，`tests/mock-client/mock-client-protocol.test.mjs:414` 覆盖异步匹配和 JSON 输出形态；真实联调 `character-titles-debug --title-id 1001` 返回 `ok: true` 且装备 `初心者`）
-- [x] admin-api 至少可以只读查询角色称号、职业阶位和称号日志；如 admin-web 不做 UI，文档明确边界。（验证：`apps/admin-api/src/players/players.controller.ts:108` 定义只读 API，`apps/admin-api/src/admin-store.js:587` 查询 titles/disciplines/logs，`docs/后台与运维/管理后台设计.md:477` 和 `docs/游戏服与接入层/角色体系与四属性设计.md:989` 明确 admin-web 本阶段无页面；真实联调后台接口 HTTP 200，返回 3 个称号、装备称号 `1001`、职业阶位 `forging/novice` 和称号日志）
-- [x] 文档明确 P2 范围，以及完整职业学习、任务/场景/道具联动、战斗属性和后台写操作属于后续阶段。（验证：`docs/游戏服与接入层/角色体系与四属性设计.md:906`-`923` 说明 P2 当前范围和不包含项，`docs/协议与客户端/外部客户端接入说明.md:77` 说明外部客户端边界）
+- [x] admin-api 至少可以只读查询角色称号、职业阶位和称号日志；如 admin-web 不做 UI，文档明确边界。（验证：`apps/admin-api/src/players/players.controller.ts:108` 定义只读 API，`apps/admin-api/src/admin-store.js:587` 查询 titles/disciplines/logs，`docs/后台与运维/管理后台设计.md:477` 和 `docs/游戏服与接入层/角色与成长/角色体系与四属性设计.md:989` 明确 admin-web 本阶段无页面；真实联调后台接口 HTTP 200，返回 3 个称号、装备称号 `1001`、职业阶位 `forging/novice` 和称号日志）
+- [x] 文档明确 P2 范围，以及完整职业学习、任务/场景/道具联动、战斗属性和后台写操作属于后续阶段。（验证：`docs/游戏服与接入层/角色与成长/角色体系与四属性设计.md:906`-`923` 说明 P2 当前范围和不包含项，`docs/协议与客户端/外部客户端接入说明.md:77` 说明外部客户端边界）

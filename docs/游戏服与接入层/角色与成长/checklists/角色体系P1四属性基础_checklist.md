@@ -1,6 +1,6 @@
 # 角色体系 P1 四属性基础 Checklist
 
-来源文档：`docs/游戏服与接入层/角色体系与四属性设计.md`
+来源文档：`docs/游戏服与接入层/角色与成长/角色体系与四属性设计.md`
 
 ## 目标
 
@@ -64,8 +64,8 @@ P1 完成后应达到：服务端可以按 `character_id` 查询角色 `affinity
 - 验证记录：`node --test --experimental-test-isolation=none --test-concurrency=1 tests/characters/db-init-characters.test.mjs tests/mock-client/mock-client-protocol.test.mjs tests/mock-client/mock-client-character.test.mjs` 通过，26/26 tests passed；`node --check tools/mock-client/src/messages.js` 与 `node --check tools/mock-client/src/scenarios/character.js` 通过；`cargo test character_element --manifest-path apps/game-server/Cargo.toml` 通过，8/8 targeted tests passed。未启动服务或执行联调。
 
 - [x] 增加自动化测试，覆盖空库初始化结构、四属性查询、合法变更、非法变更、日志写入和 mock-client 输出。（验证：`tests/characters/db-init-characters.test.mjs` 覆盖表结构和日志字段；`apps/game-server/src/core/character_element.rs` 测试覆盖合法/非法变更；`tests/mock-client/mock-client-protocol.test.mjs` 覆盖四属性协议编解码；`tests/mock-client/mock-client-character.test.mjs` 覆盖 `character-elements-debug` JSON 输出）
-- [x] 同步更新角色体系、协议、外部客户端接入和 mock-client 文档，明确真实 client 需要把四属性变化推送或查询结果作为异步状态处理。（验证：`docs/游戏服与接入层/角色体系与四属性设计.md`、`docs/协议与客户端/协议设计.md`、`docs/协议与客户端/外部客户端接入说明.md`、`tools/mock-client/README.md` 和 `help.txt` 已写明 `1413-1416`、P1 范围与异步状态处理）
-- [x] 完成最终验收前整理手动联调步骤，列出需要启动的 PostgreSQL、Redis、NATS、auth-http、game-proxy 和 game-server 依赖，并等待用户确认后再执行。（验证：`docs/游戏服与接入层/角色体系与四属性设计.md` 的 “P1 手动联调步骤” 列出 PostgreSQL、Redis、Core NATS、`auth-http`、`game-proxy`、`game-server` 依赖和等待确认要求）
+- [x] 同步更新角色体系、协议、外部客户端接入和 mock-client 文档，明确真实 client 需要把四属性变化推送或查询结果作为异步状态处理。（验证：`docs/游戏服与接入层/角色与成长/角色体系与四属性设计.md`、`docs/协议与客户端/协议设计.md`、`docs/协议与客户端/外部客户端接入说明.md`、`tools/mock-client/README.md` 和 `help.txt` 已写明 `1413-1416`、P1 范围与异步状态处理）
+- [x] 完成最终验收前整理手动联调步骤，列出需要启动的 PostgreSQL、Redis、NATS、auth-http、game-proxy 和 game-server 依赖，并等待用户确认后再执行。（验证：`docs/游戏服与接入层/角色与成长/角色体系与四属性设计.md` 的 “P1 手动联调步骤” 列出 PostgreSQL、Redis、Core NATS、`auth-http`、`game-proxy`、`game-server` 依赖和等待确认要求）
 
 ## 最终完成定义
 
@@ -80,4 +80,4 @@ P1 完成后应达到：服务端可以按 `character_id` 查询角色 `affinity
 - [x] 合法四属性变更可以成功落库，并写入完整变更日志。（验证：真实服务栈下 `node tools/mock-client/src/index.js --scenario character-elements-debug ... --character-id chr_1rq2yxb40020 --json-output` 返回 `ok=true`；PostgreSQL 查询确认 `characters` 更新为 `affinity_earth=2400, affinity_fire=2600, affinity_water=2500, affinity_wind=2500, mastery_fire=10`，`character_element_logs` 写入 `source_type=gm`、`source_id=debug-character-elements`、`operator_id=plr_1rq2yvpg0020`、八个 delta、`before_json`、`after_json` 和 `reason=p1-server-integration-20260626`）
 - [x] 非法 `affinity` 总和和非法负数 `mastery` 变更会被拒绝。（验证：`apps/game-server/src/core/character_element.rs` 单元测试覆盖 `INVALID_AFFINITY_TOTAL` 与 `NEGATIVE_MASTERY`，`cargo test character_element --manifest-path apps/game-server/Cargo.toml` 通过）
 - [x] mock-client 可以完成查询、测试变更和结果验证流程。（验证：`tests/mock-client/mock-client-character.test.mjs` 的 `character-elements-debug queries, applies a controlled change, and emits JSON output` 通过；真实服务栈下 `character-elements-debug` 经 `auth-http -> game-proxy TCP fallback 14000 -> game-server` 返回 before/change/after，合法变更 `ok=true`）
-- [x] 文档明确 P1 范围，以及背包、职业、称号、战斗联动属于后续阶段。（验证：`docs/游戏服与接入层/角色体系与四属性设计.md` 的 P1 当前范围 / P1 不包含章节已明确边界）
+- [x] 文档明确 P1 范围，以及背包、职业、称号、战斗联动属于后续阶段。（验证：`docs/游戏服与接入层/角色与成长/角色体系与四属性设计.md` 的 P1 当前范围 / P1 不包含章节已明确边界）
