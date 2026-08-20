@@ -28,14 +28,15 @@ announce-service / mail-service / game-server / game-proxy -> service registry
 - 登录、access token、game ticket、游戏接入、游戏逻辑、后台、聊天、匹配、邮件、公告都有独立服务。
 - `game-server` 已有房间生命周期、帧推进、配置加载、内部管理口和部分具体游戏逻辑。
 - `game-proxy` 已支持 KCP / TCP fallback、ticket 本地校验和基于注册中心的动态发现；静态上游仅保留为 development/local 调试或定位问题的方式。
+- `admin-api + admin-web` 已提供基于权限范围的控制面，以及灰度排空操作台、高风险操作预检、独立审批和关联审计。
 - `chat-server`、`mail-service`、`announce-service` 当前独立部署；`game-proxy` 不负责聊天、邮件或公告转发。
+- `tools/load-test` 已提供受门禁的 Rust 压测与诊断工具，覆盖离线 dry-run、受控本地玩家链路和部分周边服务诊断。
 - Redis 用于 session、ticket、限流、服务注册和 metrics 快照；Core NATS 用于邮件通知、session kick 和 metrics 采集通道。
 - PostgreSQL 用于账号、审计、游戏事件、公告、邮件等持久化数据。
 
 仍需注意的当前缺口：
 
-- `admin-api` 已有后端角色守卫和监控接口鉴权，但管理员 JWT 仍缺少 session/version/blacklist，登录失败限流和锁定也还需补齐。
-- `game-server` admin 侧 GM 广播、踢人、封禁仍未形成完整端到端闭环。
+- `admin-api` 已校验管理员 session/jti、token version 和账号状态，并提供登录失败锁定；权限范围、高风险操作恢复与真实联调边界以管理后台和安全专题文档为准。
 - `game-proxy` 还没有 IP 黑名单、单 IP / 单账号连接上限和成熟公网加密方案。
 - `chat-server` 已校验 ticket 签名、过期和 ticket version，但仍不查询单张 Redis ticket 记录。
 - 部分专题文档描述目标设计，不等于代码已经全部落地。
@@ -54,10 +55,12 @@ apps/
 ├── admin-api/        # Node.js + NestJS 管理后台 API
 └── admin-web/        # Vue 3 + Vite + Element Plus 管理前端
 packages/
-├── proto/            # 共享 Protobuf 协议
 ├── authority-core/   # 服务端和客户端共用的控制机迁移/快照/输入基础结构
+├── game-protocol/    # 玩家协议包头、消息 ID、包大小限制和 KCP 参数共享 crate
+├── proto/            # 共享 Protobuf 协议
 └── service-registry/ # Redis 服务注册中心包
 tools/
+├── load-test/        # Rust 受控压测与服务诊断工具
 └── mock-client/      # Node.js 无客户端联调工具
 scripts/              # 本地启动、环境检查、数据初始化辅助脚本
 db/                   # 数据库初始化脚本
@@ -134,7 +137,7 @@ docs/                 # 当前正式设计文档
 ## 环境依赖
 
 - Node.js 18+：`auth-http`、`admin-api`、`admin-web`、`announce-service`、`mail-service`、`mock-client`
-- Rust 1.88+：`game-server`、`game-proxy`、`chat-server`、`match-service`
+- Rust 1.88+：`game-server`、`game-proxy`、`chat-server`、`match-service`、`tools/load-test`
 - Redis：session、ticket、限流、服务注册、metrics 快照
 - NATS：邮件通知、session kick、metrics 采集
 - PostgreSQL：账号、审计、游戏事件、公告、邮件等持久化数据
@@ -210,6 +213,8 @@ npm run test:auth-http
 npm run test:integration
 npm run test:security
 ```
+
+压力测试与受控服务诊断见 [tools/load-test README](./tools/load-test/README.md)。`validate` 和 dry-run 不连接真实服务；live、远程或写入型诊断必须满足工具的 profile、白名单、预算和显式确认门禁，不能将 fake、dry-run 或单服务诊断结果作为正式容量结论。
 
 mock-client 房间联调：
 

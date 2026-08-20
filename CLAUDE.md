@@ -19,7 +19,7 @@ MyServer 是一个通用游戏后端框架仓库，当前定位是多服务 mono
 - `game-proxy` 作为客户端游戏接入层，屏蔽后端 `game-server` 实例与路由细节。
 - `game-server` 是游戏逻辑核心，负责玩家鉴权、房间生命周期、帧推进、配置表热加载、内部管理接口和主要游戏运行时。
 - `auth-http` 和 `game-proxy` 是正式玩家入口；`chat-server`、`match-service`、`announce-service`、`mail-service` 是围绕游戏主链路拆出的默认内网能力服务。
-- `admin-api + admin-web` 组成运营后台，通过独立控制面访问审计、玩家管理、GM 入口和监控能力；具体 GM 命令是否闭环以 `docs/总览/整体架构.md` 和代码为准。
+- `admin-api + admin-web` 组成运营后台，通过独立控制面访问审计、玩家管理、GM 入口和监控能力；灰度排空等高风险写操作采用预检、独立审批和关联审计，具体能力闭环以 `docs/总览/整体架构.md` 和代码为准。
 - Redis 用于 session、ticket、限流、服务注册和 metrics 快照；Core NATS 用于邮件通知、session kick 和 metrics 采集通道。
 - PostgreSQL 用于账号、审计、游戏事件、公告和邮件等持久化数据。
 - 玩家协议与内部控制协议尽量收敛到 `packages/proto`；个别服务仍保留本地 proto，具体以代码和协议文档为准。
@@ -53,9 +53,12 @@ apps/
 ├── admin-api/        # Node.js + NestJS 管理后台 API
 └── admin-web/        # Vue 3 + Vite + Element Plus 管理前端
 packages/
+├── authority-core/   # 控制机迁移、快照与输入基础结构
+├── game-protocol/    # 玩家协议包头、消息 ID、包大小限制和 KCP 参数共享 crate
 ├── proto/            # 共享 Protobuf 协议
 └── service-registry/ # Redis 服务注册中心包
 tools/
+├── load-test/        # Rust 受控压测与服务诊断工具
 └── mock-client/      # Node.js 无客户端联调工具
 scripts/              # 本地启动、环境检查、数据初始化辅助脚本
 db/                   # 数据库初始化脚本
@@ -119,6 +122,7 @@ docs/                 # 当前正式设计文档
 - [聊天与邮件系统设计](./docs/周边服务/聊天与邮件系统设计.md)
 - [匹配服务设计](./docs/周边服务/匹配服务设计.md)
 - [管理后台设计](./docs/后台与运维/管理后台设计.md)
+- [游戏服务压力测试框架设计](./docs/后台与运维/游戏服务压力测试框架设计.md)
 - [监控设计](./docs/安全与监控/监控设计.md)
 
 安全：
@@ -197,6 +201,7 @@ WSL 原生工作区（例如 `~/src/MyServer`）仅用于 Linux 发布和远端�
 - 修改功能前先看对应代码和专题文档，不要从 `docs/历史归档/初始设计稿/` 推断当前行为。
 - 若文档与代码冲突，应以代码为准，并在需要时同步修正文档。
 - 模块功能开发完成后，不要直接自动运行项目检测、集成测试、联调脚本或自动启动相关服务；先提示用户需要启动哪些服务和依赖，待用户确认后再执行测试。
+- `tools/load-test` 的 `validate` 与 dry-run 不连接真实服务；live、远程或写入型诊断仍须先说明目标环境、依赖和影响范围，取得用户确认后再执行，并遵守工具的 profile、白名单和预算门禁。
 - 除非用户明确要求，不要提交 git commit 或执行 push。
 - 提交信息按功能模块拆分，标题使用 `<type>: <中文主题>`，正文说明关键改动和原因；涉及端口、配置、协议、脚本或跨服务联动时要写明影响范围。
 
