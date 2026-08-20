@@ -45,6 +45,9 @@ param(
     [switch]$WithMatch,
 
     [Parameter(Mandatory=$false)]
+    [switch]$WithoutMatch,
+
+    [Parameter(Mandatory=$false)]
     [switch]$WithAnnounce,
 
     [Parameter(Mandatory=$false)]
@@ -750,6 +753,15 @@ if ($RestartMail -and $RestartGameAndMail) {
     throw "RestartMail and RestartGameAndMail cannot be used together."
 }
 
+if ($WithMatch -and $WithoutMatch) {
+    throw "WithMatch and WithoutMatch cannot be used together."
+}
+
+# game-server publishes healthy proxy-local routes only after its match-service
+# dependency is ready. Keep match-service in the normal local stack; the
+# explicit opt-out is reserved for isolated game-server development.
+$startMatch = -not $WithoutMatch
+
 $existingItems = Read-DevStackPids | Where-Object {
     Get-Process -Id $_.pid -ErrorAction SilentlyContinue
 }
@@ -1009,7 +1021,7 @@ try {
         }
     }
 
-    if ($WithMatch) {
+    if ($startMatch) {
         $selectedServices += "match-service"
         $matchProcess = Start-PowerShellScript `
             -Name "match-service" `
@@ -1218,8 +1230,10 @@ try {
     if ($WithChat) {
         Write-Host "  chat-server: enabled" -ForegroundColor Gray
     }
-    if ($WithMatch) {
+    if ($startMatch) {
         Write-Host "  match-service: enabled" -ForegroundColor Gray
+    } else {
+        Write-Host "  match-service: disabled (-WithoutMatch)" -ForegroundColor Yellow
     }
     if ($WithAnnounce) {
         Write-Host "  announce-service: enabled" -ForegroundColor Gray

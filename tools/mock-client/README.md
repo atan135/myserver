@@ -748,7 +748,7 @@ node tools/mock-client/src/index.js --scenario robot-sync-room \
 - 验证非法 action、非法 JSON、方向越界、速度越界分别返回明确 `PlayerInputRes.errorCode`。
 - 如果收到 `MovementSnapshotPush` 会直接失败，因为 `robot_sync_room` 第一版不广播机器人坐标。
 
-本地完整栈建议先用仓库根目录 `scripts/dev-stack.ps1 -WithMatch` 启动。默认 `--port 14000` 是 `game-proxy` TCP fallback 的常见默认值；如果本机 `apps/game-proxy/.env` 覆盖为 `17002`，按实际端口传参。
+本地完整栈建议先用仓库根目录 `scripts/dev-stack.ps1` 启动，默认会包含 `match-service`。如需单独调试 game-server，可使用 `-WithoutMatch`。默认 `--port 14000` 是 `game-proxy` TCP fallback 的常见默认值；如果本机 `apps/game-proxy/.env` 覆盖为 `17002`，按实际端口传参。
 
 ### 通过 Proxy 测试
 

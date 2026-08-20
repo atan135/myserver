@@ -178,7 +178,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\check-env.ps1
 powershell -ExecutionPolicy Bypass -File .\scripts\dev-stack.ps1
 ```
 
-默认会启动 Redis、NATS、`auth-http`、`game-server`、`game-proxy`、`admin-api`、`admin-web` 和 `metrics-collector`。`chat-server`、`match-service`、`announce-service`、`mail-service`、`myforge-agent` 需要分别通过 `-WithChat`、`-WithMatch`、`-WithAnnounce`、`-WithMail`、`-WithMyforgeAgent` 启用；未启用 `match-service` 时，`game-server` 会按本地开发环境允许降级跳过匹配通知。`mail-service` 需要可用的 PostgreSQL，`myforge-agent` 需要先正确配置 `apps/myforge-agent/.env` 中的密钥、外部工作区和 Codex 路径。
+默认会启动 Redis、NATS、`auth-http`、`match-service`、`game-server`、`game-proxy`、`admin-api`、`admin-web` 和 `metrics-collector`。`chat-server`、`announce-service`、`mail-service`、`myforge-agent` 需要分别通过 `-WithChat`、`-WithAnnounce`、`-WithMail`、`-WithMyforgeAgent` 启用；如需单独调试 game-server，可用 `-WithoutMatch` 显式关闭 `match-service`。`mail-service` 需要可用的 PostgreSQL，`myforge-agent` 需要先正确配置 `apps/myforge-agent/.env` 中的密钥、外部工作区和 Codex 路径。
 
 `scripts/dev/services/*.ps1` 是 `dev-stack.ps1` 使用的单服务启动 helper，只建议排查单服务启动问题时手工调用。
 
@@ -229,7 +229,7 @@ npm run flow:mock-client -- --scenario two-client-room --http-base-url http://12
 MyBevy `arena.robot_sync` 对应的服务端验收场景是 `robot-sync-room`，要求 room policy 为 `robot_sync_room`。本地完整匹配链路建议带匹配服务启动：
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\dev-stack.ps1 -WithMatch
+powershell -ExecutionPolicy Bypass -File .\scripts\dev-stack.ps1
 npm run flow:mock-client -- --scenario robot-sync-room --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --port 14000 --room-id robot-sync-room --policy-id robot_sync_room
 ```
 
