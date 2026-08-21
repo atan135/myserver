@@ -43,9 +43,17 @@ pub(crate) trait LotteryAssetGateway: Send + Sync {
         character_id: &'a str,
         request_id: &'a str,
         exchange: Option<crate::core::reward_source::InventoryRequiredExchange>,
+        reward_order: &'a crate::core::inventory::RewardOrder,
         selection: &'a LotterySelection,
     ) -> std::pin::Pin<
         Box<dyn std::future::Future<Output = Result<AssetResultState, String>> + Send + 'a>,
+    >;
+    fn query_draw<'a>(
+        &'a self,
+        request_id: &'a str,
+        request_fingerprint: Option<&'a str>,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<Option<AssetResultState>, String>> + Send + 'a>,
     >;
 }
 
@@ -67,18 +75,58 @@ impl LotteryAssetGateway for UnavailableLotteryAssetGateway {
         _character_id: &'a str,
         _request_id: &'a str,
         _exchange: Option<crate::core::reward_source::InventoryRequiredExchange>,
+        _reward_order: &'a crate::core::inventory::RewardOrder,
         _selection: &'a LotterySelection,
     ) -> std::pin::Pin<
         Box<dyn std::future::Future<Output = Result<AssetResultState, String>> + Send + 'a>,
     > {
         Box::pin(async { Err("lottery asset transaction is unavailable".into()) })
     }
+
+    fn query_draw<'a>(
+        &'a self,
+        _request_id: &'a str,
+        _request_fingerprint: Option<&'a str>,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<Option<AssetResultState>, String>> + Send + 'a>,
+    > {
+        Box::pin(async { Err("lottery asset query is unavailable".into()) })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LotteryDrawStatus {
+    Processing,
+    Granted,
+    RetryableFailure,
+    ReconciliationPending,
+    ManualReview,
+}
+
+#[derive(Clone)]
+pub(crate) struct LotteryDrawRecord {
+    character_id: String,
+    activity_id: String,
+    version: i32,
+    semantic_key: String,
+    draw_request_id: String,
+    status: LotteryDrawStatus,
+    next_state: LotteryState,
+    selection: LotterySelection,
+    exchange: Option<crate::core::reward_source::InventoryRequiredExchange>,
+    reward_order: crate::core::inventory::RewardOrder,
+    reward_request_id: String,
+    reward_fingerprint: Option<String>,
+    asset_request_id: String,
+    asset_fingerprint: String,
+    notification_failed: bool,
 }
 
 #[derive(Clone, Default)]
 struct LotteryStateStore {
     states: Arc<std::sync::RwLock<HashMap<String, LotteryState>>>,
     locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
+    records: Arc<std::sync::RwLock<HashMap<String, LotteryDrawRecord>>>,
 }
 
 impl LotteryStateStore {
@@ -101,6 +149,16 @@ impl LotteryStateStore {
     fn set(&self, key: &str, state: LotteryState) {
         if let Ok(mut states) = self.states.write() {
             states.insert(key.to_string(), state);
+        }
+    }
+
+    fn record(&self, request_key: &str) -> Option<LotteryDrawRecord> {
+        self.records.read().ok()?.get(request_key).cloned()
+    }
+
+    fn save_record(&self, request_key: String, record: LotteryDrawRecord) {
+        if let Ok(mut records) = self.records.write() {
+            records.insert(request_key, record);
         }
     }
 }
@@ -153,6 +211,25 @@ pub(crate) struct ActivityEngine {
     claim_coordinator: Option<ActivityClaimCoordinator>,
     lottery_states: LotteryStateStore,
     lottery_assets: Arc<dyn LotteryAssetGateway>,
+    lottery_notifier: Arc<dyn LotteryResultNotifier>,
+}
+
+pub(crate) trait LotteryResultNotifier: Send + Sync {
+    fn notify<'a>(
+        &'a self,
+        record: &'a LotteryDrawRecord,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + 'a>>;
+}
+
+struct NoopLotteryResultNotifier;
+
+impl LotteryResultNotifier for NoopLotteryResultNotifier {
+    fn notify<'a>(
+        &'a self,
+        _record: &'a LotteryDrawRecord,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + 'a>> {
+        Box::pin(async { Ok(()) })
+    }
 }
 
 #[derive(Default)]
@@ -172,6 +249,7 @@ impl ActivityEngine {
             claim_coordinator: None,
             lottery_states: LotteryStateStore::default(),
             lottery_assets: Arc::new(UnavailableLotteryAssetGateway),
+            lottery_notifier: Arc::new(NoopLotteryResultNotifier),
         }
     }
 
@@ -203,6 +281,14 @@ impl ActivityEngine {
         gateway: Arc<dyn LotteryAssetGateway>,
     ) -> Self {
         self.lottery_assets = gateway;
+        self
+    }
+
+    pub(crate) fn with_lottery_result_notifier(
+        mut self,
+        notifier: Arc<dyn LotteryResultNotifier>,
+    ) -> Self {
+        self.lottery_notifier = notifier;
         self
     }
 
@@ -694,25 +780,36 @@ impl ActivityEngine {
         if request.client_request_id.trim().is_empty() || request.client_request_id.len() > 128 {
             return Self::failed(base, "ACTIVITY_INVALID_REQUEST");
         }
-        let request_key = format!("{character_id}:{}", request.client_request_id);
+        let request_key = format!(
+            "{character_id}:{}:{}:{}",
+            request.activity_id, request.version, request.client_request_id
+        );
         let mut state = self.request_state.lock().await;
         if let Some(previous) = state.seen.get(&request_key).cloned() {
-            let mut response = previous;
-            response.duplicate = true;
-            return response;
+            let lottery_record_exists =
+                request.action_type == "draw" && self.lottery_states.record(&request_key).is_some();
+            if !lottery_record_exists {
+                let mut response = previous;
+                response.duplicate = true;
+                return response;
+            }
         }
+        let lottery_record_exists =
+            request.action_type == "draw" && self.lottery_states.record(&request_key).is_some();
         let limit_key = format!(
             "action:{character_id}:{}:{}",
             request.activity_id, request.action_type
         );
-        if state
-            .rate_limits
-            .get(&limit_key)
-            .is_some_and(|at| at.elapsed() < Duration::from_millis(100))
-        {
-            return Self::failed(base, "ACTIVITY_RATE_LIMITED");
+        if !lottery_record_exists {
+            if state
+                .rate_limits
+                .get(&limit_key)
+                .is_some_and(|at| at.elapsed() < Duration::from_millis(100))
+            {
+                return Self::failed(base, "ACTIVITY_RATE_LIMITED");
+            }
+            state.rate_limits.insert(limit_key, Instant::now());
         }
-        state.rate_limits.insert(limit_key, Instant::now());
         drop(state);
 
         let snapshot = match self.load_detail(&request.activity_id, now).await {
@@ -881,6 +978,15 @@ impl ActivityEngine {
         );
         let lock = self.lottery_states.lock_for(&state_key).await;
         let _guard = lock.lock().await;
+        let record_key = format!(
+            "{character_id}:{}:{}:{}",
+            request.activity_id, request.version, request.client_request_id
+        );
+        if let Some(existing) = self.lottery_states.record(&record_key) {
+            return self
+                .resolve_lottery_record(existing, record_key, base, false)
+                .await;
+        }
         let current = self.lottery_states.get(&state_key);
         let voucher_item_id = config.voucher_item_id;
         let needs_voucher = lottery_period_key(now, &snapshot.activity.timezone)
@@ -952,35 +1058,186 @@ impl ActivityEngine {
                 }
             }
         };
+        let mut next_state = decision.next_state;
+        next_state.draw_request_id = Some(request.client_request_id.clone());
+        next_state.result_item_id = Some(selection.item_id);
+        let semantic_key = format!(
+            "lottery:{character_id}:{}:{}:{}",
+            request.activity_id, snapshot.version.version_no, request.client_request_id
+        );
+        let reward_item =
+            NormalizedAssetItem::new(selection.item_id, selection.quantity, AssetBinding::Unbound)
+                .map_err(|_| ())
+                .ok();
+        let Some(reward_item) = reward_item else {
+            return Self::failed(base, "ACTIVITY_MANUAL_REVIEW");
+        };
+        let reward_order = match build_reward_order(
+            character_id,
+            &request.activity_id,
+            snapshot.version.version_no,
+            &semantic_key,
+            &[reward_item],
+            RewardDeliveryPolicy::InventoryRequired,
+        ) {
+            Ok(order) => order,
+            Err(_) => return Self::failed(base, "ACTIVITY_MANUAL_REVIEW"),
+        };
+        let asset_request_id = exchange
+            .as_ref()
+            .map(|value| value.command.request_id.clone())
+            .unwrap_or_else(|| reward_order.request_id.clone());
+        let asset_fingerprint = exchange
+            .as_ref()
+            .map(|value| value.command.request_fingerprint().as_str().to_string())
+            .unwrap_or_else(|| reward_order.request_fingerprint().as_str().to_string());
+        let reward_request_id = reward_order.request_id.clone();
+        let reward_fingerprint = Some(reward_order.request_fingerprint().as_str().to_string());
+        let record = LotteryDrawRecord {
+            character_id: character_id.to_string(),
+            activity_id: request.activity_id.clone(),
+            version: snapshot.version.version_no,
+            semantic_key,
+            draw_request_id: request.client_request_id.clone(),
+            status: LotteryDrawStatus::Processing,
+            next_state,
+            selection,
+            exchange,
+            reward_order,
+            reward_request_id,
+            reward_fingerprint,
+            asset_request_id,
+            asset_fingerprint,
+            notification_failed: false,
+        };
+        self.lottery_states
+            .save_record(record_key.clone(), record.clone());
+        self.resolve_lottery_record(record, record_key, base, true)
+            .await
+    }
+
+    async fn resolve_lottery_record(
+        &self,
+        mut record: LotteryDrawRecord,
+        record_key: String,
+        base: ActivityActionResponse,
+        initial_attempt: bool,
+    ) -> ActivityActionResponse {
+        if record.status == LotteryDrawStatus::Granted {
+            return Self::lottery_record_response(base, &record, true);
+        }
+        if record.status == LotteryDrawStatus::ManualReview {
+            return Self::failed(base, "ACTIVITY_MANUAL_REVIEW");
+        }
+        if record.status == LotteryDrawStatus::ReconciliationPending
+            || (record.status == LotteryDrawStatus::Processing && !initial_attempt)
+        {
+            match self
+                .lottery_assets
+                .query_draw(
+                    &record.asset_request_id,
+                    Some(record.asset_fingerprint.as_str()),
+                )
+                .await
+            {
+                Ok(Some(result)) => {
+                    if result == AssetResultState::Unknown {
+                        return Self::failed(base, "ACTIVITY_RECONCILIATION_PENDING");
+                    }
+                    if result == AssetResultState::NotApplied {
+                        record.status = LotteryDrawStatus::RetryableFailure;
+                    } else {
+                        return self.finish_lottery_granted(record, record_key, base).await;
+                    }
+                }
+                Ok(None) => {
+                    if record.status == LotteryDrawStatus::ReconciliationPending {
+                        return Self::failed(base, "ACTIVITY_RECONCILIATION_PENDING");
+                    }
+                }
+                Err(_) => return Self::failed(base, "ACTIVITY_RECONCILIATION_PENDING"),
+            }
+        }
         let result = match self
             .lottery_assets
             .apply_draw(
-                character_id,
-                &request.client_request_id,
-                exchange,
-                &selection,
+                &record.character_id,
+                &record.draw_request_id,
+                record.exchange.clone(),
+                &record.reward_order,
+                &record.selection,
             )
             .await
         {
             Ok(result) => result,
-            Err(_) => return Self::failed(base, "ACTIVITY_RETRYABLE_FAILURE"),
+            Err(_) => AssetResultState::NotApplied,
         };
         match result {
             AssetResultState::Applied => {
-                let mut next = decision.next_state;
-                next.draw_request_id = Some(request.client_request_id.clone());
-                next.result_item_id = Some(selection.item_id);
-                next.result_state = Some("granted".into());
-                self.lottery_states.set(&state_key, next);
-                ActivityActionResponse {
-                    ok: true,
-                    state_revision: current.total_draw_count.saturating_add(1) as u64,
-                    ..base
-                }
+                self.finish_lottery_granted(record, record_key, base).await
             }
-            AssetResultState::Unknown => Self::failed(base, "ACTIVITY_RECONCILIATION_PENDING"),
-            AssetResultState::NotApplied => Self::failed(base, "ACTIVITY_RETRYABLE_FAILURE"),
+            AssetResultState::Unknown => {
+                record.status = LotteryDrawStatus::ReconciliationPending;
+                self.lottery_states.save_record(record_key, record);
+                Self::failed(base, "ACTIVITY_RECONCILIATION_PENDING")
+            }
+            AssetResultState::NotApplied => {
+                record.status = LotteryDrawStatus::RetryableFailure;
+                self.lottery_states.save_record(record_key, record);
+                Self::failed(base, "ACTIVITY_RETRYABLE_FAILURE")
+            }
         }
+    }
+
+    async fn finish_lottery_granted(
+        &self,
+        mut record: LotteryDrawRecord,
+        record_key: String,
+        base: ActivityActionResponse,
+    ) -> ActivityActionResponse {
+        record.status = LotteryDrawStatus::Granted;
+        let state_key = format!(
+            "{}:{}:{}",
+            record.character_id, record.activity_id, record.version
+        );
+        self.lottery_states
+            .set(&state_key, record.next_state.clone());
+        self.lottery_states.save_record(record_key, record.clone());
+        if self.lottery_notifier.notify(&record).await.is_err() {
+            record.notification_failed = true;
+            self.lottery_states.save_record(
+                format!(
+                    "{}:{}:{}:{}",
+                    record.character_id, record.activity_id, record.version, record.draw_request_id
+                ),
+                record.clone(),
+            );
+        }
+        Self::lottery_record_response(base, &record, false)
+    }
+
+    fn lottery_record_response(
+        mut base: ActivityActionResponse,
+        record: &LotteryDrawRecord,
+        duplicate: bool,
+    ) -> ActivityActionResponse {
+        base.duplicate = duplicate;
+        base.state_revision = record.next_state.total_draw_count as u64;
+        match record.status {
+            LotteryDrawStatus::Granted => base.ok = true,
+            LotteryDrawStatus::Processing => {
+                base.error_code = Some("ACTIVITY_PROCESSING");
+                base.processing = true;
+            }
+            LotteryDrawStatus::RetryableFailure => {
+                base.error_code = Some("ACTIVITY_RETRYABLE_FAILURE")
+            }
+            LotteryDrawStatus::ReconciliationPending => {
+                base.error_code = Some("ACTIVITY_RECONCILIATION_PENDING")
+            }
+            LotteryDrawStatus::ManualReview => base.error_code = Some("ACTIVITY_MANUAL_REVIEW"),
+        }
+        base
     }
 
     fn validate_read_status(
@@ -1053,6 +1310,7 @@ mod tests {
     struct FakeLotteryGateway {
         voucher: Arc<Mutex<Option<LotteryVoucher>>>,
         result: AssetResultState,
+        query_result: Option<AssetResultState>,
         applied: Arc<Mutex<u32>>,
     }
 
@@ -1061,6 +1319,7 @@ mod tests {
             Self {
                 voucher: Arc::new(Mutex::new(None)),
                 result: AssetResultState::Applied,
+                query_result: Some(AssetResultState::Applied),
                 applied: Arc::new(Mutex::new(0)),
             }
         }
@@ -1073,6 +1332,7 @@ mod tests {
                     quantity: 10,
                 }))),
                 result: AssetResultState::Applied,
+                query_result: Some(AssetResultState::Applied),
                 applied: Arc::new(Mutex::new(0)),
             }
         }
@@ -1099,6 +1359,7 @@ mod tests {
             _character_id: &'a str,
             _request_id: &'a str,
             exchange: Option<crate::core::reward_source::InventoryRequiredExchange>,
+            reward_order: &'a crate::core::inventory::RewardOrder,
             _selection: &'a LotterySelection,
         ) -> std::pin::Pin<
             Box<dyn std::future::Future<Output = Result<AssetResultState, String>> + Send + 'a>,
@@ -1106,6 +1367,13 @@ mod tests {
             let result = self.result;
             let applied = self.applied.clone();
             Box::pin(async move {
+                assert!(reward_order.request_id.starts_with("activity_claim:"));
+                assert!(
+                    reward_order
+                        .request_fingerprint()
+                        .as_str()
+                        .starts_with("sha256:")
+                );
                 if let Some(exchange) = exchange {
                     assert!(matches!(
                         exchange.command.operations[0],
@@ -1118,6 +1386,45 @@ mod tests {
                 }
                 *applied.lock().await += 1;
                 Ok(result)
+            })
+        }
+
+        fn query_draw<'a>(
+            &'a self,
+            _request_id: &'a str,
+            _request_fingerprint: Option<&'a str>,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<Output = Result<Option<AssetResultState>, String>>
+                    + Send
+                    + 'a,
+            >,
+        > {
+            let result = self.query_result;
+            Box::pin(async move { Ok(result) })
+        }
+    }
+
+    struct FakeLotteryNotifier {
+        fail: bool,
+        calls: Arc<Mutex<u32>>,
+    }
+
+    impl LotteryResultNotifier for FakeLotteryNotifier {
+        fn notify<'a>(
+            &'a self,
+            _record: &'a LotteryDrawRecord,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + 'a>>
+        {
+            let fail = self.fail;
+            let calls = self.calls.clone();
+            Box::pin(async move {
+                *calls.lock().await += 1;
+                if fail {
+                    Err("push unavailable".into())
+                } else {
+                    Ok(())
+                }
             })
         }
     }
@@ -1473,6 +1780,16 @@ mod tests {
             .await;
         assert!(first.ok);
         assert_eq!(*gateway.applied.lock().await, 1);
+        let record = engine
+            .lottery_states
+            .record("character-1:lottery-1:1:draw-free-1")
+            .unwrap();
+        assert!(record.reward_order.request_id.starts_with("activity_claim:"));
+        assert!(record
+            .reward_order
+            .request_fingerprint()
+            .as_str()
+            .starts_with("sha256:"));
         let duplicate = engine.dispatch_action("character-1", request, now).await;
         assert!(duplicate.ok);
         assert!(duplicate.duplicate);
@@ -1502,6 +1819,77 @@ mod tests {
             .await;
         assert_eq!(limited.error_code, Some("ACTIVITY_QUALIFICATION_NOT_MET"));
         assert_eq!(*gateway.applied.lock().await, 1);
+    }
+
+    #[tokio::test]
+    async fn lottery_retryable_reuses_original_selection_without_randomizing() {
+        let now = Utc.with_ymd_and_hms(2026, 8, 21, 1, 0, 0).unwrap();
+        let gateway = Arc::new(FakeLotteryGateway {
+            voucher: Arc::new(Mutex::new(None)),
+            result: AssetResultState::NotApplied,
+            query_result: None,
+            applied: Arc::new(Mutex::new(0)),
+        });
+        let engine = lottery_fixture(now, lottery_config(1, 2, 2), gateway.clone()).await;
+        let request = ActivityActionRequest {
+            activity_id: "lottery-1".into(),
+            version: 1,
+            stage_id: String::new(),
+            action_type: "draw".into(),
+            client_request_id: "draw-retryable".into(),
+        };
+        let first = engine
+            .dispatch_action("character-1", request.clone(), now)
+            .await;
+        assert_eq!(first.error_code, Some("ACTIVITY_RETRYABLE_FAILURE"));
+        let key = "character-1:lottery-1:1:draw-retryable";
+        let selection = engine.lottery_states.record(key).unwrap().selection;
+        let second = engine.dispatch_action("character-1", request, now).await;
+        assert_eq!(second.error_code, Some("ACTIVITY_RETRYABLE_FAILURE"));
+        assert_eq!(
+            engine.lottery_states.record(key).unwrap().selection,
+            selection
+        );
+        assert_eq!(*gateway.applied.lock().await, 2);
+    }
+
+    #[tokio::test]
+    async fn lottery_unknown_queries_original_request_and_push_failure_keeps_granted() {
+        let now = Utc.with_ymd_and_hms(2026, 8, 21, 1, 0, 0).unwrap();
+        let gateway = Arc::new(FakeLotteryGateway {
+            voucher: Arc::new(Mutex::new(None)),
+            result: AssetResultState::Unknown,
+            query_result: Some(AssetResultState::Applied),
+            applied: Arc::new(Mutex::new(0)),
+        });
+        let notifier = Arc::new(FakeLotteryNotifier {
+            fail: true,
+            calls: Arc::new(Mutex::new(0)),
+        });
+        let engine = lottery_fixture(now, lottery_config(1, 2, 2), gateway.clone())
+            .await
+            .with_lottery_result_notifier(notifier.clone());
+        let request = ActivityActionRequest {
+            activity_id: "lottery-1".into(),
+            version: 1,
+            stage_id: String::new(),
+            action_type: "draw".into(),
+            client_request_id: "draw-unknown".into(),
+        };
+        let pending = engine
+            .dispatch_action("character-1", request.clone(), now)
+            .await;
+        assert_eq!(pending.error_code, Some("ACTIVITY_RECONCILIATION_PENDING"));
+        let granted = engine.dispatch_action("character-1", request, now).await;
+        assert!(granted.ok);
+        assert_eq!(*gateway.applied.lock().await, 1);
+        assert_eq!(*notifier.calls.lock().await, 1);
+        let record = engine
+            .lottery_states
+            .record("character-1:lottery-1:1:draw-unknown")
+            .unwrap();
+        assert!(record.notification_failed);
+        assert_eq!(record.status, LotteryDrawStatus::Granted);
     }
 
     #[tokio::test]
