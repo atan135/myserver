@@ -98,6 +98,12 @@ const routes = [
     name: "MyForgeTaskDetail",
     component: () => import("../views/MyForgeTaskDetail.vue"),
     meta: { requiresAuth: true, permission: ADMIN_PERMISSIONS.MYFORGE_TASK_READ }
+  },
+  {
+    path: "/activities",
+    name: "Activities",
+    component: () => import("../views/Activities.vue"),
+    meta: { requiresAuth: true, permission: ADMIN_PERMISSIONS.ACTIVITIES_READ }
   }
 ];
 

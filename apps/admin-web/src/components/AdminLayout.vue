@@ -47,6 +47,9 @@
             <el-menu-item v-if="authStore.hasAnyPermission(MYFORGE_ENTRY_PERMISSIONS)" index="/myforge">
               <span>MyForge 蓝图</span>
             </el-menu-item>
+            <el-menu-item v-if="authStore.hasPermission(P.ACTIVITIES_READ)" index="/activities">
+              <span>活动运营</span>
+            </el-menu-item>
           </el-menu>
         </el-aside>
 
@@ -64,6 +67,7 @@ import { useRoute, useRouter } from "vue-router";
 import { ElMessage } from "element-plus";
 import { useAuthStore } from "../stores/auth";
 import { ADMIN_PERMISSIONS as P, MYFORGE_ENTRY_PERMISSIONS } from "../auth/permissions";
+import { resolveActiveMenu } from "../router/active-menu.js";
 
 const route = useRoute();
 const router = useRouter();
@@ -78,24 +82,7 @@ const GM_MENU_PERMISSIONS = [
   P.GM_CHARACTER_DISCIPLINES_WRITE
 ];
 
-const activeMenu = computed(() => {
-  if (route.path.startsWith("/monitoring")) {
-    return "/monitoring";
-  }
-  if (route.path.startsWith("/rollout-drain")) {
-    return "/rollout-drain";
-  }
-  if (route.path.startsWith("/operation-approvals")) {
-    return "/operation-approvals";
-  }
-  if (route.path.startsWith("/global-id")) {
-    return "/global-id";
-  }
-  if (route.path.startsWith("/myforge")) {
-    return "/myforge";
-  }
-  return route.path;
-});
+const activeMenu = computed(() => resolveActiveMenu(route.path));
 
 async function handleLogout() {
   await authStore.logout();

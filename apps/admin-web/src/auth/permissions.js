@@ -25,6 +25,11 @@ export const ADMIN_PERMISSIONS = Object.freeze({
   MYFORGE_TASK_READ: "myforge.task.read",
   MYFORGE_TASK_CREATE: "myforge.task.create",
   MYFORGE_TASK_CANCEL: "myforge.task.cancel",
+  ACTIVITIES_READ: "activities.read",
+  ACTIVITIES_WRITE: "activities.write",
+  ACTIVITIES_PUBLISH: "activities.publish",
+  ACTIVITIES_OFFLINE: "activities.offline",
+  ACTIVITIES_RECORDS_READ: "activities.records.read",
   ADMINS_REVOKE_TOKENS: "admins.revoke_tokens",
   ADMINS_RESET_PASSWORD: "admins.reset_password"
 });

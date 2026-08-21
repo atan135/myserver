@@ -106,6 +106,28 @@ export const maintenanceApi = {
     api.post("/maintenance", data)
 };
 
+// Activity control-plane calls stay behind the authenticated admin-api boundary.
+export const activityApi = {
+  list: (params = {}, config = {}) =>
+    api.get("/activities", { ...config, params }),
+  detail: (activityId, config = {}) =>
+    api.get(`/activities/${encodeURIComponent(String(activityId))}`, config),
+  createDraft: (data = {}, config = {}) =>
+    api.post("/activities/drafts", data, config),
+  updateDraft: (activityId, data = {}, config = {}) =>
+    api.patch(`/activities/${encodeURIComponent(String(activityId))}/drafts`, data, config),
+  createDraftFromPublished: (activityId, data = {}, config = {}) =>
+    api.post(`/activities/${encodeURIComponent(String(activityId))}/drafts`, data, config),
+  preflight: (activityId, data = {}, config = {}) =>
+    api.post(`/activities/${encodeURIComponent(String(activityId))}/preflight`, data, config),
+  publish: (activityId, data = {}, config = {}) =>
+    api.post(`/activities/${encodeURIComponent(String(activityId))}/publish`, data, config),
+  offline: (activityId, data = {}, config = {}) =>
+    api.post(`/activities/${encodeURIComponent(String(activityId))}/offline`, data, config),
+  records: (activityId, params = {}, config = {}) =>
+    api.get(`/activities/${encodeURIComponent(String(activityId))}/records`, { ...config, params })
+};
+
 export const monitoringApi = {
   getServices: (config = {}) =>
     api.get("/services", { ...config, baseURL: "/api/admin/monitoring" }),
