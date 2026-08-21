@@ -75,11 +75,14 @@ pub(crate) enum LoginRewardProgressError {
     ActivityNotActive,
     VersionConflict,
     StorageUnavailable,
+    NotQualified,
+    AlreadyClaimed,
 }
 
 pub(crate) trait LoginRewardProgressRepository: Send + Sync {
     fn load(&self, character_id: &str, activity_id: &str, version_no: i32) -> Result<(LoginRewardState, i64), LoginRewardProgressError>;
     fn compare_and_set(&self, character_id: &str, activity_id: &str, version_no: i32, expected_revision: i64, state: LoginRewardState, current_stage_id: Option<String>) -> Result<i64, LoginRewardProgressError>;
+    fn claim_stage(&self, character_id: &str, activity_id: &str, version_no: i32, expected_revision: i64, claim_key: &str, current_stage_id: Option<String>) -> Result<i64, LoginRewardProgressError>;
 }
 
 #[derive(Clone, Default)]
@@ -120,6 +123,26 @@ impl LoginRewardProgressRepository for InMemoryLoginRewardProgressRepository {
         });
         Ok(next_revision)
     }
+
+    fn claim_stage(&self, character_id: &str, activity_id: &str, version_no: i32, expected_revision: i64, claim_key: &str, current_stage_id: Option<String>) -> Result<i64, LoginRewardProgressError> {
+        let mut state = self.state.lock().map_err(|_| LoginRewardProgressError::StorageUnavailable)?;
+        let key = (character_id.to_string(), activity_id.to_string(), version_no);
+        let record = state.get_mut(&key).ok_or(LoginRewardProgressError::NotQualified)?;
+        if record.state_revision != expected_revision {
+            return Err(LoginRewardProgressError::VersionConflict);
+        }
+        let mut login_state: LoginRewardState = serde_json::from_value(record.type_state.clone()).map_err(|_| LoginRewardProgressError::StorageUnavailable)?;
+        if login_state.claimed_stage_ids.iter().any(|value| value == claim_key) {
+            return Err(LoginRewardProgressError::AlreadyClaimed);
+        }
+        login_state.claimed_stage_ids.push(claim_key.to_string());
+        let next_revision = expected_revision.saturating_add(1);
+        record.current_stage_id = current_stage_id;
+        record.progress["claimed_stage_ids"] = json!(login_state.claimed_stage_ids);
+        record.type_state = serde_json::to_value(&login_state).map_err(|_| LoginRewardProgressError::StorageUnavailable)?;
+        record.state_revision = next_revision;
+        Ok(next_revision)
+    }
 }
 
 impl InMemoryLoginRewardProgressRepository {
@@ -140,6 +163,10 @@ impl InMemoryLoginRewardProgressRepository {
 pub(crate) fn login_period_key(occurred_at: DateTime<Utc>, timezone: &str) -> Result<String, LoginRewardProgressError> {
     let zone: Tz = timezone.parse().map_err(|_| LoginRewardProgressError::InvalidConfig(format!("unsupported IANA timezone '{timezone}'")))?;
     Ok(zone.from_utc_datetime(&occurred_at.naive_utc()).date_naive().format("%Y-%m-%d").to_string())
+}
+
+pub(crate) fn login_reward_claim_key(stage_id: &str, period_key: &str, version_no: i32) -> String {
+    format!("stage_id={stage_id};period_key={period_key};activity_version={version_no}")
 }
 
 fn period_date(period_key: &str) -> Result<NaiveDate, LoginRewardProgressError> {
@@ -178,6 +205,11 @@ pub(crate) fn apply_game_entry(
 fn current_stage(config: &LoginRewardConfig, state: &LoginRewardState) -> Option<u32> {
     let count = if config.progression == "cumulative" { state.cumulative_count } else { state.consecutive_count };
     config.stages.iter().filter(|stage| stage.required_count <= count).max_by_key(|stage| stage.stage_no).map(|stage| stage.stage_no)
+}
+
+pub(crate) fn eligible_stage_numbers(config: &LoginRewardConfig, state: &LoginRewardState) -> Vec<u32> {
+    let count = if config.progression == "cumulative" { state.cumulative_count } else { state.consecutive_count };
+    config.stages.iter().filter(|stage| stage.required_count <= count).map(|stage| stage.stage_no).collect()
 }
 
 fn invalid(message: impl Into<String>) -> ActivityTypeError {
@@ -375,5 +407,30 @@ mod tests {
         let dst_transition = chrono::DateTime::parse_from_rfc3339("2026-03-08T07:30:00Z").unwrap().with_timezone(&chrono::Utc);
         assert_eq!(login_period_key(dst_transition, "America/New_York").unwrap(), "2026-03-08");
         assert!(matches!(login_period_key(after_midnight, "Mars/Olympus"), Err(LoginRewardProgressError::InvalidConfig(_))));
+    }
+
+    #[test]
+    fn claim_stage_records_semantic_key_and_is_idempotent() {
+        let config: LoginRewardConfig = serde_json::from_value(config()).unwrap();
+        let repository = InMemoryLoginRewardProgressRepository::default();
+        let occurred_at = chrono::DateTime::parse_from_rfc3339("2026-08-21T12:00:00Z").unwrap().with_timezone(&chrono::Utc);
+        let event = GameEntryEvent { character_id: "c1".into(), activity_id: "a1".into(), version_no: 1, occurred_at };
+        let progress = apply_game_entry(&config, crate::activity::domain::ActivityStatus::Running, occurred_at - chrono::Duration::hours(1), occurred_at + chrono::Duration::hours(1), "UTC", &event, &repository).unwrap();
+        let claim_key = login_reward_claim_key("1", &progress.period_key, 1);
+        let revision = repository.claim_stage("c1", "a1", 1, progress.state_revision, &claim_key, Some("1".into())).unwrap();
+        assert_eq!(revision, 2);
+        let stored = repository.load_activity_state("c1", "a1", 1).unwrap();
+        assert_eq!(stored.current_stage_id.as_deref(), Some("1"));
+        assert_eq!(stored.type_state["claimed_stage_ids"][0], claim_key);
+        assert_eq!(stored.progress["claimed_stage_ids"][0], claim_key);
+        assert_eq!(repository.claim_stage("c1", "a1", 1, revision, &claim_key, Some("1".into())), Err(LoginRewardProgressError::AlreadyClaimed));
+    }
+
+    #[test]
+    fn eligible_stage_numbers_include_all_reached_stages_for_automatic_claims() {
+        let mut config: LoginRewardConfig = serde_json::from_value(config()).unwrap();
+        config.stages.push(LoginRewardStageConfig { stage_no: 2, required_count: 2, reward_group_key: "g2".into() });
+        let state = LoginRewardState { consecutive_count: 2, cumulative_count: 2, ..Default::default() };
+        assert_eq!(eligible_stage_numbers(&config, &state), vec![1, 2]);
     }
 }

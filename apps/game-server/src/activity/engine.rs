@@ -7,8 +7,9 @@ use super::types::{
     apply_game_entry, ActivityTypeRegistry, GameEntryEvent,
     InMemoryLoginRewardProgressRepository, LoginRewardConfig, LoginRewardProgressError,
     LoginRewardProgressRepository, LoginRewardProgressResult, PlayerContext, TransactionContext,
+    eligible_stage_numbers, login_reward_claim_key,
 };
-use crate::core::inventory::{NormalizedAssetItem, RewardDeliveryPolicy};
+use crate::core::inventory::{AssetBinding, NormalizedAssetItem, RewardDeliveryPolicy};
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -156,7 +157,7 @@ impl ActivityEngine {
             version_no: version as i32,
             occurred_at,
         };
-        apply_game_entry(
+        let result = apply_game_entry(
             &config,
             snapshot.activity.effective_status(occurred_at),
             snapshot.activity.start_at,
@@ -165,7 +166,40 @@ impl ActivityEngine {
             &event,
             self.login_progress.as_ref(),
         )
-        .map_err(Self::map_login_progress_error)
+        .map_err(Self::map_login_progress_error)?;
+        if config.claim_mode == "automatic" {
+            for stage_no in eligible_stage_numbers(&config, &result.state) {
+                let request = ActivityActionRequest {
+                    activity_id: activity_id.to_string(),
+                    version,
+                    stage_id: stage_no.to_string(),
+                    action_type: "claim".to_string(),
+                    client_request_id: format!("auto:{}:{}", result.period_key, stage_no),
+                };
+                let base = ActivityActionResponse {
+                    ok: false,
+                    error_code: None,
+                    activity_id: activity_id.to_string(),
+                    version,
+                    stage_id: request.stage_id.clone(),
+                    action_type: request.action_type.clone(),
+                    client_request_id: request.client_request_id.clone(),
+                    processing: false,
+                    duplicate: false,
+                    state_revision: result.state_revision as u64,
+                };
+                let response = self
+                    .claim_login_reward(character_id, &request, &snapshot, base, true)
+                    .await;
+                if !response.ok && !response.duplicate {
+                    return Err(ActivityEngineError::new(
+                        response.error_code.unwrap_or("ACTIVITY_RETRYABLE_FAILURE"),
+                        "automatic login reward delivery did not complete",
+                    ));
+                }
+            }
+        }
+        Ok(result)
     }
 
     fn map_login_progress_error(error: LoginRewardProgressError) -> ActivityEngineError {
@@ -180,7 +214,164 @@ impl ActivityEngine {
                 ActivityEngineError::new("ACTIVITY_VERSION_CONFLICT", "login progress changed concurrently"),
             LoginRewardProgressError::StorageUnavailable =>
                 ActivityEngineError::new("ACTIVITY_STORAGE_UNAVAILABLE", "activity storage unavailable"),
+            LoginRewardProgressError::NotQualified =>
+                ActivityEngineError::new("ACTIVITY_QUALIFICATION_NOT_MET", "login reward qualification is not met"),
+            LoginRewardProgressError::AlreadyClaimed =>
+                ActivityEngineError::new("ACTIVITY_ALREADY_CLAIMED", "login reward stage has already been claimed"),
         }
+    }
+
+    async fn claim_login_reward(
+        &self,
+        character_id: &str,
+        request: &ActivityActionRequest,
+        snapshot: &PublishedActivitySnapshot,
+        base: ActivityActionResponse,
+        automatic: bool,
+    ) -> ActivityActionResponse {
+        let config: LoginRewardConfig = match serde_json::from_value(snapshot.version.type_config.clone()) {
+            Ok(config) => config,
+            Err(_) => return Self::failed(base, "ACTIVITY_INVALID_CONFIG"),
+        };
+        if (automatic && config.claim_mode != "automatic") || (!automatic && config.claim_mode != "manual") {
+            return Self::failed(base, "ACTIVITY_INVALID_ACTION");
+        }
+        let stage = match request.stage_id.parse::<u32>().ok().and_then(|stage_no| {
+            config.stages.iter().find(|stage| stage.stage_no == stage_no)
+        }) {
+            Some(stage) => stage,
+            None => return Self::failed(base, "ACTIVITY_QUALIFICATION_NOT_MET"),
+        };
+        let (state, revision) = match self.login_progress.load(
+            character_id,
+            &request.activity_id,
+            snapshot.version.version_no,
+        ) {
+            Ok(value) => value,
+            Err(error) => return Self::failed(base, Self::map_login_progress_error(error).code),
+        };
+        let period_key = match state.last_period_key.clone() {
+            Some(period_key) => period_key,
+            None => return Self::failed(base, "ACTIVITY_QUALIFICATION_NOT_MET"),
+        };
+        let count = if config.progression == "cumulative" {
+            state.cumulative_count
+        } else {
+            state.consecutive_count
+        };
+        if count < stage.required_count {
+            return Self::failed(base, "ACTIVITY_QUALIFICATION_NOT_MET");
+        }
+        let semantic_claim_key = login_reward_claim_key(
+            &request.stage_id,
+            &period_key,
+            snapshot.version.version_no,
+        );
+        if state.claimed_stage_ids.iter().any(|value| value == &semantic_claim_key) {
+            let mut response = ActivityActionResponse { ok: true, ..base };
+            response.duplicate = true;
+            response.state_revision = revision as u64;
+            return response;
+        }
+        let items = match Self::reward_items(&snapshot.version.public_config, &stage.reward_group_key, character_id) {
+            Ok(items) if !items.is_empty() => items,
+            _ => return Self::failed(base, "ACTIVITY_MANUAL_REVIEW"),
+        };
+        let Some(coordinator) = &self.claim_coordinator else {
+            return Self::failed(base, "ACTIVITY_MANUAL_REVIEW");
+        };
+        let order = match build_reward_order(
+            character_id,
+            &request.activity_id,
+            snapshot.version.version_no,
+            &semantic_claim_key,
+            &items,
+            RewardDeliveryPolicy::PreferInventory,
+        ) {
+            Ok(order) => order,
+            Err(_) => return Self::failed(base, "ACTIVITY_MANUAL_REVIEW"),
+        };
+        let settlement = coordinator
+            .settle(
+                character_id,
+                &request.activity_id,
+                snapshot.version.version_no,
+                &semantic_claim_key,
+                &request.client_request_id,
+                order,
+            )
+            .await;
+        match settlement.status {
+            ClaimStatus::Granted => {
+                let current_stage_id = Some(request.stage_id.clone());
+                let marked = self.login_progress.claim_stage(
+                    character_id,
+                    &request.activity_id,
+                    snapshot.version.version_no,
+                    revision,
+                    &semantic_claim_key,
+                    current_stage_id,
+                );
+                match marked {
+                    Ok(next_revision) => ActivityActionResponse {
+                        ok: true,
+                        duplicate: settlement.duplicate,
+                        state_revision: next_revision as u64,
+                        ..base
+                    },
+                    Err(LoginRewardProgressError::AlreadyClaimed) => ActivityActionResponse {
+                        ok: true,
+                        duplicate: true,
+                        state_revision: revision as u64,
+                        ..base
+                    },
+                    Err(LoginRewardProgressError::VersionConflict) => {
+                        let latest = self.login_progress.load(character_id, &request.activity_id, snapshot.version.version_no);
+                        if latest.ok().is_some_and(|(state, _)| state.claimed_stage_ids.iter().any(|value| value == &semantic_claim_key)) {
+                            ActivityActionResponse { ok: true, duplicate: true, ..base }
+                        } else {
+                            Self::failed(base, "ACTIVITY_RETRYABLE_FAILURE")
+                        }
+                    }
+                    Err(error) => Self::failed(base, Self::map_login_progress_error(error).code),
+                }
+            }
+            ClaimStatus::Processing => {
+                let mut response = Self::failed(base, "ACTIVITY_PROCESSING");
+                response.processing = true;
+                response.duplicate = settlement.duplicate;
+                response
+            }
+            ClaimStatus::RetryableFailure => Self::failed(base, "ACTIVITY_RETRYABLE_FAILURE"),
+            ClaimStatus::ReconciliationPending => Self::failed(base, "ACTIVITY_RECONCILIATION_PENDING"),
+            ClaimStatus::ManualReview => Self::failed(base, "ACTIVITY_MANUAL_REVIEW"),
+        }
+    }
+
+    fn reward_items(
+        public_config: &serde_json::Value,
+        reward_group_key: &str,
+        character_id: &str,
+    ) -> Result<Vec<NormalizedAssetItem>, ()> {
+        let groups = public_config.get("reward_groups").ok_or(())?;
+        let group = if let Some(groups) = groups.as_array() {
+            groups.iter().find(|group| {
+                group.get("key").and_then(|value| value.as_str()) == Some(reward_group_key)
+                    || group.get("reward_group_key").and_then(|value| value.as_str()) == Some(reward_group_key)
+            }).ok_or(())?
+        } else {
+            groups.get(reward_group_key).ok_or(())?
+        };
+        let items = group.get("items").and_then(|value| value.as_array()).ok_or(())?;
+        items.iter().map(|item| {
+            let item_id = item.get("item_id").or_else(|| item.get("asset_id")).and_then(|value| value.as_i64()).ok_or(())? as i32;
+            let count = item.get("count").or_else(|| item.get("quantity")).and_then(|value| value.as_u64()).ok_or(())? as u32;
+            let binding = match item.get("binding").and_then(|value| value.as_str()) {
+                Some("character_bound") => AssetBinding::CharacterBound { character_id: character_id.to_string() },
+                _ => AssetBinding::Unbound,
+            };
+            NormalizedAssetItem::new(item_id, count, binding).map_err(|_| ())
+        }).collect()
     }
 
     pub(crate) async fn list(
@@ -310,10 +501,38 @@ impl ActivityEngine {
             return Self::failed(base, "ACTIVITY_INVALID_VERSION");
         }
         if let Err(error) = Self::validate_read_status(&snapshot, now) {
-            return Self::failed(base, error.code);
+            let ended_claim_window = snapshot.activity.activity_type.as_str() == "login_reward"
+                && request.action_type == "claim"
+                && error.code == "ACTIVITY_ENDED"
+                && now < snapshot.activity.claim_deadline
+                && self
+                    .login_progress
+                    .load(
+                        character_id,
+                        &request.activity_id,
+                        snapshot.version.version_no,
+                    )
+                    .ok()
+                    .is_some_and(|(state, _)| state.last_period_key.is_some());
+            if !ended_claim_window {
+                return Self::failed(base, error.code);
+            }
         }
         if request.action_type == "claim" && request.stage_id.trim().is_empty() {
             return Self::failed(base, "ACTIVITY_INVALID_REQUEST");
+        }
+        if snapshot.activity.activity_type.as_str() == "login_reward"
+            && request.action_type == "claim"
+        {
+            let response = self
+                .claim_login_reward(character_id, &request, &snapshot, base.clone(), false)
+                .await;
+            self.request_state
+                .lock()
+                .await
+                .seen
+                .insert(request_key, response.clone());
+            return response;
         }
         let mut transaction = TransactionContext {
             request_id: request.client_request_id.clone(),
