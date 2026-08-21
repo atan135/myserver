@@ -2127,6 +2127,20 @@ async fn dispatch_packet(
             )
             .await
         }
+        Some(
+            MessageType::ActivityListReq
+            | MessageType::ActivityDetailReq
+            | MessageType::ActivityProgressReq
+            | MessageType::ActivityClaimReq
+            | MessageType::ActivityActionReq,
+        ) => {
+            connection.queue_error(
+                packet.header.seq,
+                "MESSAGE_NOT_SUPPORTED",
+                "activity engine is not enabled in this phase",
+            )?;
+            Ok(())
+        }
         Some(MessageType::DebugCharacterTitleReq) => {
             character_title_service::handle_debug_character_title(services, connection, packet)
                 .await

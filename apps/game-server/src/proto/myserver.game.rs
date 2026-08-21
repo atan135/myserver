@@ -1368,6 +1368,157 @@ pub struct ApplyCharacterProgressRes {
     #[prost(message, repeated, tag = "8")]
     pub rewards: ::prost::alloc::vec::Vec<CharacterProgressRewardSummary>,
 }
+/// Activity player entry contracts. The character identity comes from the
+/// character-bound ticket/connection context and is never accepted in these
+/// request bodies. Version zero means the current published version for reads;
+/// non-zero versions must be server-issued activity snapshots.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ActivitySummary {
+    #[prost(string, tag = "1")]
+    pub activity_id: ::prost::alloc::string::String,
+    #[prost(uint32, tag = "2")]
+    pub version: u32,
+    #[prost(string, tag = "3")]
+    pub activity_type: ::prost::alloc::string::String,
+    #[prost(string, tag = "4")]
+    pub status: ::prost::alloc::string::String,
+    #[prost(int64, tag = "5")]
+    pub start_at_ms: i64,
+    #[prost(int64, tag = "6")]
+    pub end_at_ms: i64,
+    #[prost(int64, tag = "7")]
+    pub claim_deadline_ms: i64,
+    #[prost(string, tag = "8")]
+    pub timezone: ::prost::alloc::string::String,
+}
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct ActivityListReq {}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ActivityListRes {
+    #[prost(bool, tag = "1")]
+    pub ok: bool,
+    #[prost(string, tag = "2")]
+    pub error_code: ::prost::alloc::string::String,
+    #[prost(int64, tag = "3")]
+    pub server_time_ms: i64,
+    #[prost(message, repeated, tag = "4")]
+    pub activities: ::prost::alloc::vec::Vec<ActivitySummary>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ActivityDetailReq {
+    #[prost(string, tag = "1")]
+    pub activity_id: ::prost::alloc::string::String,
+    #[prost(uint32, tag = "2")]
+    pub version: u32,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ActivityDetailRes {
+    #[prost(bool, tag = "1")]
+    pub ok: bool,
+    #[prost(string, tag = "2")]
+    pub error_code: ::prost::alloc::string::String,
+    #[prost(message, optional, tag = "3")]
+    pub activity: ::core::option::Option<ActivitySummary>,
+    #[prost(string, tag = "4")]
+    pub progress_json: ::prost::alloc::string::String,
+    #[prost(uint64, tag = "5")]
+    pub state_revision: u64,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ActivityProgressReq {
+    #[prost(string, tag = "1")]
+    pub activity_id: ::prost::alloc::string::String,
+    #[prost(uint32, tag = "2")]
+    pub version: u32,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ActivityProgressRes {
+    #[prost(bool, tag = "1")]
+    pub ok: bool,
+    #[prost(string, tag = "2")]
+    pub error_code: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub activity_id: ::prost::alloc::string::String,
+    #[prost(uint32, tag = "4")]
+    pub version: u32,
+    #[prost(string, tag = "5")]
+    pub progress_json: ::prost::alloc::string::String,
+    #[prost(uint64, tag = "6")]
+    pub state_revision: u64,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ActivityClaimReq {
+    #[prost(string, tag = "1")]
+    pub activity_id: ::prost::alloc::string::String,
+    #[prost(uint32, tag = "2")]
+    pub version: u32,
+    /// Server-issued stage identifier; the client cannot define a new stage.
+    #[prost(string, tag = "3")]
+    pub stage_id: ::prost::alloc::string::String,
+    /// Opaque client retry key, bounded and scoped to the authenticated character.
+    #[prost(string, tag = "4")]
+    pub client_request_id: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ActivityClaimRes {
+    #[prost(bool, tag = "1")]
+    pub ok: bool,
+    #[prost(string, tag = "2")]
+    pub error_code: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub activity_id: ::prost::alloc::string::String,
+    #[prost(uint32, tag = "4")]
+    pub version: u32,
+    #[prost(string, tag = "5")]
+    pub stage_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "6")]
+    pub client_request_id: ::prost::alloc::string::String,
+    #[prost(bool, tag = "7")]
+    pub processing: bool,
+    #[prost(bool, tag = "8")]
+    pub duplicate: bool,
+    #[prost(uint64, tag = "9")]
+    pub state_revision: u64,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ActivityActionReq {
+    #[prost(string, tag = "1")]
+    pub activity_id: ::prost::alloc::string::String,
+    #[prost(uint32, tag = "2")]
+    pub version: u32,
+    /// Server-issued stage identifier; empty is valid for activity-wide actions.
+    #[prost(string, tag = "3")]
+    pub stage_id: ::prost::alloc::string::String,
+    /// Registered action such as list/detail/claim/draw/progress; never arbitrary code.
+    #[prost(string, tag = "4")]
+    pub action_type: ::prost::alloc::string::String,
+    /// Opaque client retry key; it is not a semantic claim key.
+    #[prost(string, tag = "5")]
+    pub client_request_id: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ActivityActionRes {
+    #[prost(bool, tag = "1")]
+    pub ok: bool,
+    #[prost(string, tag = "2")]
+    pub error_code: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub activity_id: ::prost::alloc::string::String,
+    #[prost(uint32, tag = "4")]
+    pub version: u32,
+    #[prost(string, tag = "5")]
+    pub stage_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "6")]
+    pub action_type: ::prost::alloc::string::String,
+    #[prost(string, tag = "7")]
+    pub client_request_id: ::prost::alloc::string::String,
+    #[prost(bool, tag = "8")]
+    pub processing: bool,
+    #[prost(bool, tag = "9")]
+    pub duplicate: bool,
+    #[prost(uint64, tag = "10")]
+    pub state_revision: u64,
+}
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct DebugCharacterTitleReq {
     #[prost(string, tag = "1")]

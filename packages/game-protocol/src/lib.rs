@@ -64,6 +64,11 @@ message_types! {
     SwitchCharacterDisciplineReq = 1429, SwitchCharacterDisciplineRes = 1430,
     AddCharacterDisciplinePointsReq = 1431, AddCharacterDisciplinePointsRes = 1432,
     ApplyCharacterProgressReq = 1433, ApplyCharacterProgressRes = 1434,
+    ActivityListReq = 1435, ActivityListRes = 1436,
+    ActivityDetailReq = 1437, ActivityDetailRes = 1438,
+    ActivityProgressReq = 1439, ActivityProgressRes = 1440,
+    ActivityClaimReq = 1441, ActivityClaimRes = 1442,
+    ActivityActionReq = 1443, ActivityActionRes = 1444,
     InventoryUpdatePush = 1501, AttrChangePush = 1502, VisualChangePush = 1503,
     ItemObtainPush = 1504, CharacterElementsChangePush = 1505,
     CharacterTitleChangePush = 1506, CharacterDisciplineChangePush = 1507,
@@ -208,6 +213,14 @@ mod tests {
         assert_eq!(
             MessageType::from_u16(1407),
             Some(MessageType::DeprecatedItemAddReq)
+        );
+        assert_eq!(
+            MessageType::from_u16(1435),
+            Some(MessageType::ActivityListReq)
+        );
+        assert_eq!(
+            MessageType::from_u16(1444),
+            Some(MessageType::ActivityActionRes)
         );
     }
 
