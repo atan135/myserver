@@ -45,6 +45,12 @@ pub(crate) trait ActivityRepository: Send + Sync {
         expected_current_version: Option<i32>,
     ) -> RepositoryFuture<'a, Result<(), ActivityRepositoryError>>;
 
+    fn offline<'a>(
+        &'a self,
+        activity_id: &'a str,
+        expected_current_version: i32,
+    ) -> RepositoryFuture<'a, Result<(), ActivityRepositoryError>>;
+
     fn get_published<'a>(
         &'a self,
         activity_id: &'a str,
@@ -197,6 +203,39 @@ impl ActivityRepository for InMemoryActivityRepository {
             stored.activity.end_at = end_at;
             stored.activity.claim_deadline = claim_deadline;
             stored.activity.timezone = timezone;
+            Ok(())
+        })
+    }
+
+    fn offline<'a>(
+        &'a self,
+        activity_id: &'a str,
+        expected_current_version: i32,
+    ) -> RepositoryFuture<'a, Result<(), ActivityRepositoryError>> {
+        Box::pin(async move {
+            let mut state = self.state.write().map_err(|_| Self::lock_error())?;
+            let stored = state.get_mut(activity_id).ok_or_else(|| {
+                ActivityRepositoryError::Domain(ActivityDomainError::new(
+                    ActivityErrorCode::NotFound,
+                    "published activity was not found",
+                ))
+            })?;
+            if stored.activity.current_version != Some(expected_current_version) {
+                return Err(ActivityRepositoryError::Domain(ActivityDomainError::new(
+                    ActivityErrorCode::VersionConflict,
+                    "activity current version changed",
+                )));
+            }
+            if !matches!(
+                stored.activity.status,
+                ActivityStatus::Published | ActivityStatus::Running
+            ) {
+                return Err(ActivityRepositoryError::Domain(ActivityDomainError::new(
+                    ActivityErrorCode::InvalidState,
+                    "only published or running activities can be taken offline",
+                )));
+            }
+            stored.activity.status = ActivityStatus::Offline;
             Ok(())
         })
     }

@@ -242,6 +242,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn repository_offline_uses_cas_hides_snapshot_and_preserves_claim_rejection() {
+        let repository = InMemoryActivityRepository::default();
+        let (mut activity, version) = fixture();
+        repository
+            .save_draft(activity.clone(), version)
+            .await
+            .unwrap();
+        repository.publish(&activity.id, 1, None).await.unwrap();
+        repository.offline(&activity.id, 1).await.unwrap();
+        assert!(
+            repository
+                .get_published(&activity.id, activity.start_at)
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        activity.status = ActivityStatus::Offline;
+        let error = activity
+            .can_claim(activity.start_at, activity.start_at)
+            .unwrap_err();
+        assert_eq!(error.code(), ActivityErrorCode::InvalidState);
+    }
+
+    #[tokio::test]
+    async fn repository_offline_rejects_stale_current_version() {
+        let repository = InMemoryActivityRepository::default();
+        let (activity, version) = fixture();
+        repository
+            .save_draft(activity.clone(), version)
+            .await
+            .unwrap();
+        repository.publish(&activity.id, 1, None).await.unwrap();
+        let error = repository.offline(&activity.id, 99).await.unwrap_err();
+        assert_eq!(error.code(), ActivityErrorCode::VersionConflict);
+        assert!(
+            repository
+                .get_published(&activity.id, activity.start_at)
+                .await
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
     async fn cache_records_refresh_notification_without_external_redis() {
         let cache = InMemoryActivityCache::default();
         let (_, version) = fixture();
