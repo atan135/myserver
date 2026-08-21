@@ -47,4 +47,8 @@ export function buildVersionCommand(detail, reason) {
   };
 }
 
+export function draftIsDirty(current, snapshot) {
+  return JSON.stringify(current ?? {}) !== String(snapshot ?? "");
+}
+
 export { activityApi };

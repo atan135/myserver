@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { activityError, buildVersionCommand, filterActivities, normalizeActivityListResponse } from "./activity.js";
+import { activityError, buildVersionCommand, draftIsDirty, filterActivities, normalizeActivityListResponse } from "./activity.js";
 
 test("activity list response and filters normalize stable pagination data", () => {
   const result = normalizeActivityListResponse({ data: { items: [{ key: "summer", status: "draft", activityType: "login_reward" }], total: 4, limit: 20, offset: 0 } });
@@ -22,4 +22,13 @@ test("version commands carry etag and errors expose conflict details", () => {
   const normalized = activityError({ response: { status: 409, data: { error: "ACTIVITY_VERSION_CONFLICT", message: "stale", details: [{ path: "version" }] } } });
   assert.equal(normalized.code, "ACTIVITY_VERSION_CONFLICT");
   assert.equal(normalized.details[0].path, "version");
+});
+
+test("empty lists, dirty drafts and action errors remain explicit", () => {
+  assert.deepEqual(normalizeActivityListResponse({ data: {} }).items, []);
+  const draft = { publicConfig: { title: "next" } };
+  assert.equal(draftIsDirty(draft, JSON.stringify(draft)), false);
+  assert.equal(draftIsDirty({ ...draft, reason: "changed" }, JSON.stringify(draft)), true);
+  assert.equal(activityError({ response: { status: 503, data: { message: "unavailable" } } }).retryable, true);
+  assert.equal(activityError({ response: { status: 403, data: {} } }).code, "FORBIDDEN");
 });
