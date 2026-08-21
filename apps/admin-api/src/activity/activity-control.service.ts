@@ -11,7 +11,50 @@ export interface ActivityControlService {
   preflight(activityId: string, command: Record<string, unknown>): Promise<unknown>;
   publish(activityId: string, command: Record<string, unknown>): Promise<unknown>;
   offline(activityId: string, command: Record<string, unknown>): Promise<unknown>;
-  records(activityId: string, query: Record<string, unknown>): Promise<unknown>;
+  records(activityId: string, query: ActivityRecordQuery): Promise<unknown>;
+}
+
+export interface ActivityRecordQuery {
+  actorId?: string;
+  version?: number;
+  characterId?: string;
+  status?: string;
+  from?: string;
+  to?: string;
+  requestId?: string;
+  limit?: number;
+  offset?: number;
+}
+
+export interface ActivityRecord {
+  recordId: string;
+  activityId: string;
+  version: number;
+  recordType: "claim" | "draw" | "reward_grant";
+  characterId?: string;
+  requestId?: string;
+  status: string;
+  createdAt: string;
+  details: Record<string, unknown>;
+}
+
+export interface ActivityAuditEvent {
+  action: "draft_created" | "draft_updated" | "draft_forked" | "preflight" | "published" | "offlined" | "records_read";
+  activityId?: string;
+  actorId: string;
+  reason?: string;
+  version?: number;
+  result: "success" | "failure";
+  errorCode?: string;
+  summary?: Record<string, unknown>;
+}
+
+export interface ActivityAuditSink {
+  write(event: ActivityAuditEvent): Promise<void>;
+}
+
+export class NoopActivityAuditSink implements ActivityAuditSink {
+  async write(_event: ActivityAuditEvent): Promise<void> {}
 }
 
 export class ActivityControlError extends Error {
@@ -44,6 +87,7 @@ export interface ActivityControlRepository {
   updateDraft(activityId: string, command: Record<string, unknown>): Promise<any>;
   publish(activityId: string, command: Record<string, unknown>): Promise<any>;
   offline(activityId: string, command: Record<string, unknown>): Promise<any>;
+  records(activityId: string, query: ActivityRecordQuery): Promise<unknown>;
 }
 
 type ActivityStatus = "draft" | "published" | "offline";
@@ -82,6 +126,7 @@ function requireActivity(state: Map<string, StoredActivity>, activityId: string)
 /** Offline adapter for contract tests. Production keeps the unavailable provider. */
 export class InMemoryActivityControlRepository implements ActivityControlRepository {
   private readonly state = new Map<string, StoredActivity>();
+  private readonly activityRecords: ActivityRecord[] = [];
 
   async list(query: Record<string, unknown>): Promise<unknown> {
     const status = typeof query.status === "string" ? query.status : undefined;
@@ -97,6 +142,32 @@ export class InMemoryActivityControlRepository implements ActivityControlReposit
 
   async detail(activityId: string): Promise<unknown> {
     return this.summary(requireActivity(this.state, activityId), true);
+  }
+
+  async records(activityId: string, query: ActivityRecordQuery): Promise<unknown> {
+    requireActivity(this.state, activityId);
+    const from = query.from ? Date.parse(query.from) : Number.NEGATIVE_INFINITY;
+    const to = query.to ? Date.parse(query.to) : Number.POSITIVE_INFINITY;
+    const rows = this.activityRecords
+      .filter((record) => record.activityId === activityId)
+      .filter((record) => query.version === undefined || record.version === query.version)
+      .filter((record) => !query.characterId || record.characterId === query.characterId)
+      .filter((record) => !query.status || record.status === query.status)
+      .filter((record) => !query.requestId || record.requestId === query.requestId)
+      .filter((record) => {
+        const timestamp = Date.parse(record.createdAt);
+        return Number.isFinite(timestamp) && timestamp >= from && timestamp < to;
+      })
+      .sort((left, right) => right.createdAt.localeCompare(left.createdAt) || right.recordId.localeCompare(left.recordId));
+    const limit = Number(query.limit ?? 50);
+    const offset = Number(query.offset ?? 0);
+    return { items: rows.slice(offset, offset + limit).map(clone), total: rows.length, limit, offset };
+  }
+
+  /** Test-only fixture hook; production adapters must source append-only tables. */
+  appendRecordForTest(record: ActivityRecord): void {
+    if (this.activityRecords.some((item) => item.recordId === record.recordId)) throw new ActivityControlError("ACTIVITY_RECORD_CONFLICT", "record id already exists");
+    this.activityRecords.push(clone(record));
   }
 
   async createDraft(command: Record<string, unknown>): Promise<any> {
@@ -260,66 +331,115 @@ function validateDraft(command: Record<string, unknown>): ActivityPreflightError
 }
 
 export class ActivityControlDomainService implements ActivityControlService {
-  constructor(private readonly repository: ActivityControlRepository = new InMemoryActivityControlRepository(), private readonly notifier: ActivityRefreshNotifier = new NoopActivityRefreshNotifier()) {}
+  constructor(private readonly repository: ActivityControlRepository = new InMemoryActivityControlRepository(), private readonly notifier: ActivityRefreshNotifier = new NoopActivityRefreshNotifier(), private readonly audit: ActivityAuditSink = new NoopActivityAuditSink()) {}
   list(query: Record<string, unknown>): Promise<unknown> { return this.repository.list(query); }
   detail(activityId: string): Promise<unknown> { return this.repository.detail(activityId); }
   async createDraft(command: Record<string, unknown>): Promise<unknown> {
-    const errors = validateDraft(command);
-    if (errors.length) throw new ActivityControlError("ACTIVITY_INVALID_CONFIG", "draft failed preflight", errors);
-    return this.repository.createDraft(command);
+    try {
+      const errors = validateDraft(command);
+      if (errors.length) throw new ActivityControlError("ACTIVITY_INVALID_CONFIG", "draft failed preflight", errors);
+      const result = await this.repository.createDraft(command);
+      return this.withAudit(result, { action: "draft_created", activityId: String((result as any).activityId), actorId: String(command.actorId || "admin-api"), reason: String(command.reason), version: Number((result as any).version) });
+    } catch (error: any) {
+      await this.auditFailure("draft_created", command, error);
+      throw error;
+    }
   }
   async createDraftFromPublished(activityId: string, command: Record<string, unknown>): Promise<unknown> {
-    const detail: any = await this.repository.detail(activityId);
-    if (detail?.status !== "published") throw new ActivityControlError("ACTIVITY_INVALID_STATE", "only published activities can create a new draft");
-    const source = detail?.snapshot as Record<string, unknown> | undefined;
-    if (!source) throw new ActivityControlError("ACTIVITY_NOT_FOUND", "published source version was not found");
-    const overrides = command.overrides && typeof command.overrides === "object" && !Array.isArray(command.overrides) ? command.overrides as Record<string, unknown> : {};
-    const candidate = { ...clone(source), ...clone(overrides), reason: command.reason };
-    const errors = validateDraft(candidate);
-    if (errors.length) throw new ActivityControlError("ACTIVITY_INVALID_CONFIG", "new draft failed preflight", errors);
-    return this.repository.createDraftFromPublished(activityId, command);
+    try {
+      const detail: any = await this.repository.detail(activityId);
+      if (detail?.status !== "published") throw new ActivityControlError("ACTIVITY_INVALID_STATE", "only published activities can create a new draft");
+      const source = detail?.snapshot as Record<string, unknown> | undefined;
+      if (!source) throw new ActivityControlError("ACTIVITY_NOT_FOUND", "published source version was not found");
+      const overrides = command.overrides && typeof command.overrides === "object" && !Array.isArray(command.overrides) ? command.overrides as Record<string, unknown> : {};
+      const candidate = { ...clone(source), ...clone(overrides), reason: command.reason };
+      const errors = validateDraft(candidate);
+      if (errors.length) throw new ActivityControlError("ACTIVITY_INVALID_CONFIG", "new draft failed preflight", errors);
+      const result = await this.repository.createDraftFromPublished(activityId, command);
+      return this.withAudit(result, { action: "draft_forked", activityId, actorId: String(command.actorId || "admin-api"), reason: String(command.reason), version: Number((result as any).version) });
+    } catch (error: any) {
+      await this.auditFailure("draft_forked", { ...command, activityId }, error);
+      throw error;
+    }
   }
   async updateDraft(activityId: string, command: Record<string, unknown>): Promise<unknown> {
-    const errors = validateDraft(command);
-    if (errors.length) throw new ActivityControlError("ACTIVITY_INVALID_CONFIG", "draft failed preflight", errors);
-    return this.repository.updateDraft(activityId, command);
+    try {
+      const errors = validateDraft(command);
+      if (errors.length) throw new ActivityControlError("ACTIVITY_INVALID_CONFIG", "draft failed preflight", errors);
+      const result = await this.repository.updateDraft(activityId, command);
+      return this.withAudit(result, { action: "draft_updated", activityId, actorId: String(command.actorId || "admin-api"), reason: String(command.reason), version: Number((result as any).version) });
+    } catch (error: any) {
+      await this.auditFailure("draft_updated", { ...command, activityId }, error);
+      throw error;
+    }
   }
   async preflight(activityId: string, command: Record<string, unknown>): Promise<unknown> {
-    const detail: any = await this.repository.detail(activityId);
-    const draft = detail?.draft as Record<string, unknown> | undefined;
-    if (!draft) throw new ActivityControlError("ACTIVITY_NOT_FOUND", "activity draft was not found");
-    const requestedVersion = command.version === undefined ? detail.version : Number(command.version);
-    const errors = requestedVersion !== detail.version ? [{ path: "version", code: "ACTIVITY_VERSION_CONFLICT", message: "draft version is stale" }] : validateDraft(draft);
-    return { activityId, version: requestedVersion, valid: errors.length === 0, errors };
+    try {
+      const detail: any = await this.repository.detail(activityId);
+      const draft = detail?.draft as Record<string, unknown> | undefined;
+      if (!draft) throw new ActivityControlError("ACTIVITY_NOT_FOUND", "activity draft was not found");
+      const requestedVersion = command.version === undefined ? detail.version : Number(command.version);
+      const errors = requestedVersion !== detail.version ? [{ path: "version", code: "ACTIVITY_VERSION_CONFLICT", message: "draft version is stale" }] : validateDraft(draft);
+      const result = { activityId, version: requestedVersion, valid: errors.length === 0, errors };
+      return this.withAudit(result, { action: "preflight", activityId, actorId: String(command.actorId || "admin-api"), reason: String(command.reason || "preflight"), version: requestedVersion });
+    } catch (error: any) {
+      await this.auditFailure("preflight", { ...command, activityId }, error);
+      throw error;
+    }
   }
   async publish(activityId: string, command: Record<string, unknown>): Promise<unknown> {
-    if (typeof command.reason !== "string" || !command.reason.trim()) throw new ActivityControlError("ACTIVITY_INVALID_REQUEST", "reason is required");
-    const detail: any = await this.repository.detail(activityId);
-    const draft = detail?.draft as Record<string, unknown> | undefined;
-    if (!draft) throw new ActivityControlError("ACTIVITY_NOT_FOUND", "activity draft was not found");
-    const errors = validateDraft(draft);
-    if (errors.length) throw new ActivityControlError("ACTIVITY_PRECHECK_FAILED", "activity cannot be published", errors);
-    const result: any = await this.repository.publish(activityId, command);
     try {
-      await this.notifier.notify({ activityId, version: Number(result.version), action: "published" });
-      return { ...result, notification: { status: "sent" } };
+      if (typeof command.reason !== "string" || !command.reason.trim()) throw new ActivityControlError("ACTIVITY_INVALID_REQUEST", "reason is required");
+      const detail: any = await this.repository.detail(activityId);
+      const draft = detail?.draft as Record<string, unknown> | undefined;
+      if (!draft) throw new ActivityControlError("ACTIVITY_NOT_FOUND", "activity draft was not found");
+      const errors = validateDraft(draft);
+      if (errors.length) throw new ActivityControlError("ACTIVITY_PRECHECK_FAILED", "activity cannot be published", errors);
+      const result: any = await this.repository.publish(activityId, command);
+      let notification: Record<string, unknown> = { status: "sent" };
+      try { await this.notifier.notify({ activityId, version: Number(result.version), action: "published" }); }
+      catch (error: any) { notification = { status: "failed", error: String(error?.message || "refresh notification failed") }; }
+      return this.withAudit({ ...result, notification }, { action: "published", activityId, actorId: String(command.actorId || "admin-api"), reason: String(command.reason), version: Number(result.version) });
     } catch (error: any) {
-      return { ...result, notification: { status: "failed", error: String(error?.message || "refresh notification failed") } };
+      await this.auditFailure("published", { ...command, activityId }, error);
+      throw error;
     }
   }
   async offline(activityId: string, command: Record<string, unknown>): Promise<unknown> {
-    if (typeof command.reason !== "string" || !command.reason.trim()) throw new ActivityControlError("ACTIVITY_INVALID_REQUEST", "reason is required");
-    const result: any = await this.repository.offline(activityId, command);
     try {
-      await this.notifier.notify({ activityId, version: Number(result.version), action: "offline" });
-      return { ...result, notification: { status: "sent" } };
+      if (typeof command.reason !== "string" || !command.reason.trim()) throw new ActivityControlError("ACTIVITY_INVALID_REQUEST", "reason is required");
+      const result: any = await this.repository.offline(activityId, command);
+      let notification: Record<string, unknown> = { status: "sent" };
+      try { await this.notifier.notify({ activityId, version: Number(result.version), action: "offline" }); }
+      catch (error: any) { notification = { status: "failed", error: String(error?.message || "refresh notification failed") }; }
+      return this.withAudit({ ...result, notification }, { action: "offlined", activityId, actorId: String(command.actorId || "admin-api"), reason: String(command.reason), version: Number(result.version) });
     } catch (error: any) {
-      return { ...result, notification: { status: "failed", error: String(error?.message || "refresh notification failed") } };
+      await this.auditFailure("offlined", { ...command, activityId }, error);
+      throw error;
     }
   }
-  async records(_activityId: string, _query: Record<string, unknown>): Promise<unknown> {
-    throw new ActivityControlError("ACTIVITY_CONTROL_UNAVAILABLE", "activity player records are not enabled");
+  records(activityId: string, query: ActivityRecordQuery): Promise<unknown> {
+    return this.repository.records(activityId, query)
+      .then((result) => this.withAudit(result, { action: "records_read", activityId, actorId: query.actorId || "admin-api" }))
+      .catch(async (error) => { await this.auditFailure("records_read", { ...query, activityId, actorId: query.actorId }, error); throw error; });
   }
+
+  private async withAudit<T>(result: T, event: Omit<ActivityAuditEvent, "result">): Promise<T> {
+    try { await this.audit.write({ ...event, result: "success", summary: summarize(result) }); }
+    catch { /* audit storage is reported by the production adapter; never leak payload */ }
+    return result;
+  }
+
+  private async auditFailure(action: ActivityAuditEvent["action"], command: Record<string, unknown>, error: any): Promise<void> {
+    try { await this.audit.write({ action, activityId: command.activityId ? String(command.activityId) : undefined, actorId: String(command.actorId || "admin-api"), reason: typeof command.reason === "string" ? command.reason : undefined, result: "failure", errorCode: error?.code || "ACTIVITY_UNKNOWN" }); }
+    catch { /* preserve original operation error */ }
+  }
+}
+
+function summarize(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== "object") return {};
+  const object = value as Record<string, unknown>;
+  return Object.fromEntries(["activityId", "version", "status", "total", "valid", "notification"].filter((key) => key in object).map((key) => [key, object[key]]));
 }
 
 export class ActivityControlUnavailableService implements ActivityControlService {

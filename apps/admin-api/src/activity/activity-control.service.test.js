@@ -10,7 +10,8 @@ register("ts-node/esm", pathToFileURL("./"));
 const {
   ActivityControlDomainService,
   ActivityControlError,
-  InMemoryActivityControlRepository
+  InMemoryActivityControlRepository,
+  NoopActivityRefreshNotifier
 } = await import("./activity-control.service.ts");
 
 function draft(overrides = {}) {
@@ -85,4 +86,37 @@ test("published snapshot can only be forked into a new draft with source CAS", a
     () => service.createDraftFromPublished("activity-3", { sourceVersion: 1, ifMatch: published.etag, reason: "replay", overrides: {} }),
     (error) => error.code === "ACTIVITY_INVALID_STATE"
   );
+});
+
+test("records are append-only read views with activity/version/character/status/time/request filters", async () => {
+  const repository = new InMemoryActivityControlRepository();
+  const service = new ActivityControlDomainService(repository);
+  await service.createDraft(draft({ activityId: "activity-records" }));
+  repository.appendRecordForTest({ recordId: "claim-1", activityId: "activity-records", version: 1, recordType: "claim", characterId: "character-1", requestId: "req-1", status: "granted", createdAt: "2026-09-01T01:00:00.000Z", details: { reward: "coin" } });
+  repository.appendRecordForTest({ recordId: "draw-1", activityId: "activity-records", version: 2, recordType: "draw", characterId: "character-2", requestId: "req-2", status: "permanent_failure", createdAt: "2026-09-02T01:00:00.000Z", details: { error: "pool_empty" } });
+  const result = await service.records("activity-records", { version: 1, characterId: "character-1", status: "granted", from: "2026-09-01T00:00:00Z", to: "2026-09-02T00:00:00Z", requestId: "req-1", limit: 10, offset: 0 });
+  assert.equal(result.total, 1);
+  assert.equal(result.items[0].recordType, "claim");
+  result.items[0].details.reward = "mutated";
+  const again = await service.records("activity-records", { requestId: "req-1" });
+  assert.equal(again.items[0].details.reward, "coin");
+});
+
+test("audit sink receives bounded success/failure summaries without configuration payloads", async () => {
+  const repository = new InMemoryActivityControlRepository();
+  const events = [];
+  const service = new ActivityControlDomainService(repository, new NoopActivityRefreshNotifier(), { async write(event) { events.push(event); } });
+  await service.createDraft(draft({ activityId: "activity-audit", publicConfig: { secret: "do-not-audit" }, actorId: "admin-7" }));
+  await service.records("activity-audit", { limit: 10, offset: 0 });
+  await assert.rejects(() => service.updateDraft("activity-audit", { ...draft({ activityId: "activity-audit", ifMatch: "stale" }), actorId: "admin-7" }));
+  assert.equal(events[0].action, "draft_created");
+  assert.equal(events[0].actorId, "admin-7");
+  assert.equal(events[0].result, "success");
+  assert.equal(events.some((event) => event.action === "records_read"), true);
+  assert.equal(events.some((event) => event.result === "failure"), true);
+  assert.equal(JSON.stringify(events).includes("do-not-audit"), false);
+
+  await service.publish("activity-audit", { version: 1, reason: "publish", actorId: "admin-7" });
+  await assert.rejects(() => service.publish("activity-audit", { version: 1, reason: "stale", actorId: "admin-7" }));
+  assert.equal(events.some((event) => event.action === "published" && event.result === "failure" && event.actorId === "admin-7"), true);
 });

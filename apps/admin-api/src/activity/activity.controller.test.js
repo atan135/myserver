@@ -48,6 +48,12 @@ test("activity controller exposes paginated list and strict draft contract", asy
     reason: "test"
   });
   assert.equal(draft.activityType, "login_reward");
+  const actorDraft = await controller.createDraft({
+    key: "actor", activityType: "login_reward", schemaVersion: 1,
+    startAt: "2026-01-01T00:00:00Z", endAt: "2026-01-02T00:00:00Z", claimDeadline: "2026-01-03T00:00:00Z",
+    timezone: "UTC", publicConfig: {}, typeConfig: { schema_version: 1 }, stages: [], rewardGroups: [], reason: "actor"
+  }, { admin: { sub: 77 } });
+  assert.equal(actorDraft.actorId, "77");
 
   const typedDraft = await controller.createDraft({
     key: "typed", activityType: "login_reward", schemaVersion: 1,
@@ -80,6 +86,15 @@ test("activity controller exposes paginated list and strict draft contract", asy
     () => controller.createDraftFromPublished("activity-1", { sourceVersion: 1, reason: "bad", overrides: { unknown: true }, extra: true }),
     (error) => error.getResponse().error === "ACTIVITY_UNKNOWN_FIELD"
   );
+  const records = await controller.records("activity-1", {
+    version: "1", characterId: "character-1", status: "granted",
+    from: "2026-01-01T00:00:00Z", to: "2026-01-02T00:00:00Z", requestId: "req-1", limit: "5", offset: "0"
+  });
+  assert.equal(records.version, 1);
+  assert.equal(records.characterId, "character-1");
+  await assert.rejects(() => controller.records("activity-1", { version: "0" }), (error) => error.getResponse().error === "ACTIVITY_INVALID_QUERY");
+  await assert.rejects(() => controller.records("activity-1", { from: "not-a-time" }), (error) => error.getResponse().error === "ACTIVITY_INVALID_QUERY");
+  await assert.rejects(() => controller.records("activity-1", { from: "2026-01-03T00:00:00Z", to: "2026-01-02T00:00:00Z" }), (error) => error.getResponse().error === "ACTIVITY_INVALID_QUERY");
 });
 
 test("activity controller rejects schema version, deep and oversized JSON", async () => {

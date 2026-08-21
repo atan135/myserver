@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Inject, Param, Patch, Post, Query, UseGuards } from "@nestjs/common";
+import { Body, Controller, Get, Inject, Param, Patch, Post, Query, Req, UseGuards } from "@nestjs/common";
 import { ApiBearerAuth, ApiTags } from "@nestjs/swagger";
 import { createActivityTypeRegistry, validateActivityTypeConfig } from "../activity-types.js";
 import { JwtAuthGuard } from "../auth/jwt-auth.guard.js";
@@ -29,6 +29,11 @@ function page(query: any) {
   return { limit, offset };
 }
 
+function actorCommand(command: Record<string, unknown>, request: any): Record<string, unknown> {
+  const actor = request?.admin?.sub ?? request?.admin?.username;
+  return actor === undefined ? command : { ...command, actorId: String(actor) };
+}
+
 @ApiTags("activities")
 @ApiBearerAuth()
 @UseGuards(JwtAuthGuard, AdminPolicyGuard)
@@ -53,48 +58,62 @@ export class ActivityController {
 
   @Post("drafts")
   @Permissions("activities.write")
-  async createDraft(@Body() body: any) {
+  async createDraft(@Body() body: any, @Req() request?: any) {
     const command = this.draft(body, DRAFT_FIELDS);
-    return this.invoke(() => this.service.createDraft(command));
+    return this.invoke(() => this.service.createDraft(actorCommand(command, request)));
   }
 
   @Post(":activityId/drafts")
   @Permissions("activities.write")
-  async createDraftFromPublished(@Param("activityId") activityId: string, @Body() body: any) {
-    return this.invoke(() => this.service.createDraftFromPublished(text(activityId, "activityId"), this.newDraftCommand(body)));
+  async createDraftFromPublished(@Param("activityId") activityId: string, @Body() body: any, @Req() request?: any) {
+    return this.invoke(() => this.service.createDraftFromPublished(text(activityId, "activityId"), actorCommand(this.newDraftCommand(body), request)));
   }
 
   @Patch(":activityId/drafts")
   @Permissions("activities.write")
-  async updateDraft(@Param("activityId") activityId: string, @Body() body: any) {
+  async updateDraft(@Param("activityId") activityId: string, @Body() body: any, @Req() request?: any) {
     const command = this.draft(body, UPDATE_DRAFT_FIELDS);
-    return this.invoke(() => this.service.updateDraft(text(activityId, "activityId"), command));
+    return this.invoke(() => this.service.updateDraft(text(activityId, "activityId"), actorCommand(command, request)));
   }
 
   @Post(":activityId/preflight")
   @Permissions("activities.publish")
-  async preflight(@Param("activityId") activityId: string, @Body() body: any) {
-    return this.invoke(() => this.service.preflight(text(activityId, "activityId"), this.versionCommand(body)));
+  async preflight(@Param("activityId") activityId: string, @Body() body: any, @Req() request?: any) {
+    return this.invoke(() => this.service.preflight(text(activityId, "activityId"), actorCommand(this.versionCommand(body), request)));
   }
 
   @Post(":activityId/publish")
   @Permissions("activities.publish")
-  async publish(@Param("activityId") activityId: string, @Body() body: any) {
-    return this.invoke(() => this.service.publish(text(activityId, "activityId"), this.versionCommand(body)));
+  async publish(@Param("activityId") activityId: string, @Body() body: any, @Req() request?: any) {
+    return this.invoke(() => this.service.publish(text(activityId, "activityId"), actorCommand(this.versionCommand(body), request)));
   }
 
   @Post(":activityId/offline")
-  @Permissions("activities.publish")
-  async offline(@Param("activityId") activityId: string, @Body() body: any) {
-    return this.invoke(() => this.service.offline(text(activityId, "activityId"), this.versionCommand(body)));
+  @Permissions("activities.offline")
+  async offline(@Param("activityId") activityId: string, @Body() body: any, @Req() request?: any) {
+    return this.invoke(() => this.service.offline(text(activityId, "activityId"), actorCommand(this.versionCommand(body), request)));
   }
 
   @Get(":activityId/records")
   @Permissions("activities.records.read")
-  async records(@Param("activityId") activityId: string, @Query() query: any) {
-    try { assertStrictJson(query ?? {}, ["status", "characterId", "limit", "offset"], "query"); }
+  async records(@Param("activityId") activityId: string, @Query() query: any, @Req() request?: any) {
+    try {
+      assertStrictJson(query ?? {}, ["status", "characterId", "version", "from", "to", "requestId", "limit", "offset"], "query");
+      if (query?.version !== undefined && (!Number.isInteger(Number(query.version)) || Number(query.version) < 1)) throw new Error("ACTIVITY_INVALID_QUERY");
+      for (const field of ["from", "to"]) if (query?.[field] !== undefined && !Number.isFinite(Date.parse(String(query[field])))) throw new Error("ACTIVITY_INVALID_QUERY");
+      if (query?.from !== undefined && query?.to !== undefined && Date.parse(String(query.from)) >= Date.parse(String(query.to))) throw new Error("ACTIVITY_INVALID_QUERY");
+    }
     catch (error: any) { throw this.contractError(error); }
-    return this.invoke(() => this.service.records(text(activityId, "activityId"), { ...page(query), status: query?.status, characterId: query?.characterId }));
+    return this.invoke(() => this.service.records(text(activityId, "activityId"), {
+      ...page(query),
+      version: query?.version === undefined ? undefined : Number(query.version),
+      status: query?.status,
+      characterId: query?.characterId,
+      from: query?.from,
+      to: query?.to,
+      requestId: query?.requestId,
+      actorId: String(request?.admin?.sub ?? request?.admin?.username ?? "admin-api")
+    }));
   }
 
   private draft(body: any, fields: readonly string[]) {

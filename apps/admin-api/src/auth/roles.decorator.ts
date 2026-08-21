@@ -44,6 +44,7 @@ export type AdminPermission =
   | "activities.read"
   | "activities.write"
   | "activities.publish"
+  | "activities.offline"
   | "activities.records.read"
   | "service.shutdown";
 
