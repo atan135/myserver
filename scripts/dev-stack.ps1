@@ -9,6 +9,9 @@ param(
     [switch]$RestartMail,
 
     [Parameter(Mandatory=$false)]
+    [switch]$RestartGame,
+
+    [Parameter(Mandatory=$false)]
     [switch]$RestartGameAndMail,
 
     [Parameter(Mandatory=$false)]
@@ -749,8 +752,10 @@ if ($Restart) {
     $StopExistingProjectProcesses = $true
 }
 
-if ($RestartMail -and $RestartGameAndMail) {
-    throw "RestartMail and RestartGameAndMail cannot be used together."
+if (($RestartGame -and $RestartMail) `
+    -or ($RestartGame -and $RestartGameAndMail) `
+    -or ($RestartMail -and $RestartGameAndMail)) {
+    throw "RestartGame, RestartMail, and RestartGameAndMail cannot be used together."
 }
 
 if ($WithMatch -and $WithoutMatch) {
@@ -766,7 +771,7 @@ $existingItems = Read-DevStackPids | Where-Object {
     Get-Process -Id $_.pid -ErrorAction SilentlyContinue
 }
 
-if (-not $RestartMail -and -not $RestartGameAndMail -and $existingItems.Count -gt 0) {
+if (-not $RestartGame -and -not $RestartMail -and -not $RestartGameAndMail -and $existingItems.Count -gt 0) {
     Write-Error "Dev stack processes are already running. Use -Status, -Stop, or -Restart."
 }
 
@@ -869,6 +874,38 @@ if ($chatBindAddr -notmatch ':(\d+)$') {
 $chatPort = [int]$Matches[1]
 $mailPort = [int](Get-EnvValue -Path $mailEnv -Name "MAIL_PORT" -Default "9003")
 $announcePort = 9004
+
+if ($RestartGame) {
+    $items = Read-DevStackPids
+    $gameItems = @($items | Where-Object { $_.name -eq "game-server" })
+    if ($gameItems.Count -ne 1) {
+        throw "RestartGame requires exactly one managed game-server entry in $PidFile."
+    }
+
+    $gameItem = $gameItems[0]
+    if (Get-Process -Id ([int]$gameItem.pid) -ErrorAction SilentlyContinue) {
+        Write-Host "Stopping game-server (PID $($gameItem.pid))" -ForegroundColor Cyan
+        Stop-ProcessTree -ProcessId ([int]$gameItem.pid)
+    }
+
+    $replacement = Start-ServiceScriptIfNeeded `
+        -Name "game-server" `
+        -ScriptPath (Join-Path $ServiceScriptDir "dev-game.ps1") `
+        -RequiredTcpPorts @($GamePort, $GameAdminPort) `
+        -ScriptArguments @(
+            "-InstanceId", $GameInstanceId,
+            "-Port", [string]$GamePort,
+            "-AdminPort", [string]$GameAdminPort
+        ) `
+        -EnvironmentOverrides (Get-GameStartEnvironment)
+    Assert-TcpPort -Name "game-server" -HostName "127.0.0.1" -Port $GamePort -ProcessId ([int]$replacement.pid) -TimeoutSeconds $WaitTimeoutSeconds
+    Assert-TcpPort -Name "game-server admin" -HostName "127.0.0.1" -Port $GameAdminPort -ProcessId ([int]$replacement.pid) -TimeoutSeconds 30
+
+    @($items | Where-Object { $_.name -ne "game-server" }) + @($replacement) |
+        ConvertTo-Json -Depth 5 |
+        Set-Content -Path $PidFile -Encoding UTF8
+    exit 0
+}
 
 if ($RestartMail) {
     if (-not $mailGrantPrivateConfigured) {
