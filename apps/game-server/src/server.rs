@@ -1022,6 +1022,7 @@ pub async fn run(
         character_progress_service,
         title_unlock_service,
         character_push_service,
+            activity_engine: crate::activity::ActivityEngine::disabled(),
         online_player_count: shared_state.online_player_count.clone(),
         player_registry: player_registry.clone(),
         online_route_coordinator: Default::default(),
@@ -2133,14 +2134,9 @@ async fn dispatch_packet(
             | MessageType::ActivityProgressReq
             | MessageType::ActivityClaimReq
             | MessageType::ActivityActionReq,
-        ) => {
-            connection.queue_error(
-                packet.header.seq,
-                "MESSAGE_NOT_SUPPORTED",
-                "activity engine is not enabled in this phase",
-            )?;
-            Ok(())
-        }
+        ) => crate::activity::handle_packet(&services.activity_engine, connection, packet)
+            .await
+            .map_err(|error| Box::new(error) as Box<dyn std::error::Error>),
         Some(MessageType::DebugCharacterTitleReq) => {
             character_title_service::handle_debug_character_title(services, connection, packet)
                 .await

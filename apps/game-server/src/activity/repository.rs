@@ -97,6 +97,31 @@ impl InMemoryActivityRepository {
             version,
         })
     }
+
+    fn detail_snapshot(
+        stored: &StoredActivity,
+        now: DateTime<Utc>,
+    ) -> Option<PublishedActivitySnapshot> {
+        let status = stored.activity.effective_status(now);
+        if !matches!(
+            status,
+            ActivityStatus::Published
+                | ActivityStatus::Running
+                | ActivityStatus::Ended
+                | ActivityStatus::Offline
+        ) {
+            return None;
+        }
+        let version_no = stored.activity.current_version?;
+        let version = stored.versions.get(&version_no)?.clone();
+        if version.published_at.is_none() {
+            return None;
+        }
+        Some(PublishedActivitySnapshot {
+            activity: stored.activity.clone(),
+            version,
+        })
+    }
 }
 
 impl ActivityRepository for InMemoryActivityRepository {
@@ -250,7 +275,7 @@ impl ActivityRepository for InMemoryActivityRepository {
             let state = self.state.read().map_err(|_| Self::lock_error())?;
             Ok(state
                 .get(activity_id)
-                .and_then(|stored| Self::snapshot(stored, now)))
+                .and_then(|stored| Self::detail_snapshot(stored, now)))
         })
     }
 

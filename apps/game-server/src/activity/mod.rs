@@ -6,8 +6,17 @@
 
 mod cache;
 mod domain;
+mod engine;
 mod repository;
 mod types;
+
+use crate::core::context::ConnectionContext;
+use crate::pb::{
+    ActivityActionReq, ActivityActionRes, ActivityClaimReq, ActivityClaimRes, ActivityDetailReq,
+    ActivityDetailRes, ActivityListReq, ActivityListRes, ActivityProgressReq, ActivityProgressRes,
+};
+use crate::protocol::{MessageType, Packet};
+use chrono::Utc;
 
 #[allow(unused_imports)]
 pub(crate) use cache::{
@@ -20,6 +29,8 @@ pub(crate) use domain::{
     ActivityType, ActivityVersion, ClaimRecord, PlayerActivityState, RewardGroup, RewardItem,
 };
 #[allow(unused_imports)]
+pub(crate) use engine::{ActivityActionRequest, ActivityActionResponse, ActivityEngine};
+#[allow(unused_imports)]
 pub(crate) use repository::{
     ActivityRepository, ActivityRepositoryError, InMemoryActivityRepository,
     PublishedActivitySnapshot,
@@ -30,6 +41,242 @@ pub(crate) use types::{
     ActivityTypeErrorCode, ActivityTypeHandler, ActivityTypeRegistry, ConfigValidator,
     PlayerContext, PlayerViewBuilder, TransactionContext,
 };
+
+pub(crate) async fn handle_packet(
+    engine: &ActivityEngine,
+    connection: &ConnectionContext,
+    packet: &Packet,
+) -> Result<(), std::io::Error> {
+    let Some(identity) = connection.ensure_authenticated_identity(packet.header.seq)? else {
+        return Ok(());
+    };
+    let now = Utc::now();
+    match packet.message_type() {
+        Some(MessageType::ActivityListReq) => {
+            if let Err(error_code) =
+                packet.decode_body::<ActivityListReq>("ACTIVITY_INVALID_REQUEST")
+            {
+                connection.queue_error(
+                    packet.header.seq,
+                    error_code,
+                    "invalid activity request body",
+                )?;
+                return Ok(());
+            }
+            let response = match engine.list(identity.character_id(), now).await {
+                Ok(snapshots) => ActivityListRes {
+                    ok: true,
+                    error_code: String::new(),
+                    server_time_ms: now.timestamp_millis(),
+                    activities: snapshots
+                        .into_iter()
+                        .map(|snapshot| summary(&snapshot, now))
+                        .collect(),
+                },
+                Err(error) => ActivityListRes {
+                    ok: false,
+                    error_code: error.code.to_string(),
+                    server_time_ms: now.timestamp_millis(),
+                    activities: Vec::new(),
+                },
+            };
+            connection.queue_message(MessageType::ActivityListRes, packet.header.seq, response)
+        }
+        Some(MessageType::ActivityDetailReq) => {
+            let request = match packet.decode_body::<ActivityDetailReq>("ACTIVITY_INVALID_REQUEST")
+            {
+                Ok(value) => value,
+                Err(error_code) => {
+                    connection.queue_error(
+                        packet.header.seq,
+                        error_code,
+                        "invalid activity request body",
+                    )?;
+                    return Ok(());
+                }
+            };
+            let response = match engine
+                .detail(
+                    identity.character_id(),
+                    &request.activity_id,
+                    request.version,
+                    now,
+                )
+                .await
+            {
+                Ok(snapshot) => ActivityDetailRes {
+                    ok: true,
+                    error_code: String::new(),
+                    activity: Some(summary(&snapshot, now)),
+                    progress_json: "{}".into(),
+                    state_revision: 0,
+                },
+                Err(error) => ActivityDetailRes {
+                    ok: false,
+                    error_code: error.code.into(),
+                    activity: None,
+                    progress_json: String::new(),
+                    state_revision: 0,
+                },
+            };
+            connection.queue_message(MessageType::ActivityDetailRes, packet.header.seq, response)
+        }
+        Some(MessageType::ActivityProgressReq) => {
+            let request =
+                match packet.decode_body::<ActivityProgressReq>("ACTIVITY_INVALID_REQUEST") {
+                    Ok(value) => value,
+                    Err(error_code) => {
+                        connection.queue_error(
+                            packet.header.seq,
+                            error_code,
+                            "invalid activity request body",
+                        )?;
+                        return Ok(());
+                    }
+                };
+            let response = match engine
+                .detail(
+                    identity.character_id(),
+                    &request.activity_id,
+                    request.version,
+                    now,
+                )
+                .await
+            {
+                Ok(snapshot) => ActivityProgressRes {
+                    ok: true,
+                    error_code: String::new(),
+                    activity_id: snapshot.activity.id,
+                    version: snapshot.version.version_no as u32,
+                    progress_json: "{}".into(),
+                    state_revision: 0,
+                },
+                Err(error) => ActivityProgressRes {
+                    ok: false,
+                    error_code: error.code.into(),
+                    activity_id: request.activity_id,
+                    version: request.version,
+                    progress_json: String::new(),
+                    state_revision: 0,
+                },
+            };
+            connection.queue_message(
+                MessageType::ActivityProgressRes,
+                packet.header.seq,
+                response,
+            )
+        }
+        Some(MessageType::ActivityClaimReq) => {
+            let request = match packet.decode_body::<ActivityClaimReq>("ACTIVITY_INVALID_REQUEST") {
+                Ok(value) => value,
+                Err(error_code) => {
+                    connection.queue_error(
+                        packet.header.seq,
+                        error_code,
+                        "invalid activity request body",
+                    )?;
+                    return Ok(());
+                }
+            };
+            let response = engine
+                .dispatch_action(
+                    identity.character_id(),
+                    ActivityActionRequest {
+                        activity_id: request.activity_id,
+                        version: request.version,
+                        stage_id: request.stage_id,
+                        action_type: "claim".into(),
+                        client_request_id: request.client_request_id,
+                    },
+                    now,
+                )
+                .await;
+            connection.queue_message(
+                MessageType::ActivityClaimRes,
+                packet.header.seq,
+                ActivityClaimRes {
+                    ok: response.ok,
+                    error_code: response.error_code.unwrap_or_default().into(),
+                    activity_id: response.activity_id,
+                    version: response.version,
+                    stage_id: response.stage_id,
+                    client_request_id: response.client_request_id,
+                    processing: response.processing,
+                    duplicate: response.duplicate,
+                    state_revision: response.state_revision,
+                },
+            )
+        }
+        Some(MessageType::ActivityActionReq) => {
+            let request = match packet.decode_body::<ActivityActionReq>("ACTIVITY_INVALID_REQUEST")
+            {
+                Ok(value) => value,
+                Err(error_code) => {
+                    connection.queue_error(
+                        packet.header.seq,
+                        error_code,
+                        "invalid activity request body",
+                    )?;
+                    return Ok(());
+                }
+            };
+            let response = engine
+                .dispatch_action(
+                    identity.character_id(),
+                    ActivityActionRequest {
+                        activity_id: request.activity_id,
+                        version: request.version,
+                        stage_id: request.stage_id,
+                        action_type: request.action_type,
+                        client_request_id: request.client_request_id,
+                    },
+                    now,
+                )
+                .await;
+            connection.queue_message(
+                MessageType::ActivityActionRes,
+                packet.header.seq,
+                ActivityActionRes {
+                    ok: response.ok,
+                    error_code: response.error_code.unwrap_or_default().into(),
+                    activity_id: response.activity_id,
+                    version: response.version,
+                    stage_id: response.stage_id,
+                    action_type: response.action_type,
+                    client_request_id: response.client_request_id,
+                    processing: response.processing,
+                    duplicate: response.duplicate,
+                    state_revision: response.state_revision,
+                },
+            )
+        }
+        _ => Ok(()),
+    }
+}
+
+fn summary(
+    snapshot: &PublishedActivitySnapshot,
+    now: chrono::DateTime<Utc>,
+) -> crate::pb::ActivitySummary {
+    let status = match snapshot.activity.effective_status(now) {
+        ActivityStatus::Draft => "draft",
+        ActivityStatus::Published => "published",
+        ActivityStatus::Running => "running",
+        ActivityStatus::Ended => "ended",
+        ActivityStatus::Offline => "offline",
+        ActivityStatus::Archived => "archived",
+    };
+    crate::pb::ActivitySummary {
+        activity_id: snapshot.activity.id.clone(),
+        version: snapshot.version.version_no as u32,
+        activity_type: snapshot.activity.activity_type.as_str().to_string(),
+        status: status.into(),
+        start_at_ms: snapshot.activity.start_at.timestamp_millis(),
+        end_at_ms: snapshot.activity.end_at.timestamp_millis(),
+        claim_deadline_ms: snapshot.activity.claim_deadline.timestamp_millis(),
+        timezone: snapshot.activity.timezone.clone(),
+    }
+}
 
 #[cfg(test)]
 mod tests {

@@ -2253,6 +2253,7 @@ mod tests {
             character_progress_service,
             title_unlock_service,
             character_push_service,
+            activity_engine: crate::activity::ActivityEngine::in_memory(),
             online_player_count: Arc::new(AtomicU64::new(0)),
             player_registry: PlayerRegistry::default(),
             online_route_coordinator: Default::default(),

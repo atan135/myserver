@@ -5,6 +5,7 @@ use std::sync::atomic::AtomicU64;
 use redis::aio::MultiplexedConnection;
 use tokio::sync::{Mutex, Notify, RwLock};
 
+use crate::activity::ActivityEngine;
 use crate::business::character_element::CharacterElementFacade;
 use crate::config::Config;
 use crate::core::character_discipline::DisciplineService;
@@ -153,6 +154,7 @@ pub struct ServiceContext {
     pub character_progress_service: CharacterProgressService,
     pub title_unlock_service: TitleUnlockService,
     pub character_push_service: CharacterPushService,
+    pub activity_engine: ActivityEngine,
     pub online_player_count: Arc<AtomicU64>,
     pub player_registry: PlayerRegistry,
     pub online_route_coordinator: OnlineRouteCoordinator,

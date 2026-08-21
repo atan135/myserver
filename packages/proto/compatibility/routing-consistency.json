@@ -80,31 +80,6 @@
         "messageType": "AuthorityMigrationCompletePush",
         "owner": "game-server",
         "reason": "The packet shape is reserved for the planned authority-migration lifecycle; no runtime producer is implemented yet."
-      },
-      {
-        "messageType": "ActivityListRes",
-        "owner": "game-server",
-        "reason": "Activity player protocol is registered in phase 1, but ActivityEngine response production is deferred until the next phase."
-      },
-      {
-        "messageType": "ActivityDetailRes",
-        "owner": "game-server",
-        "reason": "Activity player protocol is registered in phase 1, but ActivityEngine response production is deferred until the next phase."
-      },
-      {
-        "messageType": "ActivityProgressRes",
-        "owner": "game-server",
-        "reason": "Activity player protocol is registered in phase 1, but ActivityEngine response production is deferred until the next phase."
-      },
-      {
-        "messageType": "ActivityClaimRes",
-        "owner": "game-server",
-        "reason": "Activity player protocol is registered in phase 1, but ActivityEngine response production is deferred until the next phase."
-      },
-      {
-        "messageType": "ActivityActionRes",
-        "owner": "game-server",
-        "reason": "Activity player protocol is registered in phase 1, but ActivityEngine response production is deferred until the next phase."
       }
     ]
   },
