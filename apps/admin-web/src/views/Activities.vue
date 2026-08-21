@@ -17,7 +17,7 @@
         <el-form-item><el-button :loading="loading" @click="search">查询</el-button><el-button @click="resetFilters">重置</el-button></el-form-item>
       </el-form>
 
-      <el-alert v-if="loadError" type="error" :title="loadError.message" show-icon closable @close="loadError = null" />
+      <el-alert v-if="loadError" type="error" :title="loadError.message" show-icon closable @close="loadError = null"><template #default><el-button link type="primary" @click="search">重试</el-button></template></el-alert>
       <el-table :data="visibleItems" v-loading="loading" stripe empty-text="暂无活动">
         <el-table-column prop="key" label="活动标识" min-width="160" />
         <el-table-column label="类型" width="120"><template #default="{ row }">{{ typeLabel(row.activityType) }}</template></el-table-column>
