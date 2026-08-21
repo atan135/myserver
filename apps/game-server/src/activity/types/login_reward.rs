@@ -340,6 +340,15 @@ mod tests {
         let mut duplicate = config();
         duplicate["stages"] = json!([{ "stage_no": 1, "required_count": 1, "reward_group_key": "g1" }, { "stage_no": 1, "required_count": 2, "reward_group_key": "g2" }]);
         assert_eq!(handler.validate_config(&duplicate).unwrap_err().code, super::super::ActivityTypeErrorCode::InvalidConfig);
+        let mut bad_cycle = config();
+        bad_cycle["cycle_unit"] = json!("weekly");
+        assert_eq!(handler.validate_config(&bad_cycle).unwrap_err().code, super::super::ActivityTypeErrorCode::InvalidConfig);
+        let mut empty_reward = config();
+        empty_reward["stages"][0]["reward_group_key"] = json!("");
+        assert_eq!(handler.validate_config(&empty_reward).unwrap_err().code, super::super::ActivityTypeErrorCode::InvalidConfig);
+        let mut invalid_stage = config();
+        invalid_stage["stages"][0]["stage_no"] = json!(0);
+        assert_eq!(handler.validate_config(&invalid_stage).unwrap_err().code, super::super::ActivityTypeErrorCode::InvalidConfig);
     }
 
     #[test]
