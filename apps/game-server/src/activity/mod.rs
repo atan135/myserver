@@ -7,6 +7,7 @@
 mod cache;
 mod domain;
 mod repository;
+mod types;
 
 #[allow(unused_imports)]
 pub(crate) use cache::{
@@ -22,6 +23,12 @@ pub(crate) use domain::{
 pub(crate) use repository::{
     ActivityRepository, ActivityRepositoryError, InMemoryActivityRepository,
     PublishedActivitySnapshot,
+};
+#[allow(unused_imports)]
+pub(crate) use types::{
+    ActionApplier, ActionDecision, ActionEvaluator, ActionOutcome, ActivityTypeError,
+    ActivityTypeErrorCode, ActivityTypeHandler, ActivityTypeRegistry, ConfigValidator,
+    PlayerContext, PlayerViewBuilder, TransactionContext,
 };
 
 #[cfg(test)]
