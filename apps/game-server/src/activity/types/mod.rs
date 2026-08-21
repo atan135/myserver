@@ -13,11 +13,15 @@ use std::fmt;
 use std::sync::Arc;
 
 pub(crate) use login_reward::{
-    apply_game_entry, GameEntryEvent, InMemoryLoginRewardProgressRepository,
-    LoginRewardConfig, LoginRewardProgressError, LoginRewardProgressRepository,
-    LoginRewardProgressResult, LoginRewardHandler, eligible_stage_numbers, login_period_key, login_reward_claim_key,
+    GameEntryEvent, InMemoryLoginRewardProgressRepository, LoginRewardConfig, LoginRewardHandler,
+    LoginRewardProgressError, LoginRewardProgressRepository, LoginRewardProgressResult,
+    apply_game_entry, eligible_stage_numbers, login_period_key, login_reward_claim_key,
 };
-pub(crate) use lottery::LotteryHandler;
+pub(crate) use lottery::{
+    LotteryConfig, LotteryDrawCost, LotteryDrawDecision, LotteryHandler, LotterySelection,
+    LotteryState, build_lottery_voucher_exchange, draw_lottery_item, evaluate_lottery_draw,
+    lottery_period_key, normalize_lottery_state,
+};
 
 pub(crate) const ACTIVITY_TYPE_SCHEMA_VERSION: i64 = 1;
 

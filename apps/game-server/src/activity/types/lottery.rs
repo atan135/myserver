@@ -4,8 +4,12 @@ use super::{
     TransactionContext, contract_decision,
 };
 use crate::activity::{Activity, ActivityVersion, PlayerActivityState};
+use crate::core::inventory::{AssetCommandErrorCode, AssetConsumption, NormalizedAssetItem};
+use crate::core::reward_source::{AssetExchangeKind, InventoryRequiredExchange};
+use chrono::{DateTime, TimeZone, Utc};
+use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 
@@ -62,6 +66,147 @@ pub(crate) struct LotteryDrawResult {
     pub(crate) state: LotteryState,
 }
 
+/// The server-selected source for one draw. A client never supplies this value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum LotteryDrawCost {
+    Free,
+    Voucher { item_id: i32, quantity: u32 },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LotteryDrawDecision {
+    /// State after a successful asset transaction. Callers must not persist this
+    /// state until the corresponding transaction has been applied.
+    pub(crate) next_state: LotteryState,
+    pub(crate) period_key: String,
+    pub(crate) cost: LotteryDrawCost,
+}
+
+/// Returns the activity-timezone natural-day key used by the daily limit.
+pub(crate) fn lottery_period_key(
+    occurred_at: DateTime<Utc>,
+    timezone: &str,
+) -> Result<String, ActivityTypeError> {
+    let timezone: Tz = timezone
+        .parse()
+        .map_err(|_| invalid("lottery timezone is invalid"))?;
+    Ok(timezone
+        .from_utc_datetime(&occurred_at.naive_utc())
+        .date_naive()
+        .format("%Y-%m-%d")
+        .to_string())
+}
+
+/// Applies the daily-period rollover without consuming a draw. This is kept
+/// separate so detail/progress reads can normalize stale state safely.
+pub(crate) fn normalize_lottery_state(
+    config: &LotteryConfig,
+    state: &LotteryState,
+    period_key: &str,
+) -> LotteryState {
+    let mut normalized = state.clone();
+    if normalized.pool_version != Some(config.pool_version) {
+        normalized.pool_version = Some(config.pool_version);
+        normalized.free_draws_remaining = config.free_draw_count;
+        normalized.daily_draw_count = 0;
+        normalized.total_draw_count = 0;
+        normalized.last_draw_period_key = None;
+        normalized.draw_request_id = None;
+        normalized.result_item_id = None;
+        normalized.result_state = None;
+    }
+    if normalized.last_draw_period_key.as_deref() != Some(period_key) {
+        normalized.daily_draw_count = 0;
+        normalized.last_draw_period_key = Some(period_key.to_string());
+    }
+    normalized
+}
+
+/// Checks lifecycle, limits and server-owned voucher inventory, then reserves
+/// the next state in memory. Persist `next_state` only after the matching
+/// inventory/reward transaction has returned `Applied`.
+pub(crate) fn evaluate_lottery_draw(
+    activity: &Activity,
+    config: &LotteryConfig,
+    state: &LotteryState,
+    voucher_quantity: u32,
+    now: DateTime<Utc>,
+) -> Result<LotteryDrawDecision, ActivityTypeError> {
+    if !matches!(
+        activity.effective_status(now),
+        crate::activity::ActivityStatus::Running
+    ) {
+        return Err(rejected("lottery activity is not running"));
+    }
+    let period_key = lottery_period_key(now, &activity.timezone)?;
+    let mut next_state = normalize_lottery_state(config, state, &period_key);
+    if config.daily_draw_limit > 0 && next_state.daily_draw_count >= config.daily_draw_limit {
+        return Err(rejected("lottery daily draw limit reached"));
+    }
+    if config.total_draw_limit > 0 && next_state.total_draw_count >= config.total_draw_limit {
+        return Err(rejected("lottery total draw limit reached"));
+    }
+
+    let cost = if next_state.free_draws_remaining > 0 {
+        next_state.free_draws_remaining -= 1;
+        LotteryDrawCost::Free
+    } else {
+        let item_id = config
+            .voucher_item_id
+            .ok_or_else(|| rejected("lottery draw qualification is exhausted"))?;
+        if voucher_quantity == 0 {
+            return Err(rejected("lottery voucher is unavailable"));
+        }
+        LotteryDrawCost::Voucher {
+            item_id,
+            quantity: 1,
+        }
+    };
+    next_state.daily_draw_count = next_state.daily_draw_count.saturating_add(1);
+    next_state.total_draw_count = next_state.total_draw_count.saturating_add(1);
+    Ok(LotteryDrawDecision {
+        next_state,
+        period_key,
+        cost,
+    })
+}
+
+/// Commits the voucher path through the existing all-or-nothing inventory
+/// exchange contract. `asset_uid` is resolved by the server from the player's
+/// inventory; item IDs, quantities and results are never accepted from the
+/// client. The returned command must be delivered before `next_state` is saved.
+pub(crate) fn build_lottery_voucher_exchange(
+    character_id: &str,
+    exchange_id: &str,
+    asset_uid: u64,
+    voucher_item_id: i32,
+    selection: &LotterySelection,
+) -> Result<InventoryRequiredExchange, AssetCommandErrorCode> {
+    if character_id.trim().is_empty() || exchange_id.trim().is_empty() || voucher_item_id <= 0 {
+        return Err(AssetCommandErrorCode::InvalidRequest);
+    }
+    let reward = NormalizedAssetItem::new(
+        selection.item_id,
+        selection.quantity,
+        crate::core::inventory::AssetBinding::Unbound,
+    )
+    .map_err(|_| AssetCommandErrorCode::InvalidItemCount)?;
+    // The configured item ID is retained in the origin for audit/fingerprint
+    // context; the authoritative stack identity is the server-resolved UID.
+    let exchange_key = format!("{exchange_id}:voucher:{voucher_item_id}");
+    InventoryRequiredExchange::new(
+        AssetExchangeKind::Redemption,
+        exchange_key,
+        character_id.to_string(),
+        vec![AssetConsumption {
+            asset_uid,
+            count: 1,
+        }],
+        vec![reward],
+    )
+    .map_err(|error| error)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct LotteryPoolMetadata {
     pub(crate) pool_version: u32,
@@ -88,17 +233,19 @@ impl ConfigValidator for LotteryHandler {
                 message: "type config must be an object".into(),
             });
         }
-        let parsed: LotteryConfig = serde_json::from_value(config.clone()).map_err(|error| {
-            ActivityTypeError {
+        let parsed: LotteryConfig =
+            serde_json::from_value(config.clone()).map_err(|error| ActivityTypeError {
                 code: super::ActivityTypeErrorCode::InvalidConfig,
                 message: format!("lottery config is invalid: {error}"),
-            }
-        })?;
+            })?;
         validate_parsed_config(&parsed, self.schema_version()).map(|_| ())
     }
 }
 
-fn validate_parsed_config(config: &LotteryConfig, schema_version: i64) -> Result<u64, ActivityTypeError> {
+fn validate_parsed_config(
+    config: &LotteryConfig,
+    schema_version: i64,
+) -> Result<u64, ActivityTypeError> {
     if config.schema_version != schema_version {
         return Err(ActivityTypeError {
             code: super::ActivityTypeErrorCode::SchemaVersionUnsupported,
@@ -119,10 +266,7 @@ fn validate_parsed_config(config: &LotteryConfig, schema_version: i64) -> Result
     let mut ids = BTreeSet::new();
     let mut total = 0u64;
     for item in &config.pool_items {
-        if item.item_id <= 0
-            || item.quantity == 0
-            || item.weight == 0
-            || !ids.insert(item.item_id)
+        if item.item_id <= 0 || item.quantity == 0 || item.weight == 0 || !ids.insert(item.item_id)
         {
             return Err(invalid(
                 "pool item id, quantity and weight must be positive and unique",
@@ -234,7 +378,9 @@ fn secure_random_target(total_weight: u64) -> Result<u64, ActivityTypeError> {
     }
 }
 
-pub(crate) fn draw_lottery_item(config: &LotteryConfig) -> Result<LotterySelection, ActivityTypeError> {
+pub(crate) fn draw_lottery_item(
+    config: &LotteryConfig,
+) -> Result<LotterySelection, ActivityTypeError> {
     let total_weight = validate_parsed_config(config, ACTIVITY_TYPE_SCHEMA_VERSION)?;
     let target = secure_random_target(total_weight)?;
     build_lottery_selection(config, total_weight, target)
@@ -247,28 +393,71 @@ impl PlayerViewBuilder for LotteryHandler {
         _version: &ActivityVersion,
         player_state: Option<&PlayerActivityState>,
     ) -> Result<Value, ActivityTypeError> {
-        let config: LotteryConfig = serde_json::from_value(_version.type_config.clone()).map_err(|error| invalid(error.to_string()))?;
-        let state = player_state.and_then(|value| serde_json::from_value::<LotteryState>(value.type_state.clone()).ok()).unwrap_or_default();
-        Ok(json!({"type": activity.activity_type.as_str(), "schema_version": self.schema_version(), "draw_source": config.draw_source, "pool_version": config.pool_version, "free_draw_count": config.free_draw_count, "daily_draw_limit": config.daily_draw_limit, "total_draw_limit": config.total_draw_limit, "pool_total_weight": config.pool_items.iter().map(|item| item.weight).sum::<u64>(), "state": state, "contract_only": true}))
+        let config: LotteryConfig = serde_json::from_value(_version.type_config.clone())
+            .map_err(|error| invalid(error.to_string()))?;
+        let state = player_state
+            .and_then(|value| serde_json::from_value::<LotteryState>(value.type_state.clone()).ok())
+            .unwrap_or_default();
+        Ok(
+            json!({"type": activity.activity_type.as_str(), "schema_version": self.schema_version(), "draw_source": config.draw_source, "pool_version": config.pool_version, "free_draw_count": config.free_draw_count, "daily_draw_limit": config.daily_draw_limit, "total_draw_limit": config.total_draw_limit, "pool_total_weight": config.pool_items.iter().map(|item| item.weight).sum::<u64>(), "state": state, "contract_only": true}),
+        )
     }
 }
 
-fn invalid(message: impl Into<String>) -> ActivityTypeError { ActivityTypeError { code: super::ActivityTypeErrorCode::InvalidConfig, message: message.into() } }
+fn invalid(message: impl Into<String>) -> ActivityTypeError {
+    ActivityTypeError {
+        code: super::ActivityTypeErrorCode::InvalidConfig,
+        message: message.into(),
+    }
+}
+
+fn rejected(message: impl Into<String>) -> ActivityTypeError {
+    ActivityTypeError {
+        code: super::ActivityTypeErrorCode::HandlerRejected,
+        message: message.into(),
+    }
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
 
-    fn config() -> Value { json!({"schema_version": 1, "draw_source": "player_action", "pool_version": 3, "free_draw_count": 2, "voucher_item_id": 9001, "daily_draw_limit": 10, "total_draw_limit": 100, "pool_items": [{"item_id": 1001, "quantity": 1, "weight": 3}, {"item_id": 1002, "quantity": 2, "weight": 7}]}) }
+    fn config() -> Value {
+        json!({"schema_version": 1, "draw_source": "player_action", "pool_version": 3, "free_draw_count": 2, "voucher_item_id": 9001, "daily_draw_limit": 10, "total_draw_limit": 100, "pool_items": [{"item_id": 1001, "quantity": 1, "weight": 3}, {"item_id": 1002, "quantity": 2, "weight": 7}]})
+    }
 
     #[test]
     fn validates_integer_weight_pool_and_builds_contract_view() {
         let handler = LotteryHandler::default();
         handler.validate_config(&config()).unwrap();
-        let activity = Activity::new("a1", "a1", crate::activity::ActivityType::new("lottery").unwrap(), crate::activity::ActivityScope::Character, chrono::Utc::now(), chrono::Utc::now() + chrono::Duration::hours(1), chrono::Utc::now() + chrono::Duration::hours(2), "UTC").unwrap();
-        let version = ActivityVersion::draft(activity.id.clone(), 1, json!({}), config(), activity.start_at, activity.end_at, activity.claim_deadline, "UTC").unwrap();
-        let view = handler.build_player_view(&activity, &version, None).unwrap();
+        let activity = Activity::new(
+            "a1",
+            "a1",
+            crate::activity::ActivityType::new("lottery").unwrap(),
+            crate::activity::ActivityScope::Character,
+            chrono::Utc::now(),
+            chrono::Utc::now() + chrono::Duration::hours(1),
+            chrono::Utc::now() + chrono::Duration::hours(2),
+            "UTC",
+        )
+        .unwrap();
+        let mut activity = activity;
+        activity.status = crate::activity::ActivityStatus::Running;
+        let version = ActivityVersion::draft(
+            activity.id.clone(),
+            1,
+            json!({}),
+            config(),
+            activity.start_at,
+            activity.end_at,
+            activity.claim_deadline,
+            "UTC",
+        )
+        .unwrap();
+        let view = handler
+            .build_player_view(&activity, &version, None)
+            .unwrap();
         assert_eq!(view["pool_total_weight"], 10);
         assert_eq!(view["contract_only"], true);
     }
@@ -276,18 +465,45 @@ mod tests {
     #[test]
     fn rejects_invalid_pool_and_client_result_fields() {
         let handler = LotteryHandler::default();
-        let mut bad = config(); bad["pool_items"][0]["weight"] = json!(0);
-        assert_eq!(handler.validate_config(&bad).unwrap_err().code, super::super::ActivityTypeErrorCode::InvalidConfig);
-        let mut duplicate = config(); duplicate["pool_items"][1]["item_id"] = json!(1001);
-        assert_eq!(handler.validate_config(&duplicate).unwrap_err().code, super::super::ActivityTypeErrorCode::InvalidConfig);
-        let mut result = config(); result["result_item_id"] = json!(1001);
-        assert_eq!(handler.validate_config(&result).unwrap_err().code, super::super::ActivityTypeErrorCode::InvalidConfig);
+        let mut bad = config();
+        bad["pool_items"][0]["weight"] = json!(0);
+        assert_eq!(
+            handler.validate_config(&bad).unwrap_err().code,
+            super::super::ActivityTypeErrorCode::InvalidConfig
+        );
+        let mut duplicate = config();
+        duplicate["pool_items"][1]["item_id"] = json!(1001);
+        assert_eq!(
+            handler.validate_config(&duplicate).unwrap_err().code,
+            super::super::ActivityTypeErrorCode::InvalidConfig
+        );
+        let mut result = config();
+        result["result_item_id"] = json!(1001);
+        assert_eq!(
+            handler.validate_config(&result).unwrap_err().code,
+            super::super::ActivityTypeErrorCode::InvalidConfig
+        );
     }
 
     #[test]
     fn draw_handler_is_contract_only_and_never_returns_client_result() {
-        let decision = LotteryHandler::default().evaluate_action("draw", &PlayerContext { character_id: "c1".into() }, None).unwrap();
-        let outcome = LotteryHandler::default().apply_action(&decision, &mut TransactionContext { request_id: "r1".into() }).unwrap();
+        let decision = LotteryHandler::default()
+            .evaluate_action(
+                "draw",
+                &PlayerContext {
+                    character_id: "c1".into(),
+                },
+                None,
+            )
+            .unwrap();
+        let outcome = LotteryHandler::default()
+            .apply_action(
+                &decision,
+                &mut TransactionContext {
+                    request_id: "r1".into(),
+                },
+            )
+            .unwrap();
         assert!(!outcome.applied);
         assert_eq!(outcome.result["contract_only"], true);
         assert!(outcome.result.get("result_item_id").is_none());
@@ -304,7 +520,10 @@ mod tests {
         assert_eq!(second.item_id, 1002);
         assert_eq!(second.metadata.total_weight, 10);
         assert_eq!(second.metadata.pool_version, 3);
-        assert_eq!(second.metadata.random_algorithm_version, LOTTERY_RANDOM_ALGORITHM_VERSION);
+        assert_eq!(
+            second.metadata.random_algorithm_version,
+            LOTTERY_RANDOM_ALGORITHM_VERSION
+        );
         assert!(second.metadata.weight_digest.starts_with("sha256:"));
         assert_eq!(
             select_lottery_item_with_random_word(&parsed, 10)
@@ -381,6 +600,132 @@ mod tests {
         assert!([1001, 1002].contains(&selection.item_id));
         assert_eq!(selection.metadata.total_weight, 10);
         assert_eq!(selection.metadata.pool_version, 3);
+    }
+
+    #[test]
+    fn qualification_prefers_free_then_server_owned_voucher() {
+        let parsed: LotteryConfig = serde_json::from_value(config()).unwrap();
+        let activity = Activity::new(
+            "a1",
+            "a1",
+            crate::activity::ActivityType::new("lottery").unwrap(),
+            crate::activity::ActivityScope::Character,
+            chrono::Utc::now() - chrono::Duration::hours(1),
+            chrono::Utc::now() + chrono::Duration::hours(1),
+            chrono::Utc::now() + chrono::Duration::hours(2),
+            "UTC",
+        )
+        .unwrap();
+        let mut activity = activity;
+        activity.status = crate::activity::ActivityStatus::Running;
+        let now = chrono::Utc::now();
+        let first =
+            evaluate_lottery_draw(&activity, &parsed, &LotteryState::default(), 0, now).unwrap();
+        assert_eq!(first.cost, LotteryDrawCost::Free);
+        assert_eq!(first.next_state.free_draws_remaining, 1);
+
+        let mut exhausted = first.next_state.clone();
+        exhausted.free_draws_remaining = 0;
+        let voucher = evaluate_lottery_draw(&activity, &parsed, &exhausted, 1, now).unwrap();
+        assert_eq!(
+            voucher.cost,
+            LotteryDrawCost::Voucher {
+                item_id: 9001,
+                quantity: 1
+            }
+        );
+        assert_eq!(voucher.next_state.total_draw_count, 2);
+    }
+
+    #[test]
+    fn qualification_resets_daily_count_by_activity_timezone_and_enforces_limits() {
+        let mut value = config();
+        value["free_draw_count"] = json!(0);
+        value["daily_draw_limit"] = json!(1);
+        value["total_draw_limit"] = json!(2);
+        let parsed: LotteryConfig = serde_json::from_value(value).unwrap();
+        let start = chrono::Utc.with_ymd_and_hms(2026, 8, 21, 15, 0, 0).unwrap();
+        let activity = Activity::new(
+            "a1",
+            "a1",
+            crate::activity::ActivityType::new("lottery").unwrap(),
+            crate::activity::ActivityScope::Character,
+            start,
+            start + chrono::Duration::days(2),
+            start + chrono::Duration::days(3),
+            "Asia/Shanghai",
+        )
+        .unwrap();
+        let mut activity = activity;
+        activity.status = crate::activity::ActivityStatus::Running;
+        let state = LotteryState {
+            pool_version: Some(3),
+            voucher_count: 0,
+            daily_draw_count: 1,
+            total_draw_count: 1,
+            last_draw_period_key: Some("2026-08-21".into()),
+            ..Default::default()
+        };
+        let next_day = start + chrono::Duration::hours(10);
+        let decision = evaluate_lottery_draw(&activity, &parsed, &state, 1, next_day).unwrap();
+        assert_eq!(decision.period_key, "2026-08-22");
+        assert_eq!(decision.next_state.daily_draw_count, 1);
+        assert_eq!(decision.next_state.total_draw_count, 2);
+        assert!(
+            evaluate_lottery_draw(&activity, &parsed, &decision.next_state, 1, next_day).is_err()
+        );
+    }
+
+    #[test]
+    fn qualification_rejects_activity_end_and_missing_voucher() {
+        let parsed: LotteryConfig = serde_json::from_value(config()).unwrap();
+        let start = chrono::Utc::now() - chrono::Duration::hours(2);
+        let activity = Activity::new(
+            "a1",
+            "a1",
+            crate::activity::ActivityType::new("lottery").unwrap(),
+            crate::activity::ActivityScope::Character,
+            start,
+            start + chrono::Duration::hours(1),
+            start + chrono::Duration::hours(2),
+            "UTC",
+        )
+        .unwrap();
+        let mut state = LotteryState::default();
+        state.free_draws_remaining = 0;
+        let now = start + chrono::Duration::hours(1);
+        assert!(evaluate_lottery_draw(&activity, &parsed, &state, 0, now).is_err());
+        assert!(
+            evaluate_lottery_draw(
+                &activity,
+                &parsed,
+                &state,
+                0,
+                now + chrono::Duration::seconds(1)
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn voucher_exchange_contains_consume_and_grant_in_one_batch() {
+        let parsed: LotteryConfig = serde_json::from_value(config()).unwrap();
+        let selection = select_lottery_item_with_random_word(&parsed, 0).unwrap();
+        let exchange =
+            build_lottery_voucher_exchange("c1", "draw-1", 42, 9001, &selection).unwrap();
+        assert_eq!(
+            exchange.delivery_policy,
+            crate::core::inventory::RewardDeliveryPolicy::InventoryRequired
+        );
+        assert_eq!(exchange.command.operations.len(), 2);
+        assert!(matches!(
+            exchange.command.operations[0],
+            crate::core::inventory::AssetOperation::Consume { .. }
+        ));
+        assert!(matches!(
+            exchange.command.operations[1],
+            crate::core::inventory::AssetOperation::Grant { .. }
+        ));
     }
 }
 

@@ -4,17 +4,106 @@ use super::repository::{
 };
 use super::settlement::{ActivityClaimCoordinator, ClaimStatus, build_reward_order};
 use super::types::{
-    apply_game_entry, ActivityTypeRegistry, GameEntryEvent,
-    InMemoryLoginRewardProgressRepository, LoginRewardConfig, LoginRewardProgressError,
-    LoginRewardProgressRepository, LoginRewardProgressResult, PlayerContext, TransactionContext,
-    eligible_stage_numbers, login_reward_claim_key,
+    ActivityTypeRegistry, GameEntryEvent, InMemoryLoginRewardProgressRepository, LoginRewardConfig,
+    LoginRewardProgressError, LoginRewardProgressRepository, LoginRewardProgressResult,
+    LotteryConfig, LotteryDrawCost, LotterySelection, LotteryState, PlayerContext,
+    TransactionContext, apply_game_entry, build_lottery_voucher_exchange, draw_lottery_item,
+    eligible_stage_numbers, evaluate_lottery_draw, login_reward_claim_key, lottery_period_key,
+    normalize_lottery_state,
 };
-use crate::core::inventory::{AssetBinding, NormalizedAssetItem, RewardDeliveryPolicy};
+use crate::core::inventory::{
+    AssetBinding, AssetResultState, NormalizedAssetItem, RewardDeliveryPolicy,
+};
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct LotteryVoucher {
+    pub(crate) item_id: i32,
+    pub(crate) asset_uid: u64,
+    pub(crate) quantity: u32,
+}
+
+/// The real implementation must resolve the voucher from the authoritative
+/// inventory and execute the supplied all-or-nothing exchange. Tests and local
+/// harnesses can install a fake implementation through the builder below.
+pub(crate) trait LotteryAssetGateway: Send + Sync {
+    fn find_voucher<'a>(
+        &'a self,
+        character_id: &'a str,
+        item_id: i32,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<Option<LotteryVoucher>, String>> + Send + 'a>,
+    >;
+    fn apply_draw<'a>(
+        &'a self,
+        character_id: &'a str,
+        request_id: &'a str,
+        exchange: Option<crate::core::reward_source::InventoryRequiredExchange>,
+        selection: &'a LotterySelection,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<AssetResultState, String>> + Send + 'a>,
+    >;
+}
+
+struct UnavailableLotteryAssetGateway;
+
+impl LotteryAssetGateway for UnavailableLotteryAssetGateway {
+    fn find_voucher<'a>(
+        &'a self,
+        _character_id: &'a str,
+        _item_id: i32,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<Option<LotteryVoucher>, String>> + Send + 'a>,
+    > {
+        Box::pin(async { Err("lottery inventory lookup is unavailable".into()) })
+    }
+
+    fn apply_draw<'a>(
+        &'a self,
+        _character_id: &'a str,
+        _request_id: &'a str,
+        _exchange: Option<crate::core::reward_source::InventoryRequiredExchange>,
+        _selection: &'a LotterySelection,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<AssetResultState, String>> + Send + 'a>,
+    > {
+        Box::pin(async { Err("lottery asset transaction is unavailable".into()) })
+    }
+}
+
+#[derive(Clone, Default)]
+struct LotteryStateStore {
+    states: Arc<std::sync::RwLock<HashMap<String, LotteryState>>>,
+    locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
+}
+
+impl LotteryStateStore {
+    async fn lock_for(&self, key: &str) -> Arc<Mutex<()>> {
+        let mut locks = self.locks.lock().await;
+        locks
+            .entry(key.to_string())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
+    }
+
+    fn get(&self, key: &str) -> LotteryState {
+        self.states
+            .read()
+            .ok()
+            .and_then(|states| states.get(key).cloned())
+            .unwrap_or_default()
+    }
+
+    fn set(&self, key: &str, state: LotteryState) {
+        if let Ok(mut states) = self.states.write() {
+            states.insert(key.to_string(), state);
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ActivityEngineError {
@@ -62,6 +151,8 @@ pub(crate) struct ActivityEngine {
     login_progress: Arc<dyn LoginRewardProgressRepository>,
     enabled: bool,
     claim_coordinator: Option<ActivityClaimCoordinator>,
+    lottery_states: LotteryStateStore,
+    lottery_assets: Arc<dyn LotteryAssetGateway>,
 }
 
 #[derive(Default)]
@@ -79,6 +170,8 @@ impl ActivityEngine {
             login_progress: Arc::new(InMemoryLoginRewardProgressRepository::default()),
             enabled: true,
             claim_coordinator: None,
+            lottery_states: LotteryStateStore::default(),
+            lottery_assets: Arc::new(UnavailableLotteryAssetGateway),
         }
     }
 
@@ -102,6 +195,14 @@ impl ActivityEngine {
         repository: Arc<dyn LoginRewardProgressRepository>,
     ) -> Self {
         self.login_progress = repository;
+        self
+    }
+
+    pub(crate) fn with_lottery_asset_gateway(
+        mut self,
+        gateway: Arc<dyn LotteryAssetGateway>,
+    ) -> Self {
+        self.lottery_assets = gateway;
         self
     }
 
@@ -147,10 +248,15 @@ impl ActivityEngine {
             ));
         }
         self.registry
-            .validate_config(snapshot.activity.activity_type.as_str(), &snapshot.version.type_config)
+            .validate_config(
+                snapshot.activity.activity_type.as_str(),
+                &snapshot.version.type_config,
+            )
             .map_err(|error| ActivityEngineError::new("ACTIVITY_INVALID_CONFIG", error.message))?;
-        let config: LoginRewardConfig = serde_json::from_value(snapshot.version.type_config.clone())
-            .map_err(|error| ActivityEngineError::new("ACTIVITY_INVALID_CONFIG", error.to_string()))?;
+        let config: LoginRewardConfig =
+            serde_json::from_value(snapshot.version.type_config.clone()).map_err(|error| {
+                ActivityEngineError::new("ACTIVITY_INVALID_CONFIG", error.to_string())
+            })?;
         let event = GameEntryEvent {
             character_id: character_id.to_string(),
             activity_id: activity_id.to_string(),
@@ -204,20 +310,31 @@ impl ActivityEngine {
 
     fn map_login_progress_error(error: LoginRewardProgressError) -> ActivityEngineError {
         match error {
-            LoginRewardProgressError::InvalidEvent(message) =>
-                ActivityEngineError::new("ACTIVITY_INVALID_REQUEST", message),
-            LoginRewardProgressError::InvalidConfig(message) =>
-                ActivityEngineError::new("ACTIVITY_INVALID_CONFIG", message),
-            LoginRewardProgressError::ActivityNotActive =>
-                ActivityEngineError::new("ACTIVITY_NOT_STARTED", "activity is not active"),
-            LoginRewardProgressError::VersionConflict =>
-                ActivityEngineError::new("ACTIVITY_VERSION_CONFLICT", "login progress changed concurrently"),
-            LoginRewardProgressError::StorageUnavailable =>
-                ActivityEngineError::new("ACTIVITY_STORAGE_UNAVAILABLE", "activity storage unavailable"),
-            LoginRewardProgressError::NotQualified =>
-                ActivityEngineError::new("ACTIVITY_QUALIFICATION_NOT_MET", "login reward qualification is not met"),
-            LoginRewardProgressError::AlreadyClaimed =>
-                ActivityEngineError::new("ACTIVITY_ALREADY_CLAIMED", "login reward stage has already been claimed"),
+            LoginRewardProgressError::InvalidEvent(message) => {
+                ActivityEngineError::new("ACTIVITY_INVALID_REQUEST", message)
+            }
+            LoginRewardProgressError::InvalidConfig(message) => {
+                ActivityEngineError::new("ACTIVITY_INVALID_CONFIG", message)
+            }
+            LoginRewardProgressError::ActivityNotActive => {
+                ActivityEngineError::new("ACTIVITY_NOT_STARTED", "activity is not active")
+            }
+            LoginRewardProgressError::VersionConflict => ActivityEngineError::new(
+                "ACTIVITY_VERSION_CONFLICT",
+                "login progress changed concurrently",
+            ),
+            LoginRewardProgressError::StorageUnavailable => ActivityEngineError::new(
+                "ACTIVITY_STORAGE_UNAVAILABLE",
+                "activity storage unavailable",
+            ),
+            LoginRewardProgressError::NotQualified => ActivityEngineError::new(
+                "ACTIVITY_QUALIFICATION_NOT_MET",
+                "login reward qualification is not met",
+            ),
+            LoginRewardProgressError::AlreadyClaimed => ActivityEngineError::new(
+                "ACTIVITY_ALREADY_CLAIMED",
+                "login reward stage has already been claimed",
+            ),
         }
     }
 
@@ -229,15 +346,21 @@ impl ActivityEngine {
         base: ActivityActionResponse,
         automatic: bool,
     ) -> ActivityActionResponse {
-        let config: LoginRewardConfig = match serde_json::from_value(snapshot.version.type_config.clone()) {
-            Ok(config) => config,
-            Err(_) => return Self::failed(base, "ACTIVITY_INVALID_CONFIG"),
-        };
-        if (automatic && config.claim_mode != "automatic") || (!automatic && config.claim_mode != "manual") {
+        let config: LoginRewardConfig =
+            match serde_json::from_value(snapshot.version.type_config.clone()) {
+                Ok(config) => config,
+                Err(_) => return Self::failed(base, "ACTIVITY_INVALID_CONFIG"),
+            };
+        if (automatic && config.claim_mode != "automatic")
+            || (!automatic && config.claim_mode != "manual")
+        {
             return Self::failed(base, "ACTIVITY_INVALID_ACTION");
         }
         let stage = match request.stage_id.parse::<u32>().ok().and_then(|stage_no| {
-            config.stages.iter().find(|stage| stage.stage_no == stage_no)
+            config
+                .stages
+                .iter()
+                .find(|stage| stage.stage_no == stage_no)
         }) {
             Some(stage) => stage,
             None => return Self::failed(base, "ACTIVITY_QUALIFICATION_NOT_MET"),
@@ -262,18 +385,23 @@ impl ActivityEngine {
         if count < stage.required_count {
             return Self::failed(base, "ACTIVITY_QUALIFICATION_NOT_MET");
         }
-        let semantic_claim_key = login_reward_claim_key(
-            &request.stage_id,
-            &period_key,
-            snapshot.version.version_no,
-        );
-        if state.claimed_stage_ids.iter().any(|value| value == &semantic_claim_key) {
+        let semantic_claim_key =
+            login_reward_claim_key(&request.stage_id, &period_key, snapshot.version.version_no);
+        if state
+            .claimed_stage_ids
+            .iter()
+            .any(|value| value == &semantic_claim_key)
+        {
             let mut response = ActivityActionResponse { ok: true, ..base };
             response.duplicate = true;
             response.state_revision = revision as u64;
             return response;
         }
-        let items = match Self::reward_items(&snapshot.version.public_config, &stage.reward_group_key, character_id) {
+        let items = match Self::reward_items(
+            &snapshot.version.public_config,
+            &stage.reward_group_key,
+            character_id,
+        ) {
             Ok(items) if !items.is_empty() => items,
             _ => return Self::failed(base, "ACTIVITY_MANUAL_REVIEW"),
         };
@@ -326,9 +454,22 @@ impl ActivityEngine {
                         ..base
                     },
                     Err(LoginRewardProgressError::VersionConflict) => {
-                        let latest = self.login_progress.load(character_id, &request.activity_id, snapshot.version.version_no);
-                        if latest.ok().is_some_and(|(state, _)| state.claimed_stage_ids.iter().any(|value| value == &semantic_claim_key)) {
-                            ActivityActionResponse { ok: true, duplicate: true, ..base }
+                        let latest = self.login_progress.load(
+                            character_id,
+                            &request.activity_id,
+                            snapshot.version.version_no,
+                        );
+                        if latest.ok().is_some_and(|(state, _)| {
+                            state
+                                .claimed_stage_ids
+                                .iter()
+                                .any(|value| value == &semantic_claim_key)
+                        }) {
+                            ActivityActionResponse {
+                                ok: true,
+                                duplicate: true,
+                                ..base
+                            }
                         } else {
                             Self::failed(base, "ACTIVITY_RETRYABLE_FAILURE")
                         }
@@ -343,7 +484,9 @@ impl ActivityEngine {
                 response
             }
             ClaimStatus::RetryableFailure => Self::failed(base, "ACTIVITY_RETRYABLE_FAILURE"),
-            ClaimStatus::ReconciliationPending => Self::failed(base, "ACTIVITY_RECONCILIATION_PENDING"),
+            ClaimStatus::ReconciliationPending => {
+                Self::failed(base, "ACTIVITY_RECONCILIATION_PENDING")
+            }
             ClaimStatus::ManualReview => Self::failed(base, "ACTIVITY_MANUAL_REVIEW"),
         }
     }
@@ -355,23 +498,45 @@ impl ActivityEngine {
     ) -> Result<Vec<NormalizedAssetItem>, ()> {
         let groups = public_config.get("reward_groups").ok_or(())?;
         let group = if let Some(groups) = groups.as_array() {
-            groups.iter().find(|group| {
-                group.get("key").and_then(|value| value.as_str()) == Some(reward_group_key)
-                    || group.get("reward_group_key").and_then(|value| value.as_str()) == Some(reward_group_key)
-            }).ok_or(())?
+            groups
+                .iter()
+                .find(|group| {
+                    group.get("key").and_then(|value| value.as_str()) == Some(reward_group_key)
+                        || group
+                            .get("reward_group_key")
+                            .and_then(|value| value.as_str())
+                            == Some(reward_group_key)
+                })
+                .ok_or(())?
         } else {
             groups.get(reward_group_key).ok_or(())?
         };
-        let items = group.get("items").and_then(|value| value.as_array()).ok_or(())?;
-        items.iter().map(|item| {
-            let item_id = item.get("item_id").or_else(|| item.get("asset_id")).and_then(|value| value.as_i64()).ok_or(())? as i32;
-            let count = item.get("count").or_else(|| item.get("quantity")).and_then(|value| value.as_u64()).ok_or(())? as u32;
-            let binding = match item.get("binding").and_then(|value| value.as_str()) {
-                Some("character_bound") => AssetBinding::CharacterBound { character_id: character_id.to_string() },
-                _ => AssetBinding::Unbound,
-            };
-            NormalizedAssetItem::new(item_id, count, binding).map_err(|_| ())
-        }).collect()
+        let items = group
+            .get("items")
+            .and_then(|value| value.as_array())
+            .ok_or(())?;
+        items
+            .iter()
+            .map(|item| {
+                let item_id = item
+                    .get("item_id")
+                    .or_else(|| item.get("asset_id"))
+                    .and_then(|value| value.as_i64())
+                    .ok_or(())? as i32;
+                let count = item
+                    .get("count")
+                    .or_else(|| item.get("quantity"))
+                    .and_then(|value| value.as_u64())
+                    .ok_or(())? as u32;
+                let binding = match item.get("binding").and_then(|value| value.as_str()) {
+                    Some("character_bound") => AssetBinding::CharacterBound {
+                        character_id: character_id.to_string(),
+                    },
+                    _ => AssetBinding::Unbound,
+                };
+                NormalizedAssetItem::new(item_id, count, binding).map_err(|_| ())
+            })
+            .collect()
     }
 
     pub(crate) async fn list(
@@ -434,19 +599,50 @@ impl ActivityEngine {
     ) -> Result<serde_json::Value, ActivityEngineError> {
         let player_state = if snapshot.activity.activity_type.as_str() == "login_reward" {
             self.login_progress
-                .load_activity_state(character_id, &snapshot.activity.id, snapshot.version.version_no)
+                .load_activity_state(
+                    character_id,
+                    &snapshot.activity.id,
+                    snapshot.version.version_no,
+                )
                 .map_err(Self::map_login_progress_error)?
+        } else if snapshot.activity.activity_type.as_str() == "lottery" {
+            let key = format!(
+                "{character_id}:{}:{}",
+                snapshot.activity.id, snapshot.version.version_no
+            );
+            let state = self.lottery_states.get(&key);
+            Some(super::domain::PlayerActivityState {
+                character_id: character_id.to_string(),
+                activity_id: snapshot.activity.id.clone(),
+                version_no: snapshot.version.version_no,
+                current_stage_id: state.draw_request_id.clone(),
+                progress: serde_json::json!({
+                    "daily_draw_count": state.daily_draw_count,
+                    "total_draw_count": state.total_draw_count,
+                    "last_draw_period_key": state.last_draw_period_key,
+                }),
+                type_state: serde_json::to_value(&state).unwrap_or_else(|_| serde_json::json!({})),
+                state_revision: state.total_draw_count as i64,
+            })
         } else {
             None
         };
-        let mut view = self.registry
+        let mut view = self
+            .registry
             .build_player_view(&snapshot.activity, &snapshot.version, player_state.as_ref())
             .map_err(|error| ActivityEngineError::new("ACTIVITY_INVALID_CONFIG", error.message))?;
         if snapshot.activity.activity_type.as_str() == "login_reward" {
-            if let Some(last_period_key) = view.get("last_period_key").and_then(|value| value.as_str()) {
-                let current_period = super::types::login_period_key(now, &snapshot.activity.timezone)
-                    .map_err(Self::map_login_progress_error)?;
-                view["today_status"] = serde_json::json!(if last_period_key == current_period { "logged_in" } else { "not_logged_in" });
+            if let Some(last_period_key) =
+                view.get("last_period_key").and_then(|value| value.as_str())
+            {
+                let current_period =
+                    super::types::login_period_key(now, &snapshot.activity.timezone)
+                        .map_err(Self::map_login_progress_error)?;
+                view["today_status"] = serde_json::json!(if last_period_key == current_period {
+                    "logged_in"
+                } else {
+                    "not_logged_in"
+                });
             }
         }
         Ok(view)
@@ -560,6 +756,17 @@ impl ActivityEngine {
                 .insert(request_key, response.clone());
             return response;
         }
+        if snapshot.activity.activity_type.as_str() == "lottery" && request.action_type == "draw" {
+            let response = self
+                .draw_lottery(character_id, &request, &snapshot, base.clone(), now)
+                .await;
+            self.request_state
+                .lock()
+                .await
+                .seen
+                .insert(request_key, response.clone());
+            return response;
+        }
         let mut transaction = TransactionContext {
             request_id: request.client_request_id.clone(),
         };
@@ -655,6 +862,127 @@ impl ActivityEngine {
         response
     }
 
+    async fn draw_lottery(
+        &self,
+        character_id: &str,
+        request: &ActivityActionRequest,
+        snapshot: &PublishedActivitySnapshot,
+        base: ActivityActionResponse,
+        now: DateTime<Utc>,
+    ) -> ActivityActionResponse {
+        let config: LotteryConfig =
+            match serde_json::from_value(snapshot.version.type_config.clone()) {
+                Ok(config) => config,
+                Err(_) => return Self::failed(base, "ACTIVITY_INVALID_CONFIG"),
+            };
+        let state_key = format!(
+            "{character_id}:{}:{}",
+            snapshot.activity.id, snapshot.version.version_no
+        );
+        let lock = self.lottery_states.lock_for(&state_key).await;
+        let _guard = lock.lock().await;
+        let current = self.lottery_states.get(&state_key);
+        let voucher_item_id = config.voucher_item_id;
+        let needs_voucher = lottery_period_key(now, &snapshot.activity.timezone)
+            .ok()
+            .map(|period| {
+                normalize_lottery_state(&config, &current, &period).free_draws_remaining == 0
+            })
+            .unwrap_or(true);
+        let voucher = if needs_voucher {
+            match voucher_item_id {
+                Some(item_id) => match self
+                    .lottery_assets
+                    .find_voucher(character_id, item_id)
+                    .await
+                {
+                    Ok(value) => value,
+                    Err(_) => return Self::failed(base, "ACTIVITY_RETRYABLE_FAILURE"),
+                },
+                None => None,
+            }
+        } else {
+            None
+        };
+        let voucher_quantity = voucher.map(|value| value.quantity).unwrap_or(0);
+        let decision = match evaluate_lottery_draw(
+            &snapshot.activity,
+            &config,
+            &current,
+            voucher_quantity,
+            now,
+        ) {
+            Ok(decision) => decision,
+            Err(error) => {
+                let code = match error.code {
+                    super::types::ActivityTypeErrorCode::HandlerRejected => {
+                        if error.message.contains("not running") {
+                            "ACTIVITY_ENDED"
+                        } else {
+                            "ACTIVITY_QUALIFICATION_NOT_MET"
+                        }
+                    }
+                    _ => "ACTIVITY_INVALID_CONFIG",
+                };
+                return Self::failed(base, code);
+            }
+        };
+        let selection = match draw_lottery_item(&config) {
+            Ok(selection) => selection,
+            Err(_) => return Self::failed(base, "ACTIVITY_RETRYABLE_FAILURE"),
+        };
+        let exchange = match decision.cost {
+            LotteryDrawCost::Free => None,
+            LotteryDrawCost::Voucher { item_id, .. } => {
+                let Some(voucher) = voucher else {
+                    return Self::failed(base, "ACTIVITY_QUALIFICATION_NOT_MET");
+                };
+                if voucher.item_id != item_id || voucher.quantity == 0 {
+                    return Self::failed(base, "ACTIVITY_QUALIFICATION_NOT_MET");
+                }
+                match build_lottery_voucher_exchange(
+                    character_id,
+                    &format!("{}:{}", request.activity_id, request.client_request_id),
+                    voucher.asset_uid,
+                    item_id,
+                    &selection,
+                ) {
+                    Ok(exchange) => Some(exchange),
+                    Err(_) => return Self::failed(base, "ACTIVITY_MANUAL_REVIEW"),
+                }
+            }
+        };
+        let result = match self
+            .lottery_assets
+            .apply_draw(
+                character_id,
+                &request.client_request_id,
+                exchange,
+                &selection,
+            )
+            .await
+        {
+            Ok(result) => result,
+            Err(_) => return Self::failed(base, "ACTIVITY_RETRYABLE_FAILURE"),
+        };
+        match result {
+            AssetResultState::Applied => {
+                let mut next = decision.next_state;
+                next.draw_request_id = Some(request.client_request_id.clone());
+                next.result_item_id = Some(selection.item_id);
+                next.result_state = Some("granted".into());
+                self.lottery_states.set(&state_key, next);
+                ActivityActionResponse {
+                    ok: true,
+                    state_revision: current.total_draw_count.saturating_add(1) as u64,
+                    ..base
+                }
+            }
+            AssetResultState::Unknown => Self::failed(base, "ACTIVITY_RECONCILIATION_PENDING"),
+            AssetResultState::NotApplied => Self::failed(base, "ACTIVITY_RETRYABLE_FAILURE"),
+        }
+    }
+
     fn validate_read_status(
         snapshot: &PublishedActivitySnapshot,
         now: DateTime<Utc>,
@@ -717,8 +1045,128 @@ impl ActivityEngine {
 mod tests {
     use super::*;
     use crate::activity::{Activity, ActivityScope, ActivityType, ActivityVersion};
+    use crate::core::inventory::AssetOperation;
     use chrono::{Duration as ChronoDuration, TimeZone};
     use serde_json::json;
+
+    #[derive(Clone)]
+    struct FakeLotteryGateway {
+        voucher: Arc<Mutex<Option<LotteryVoucher>>>,
+        result: AssetResultState,
+        applied: Arc<Mutex<u32>>,
+    }
+
+    impl FakeLotteryGateway {
+        fn free() -> Self {
+            Self {
+                voucher: Arc::new(Mutex::new(None)),
+                result: AssetResultState::Applied,
+                applied: Arc::new(Mutex::new(0)),
+            }
+        }
+
+        fn voucher() -> Self {
+            Self {
+                voucher: Arc::new(Mutex::new(Some(LotteryVoucher {
+                    item_id: 9001,
+                    asset_uid: 42,
+                    quantity: 10,
+                }))),
+                result: AssetResultState::Applied,
+                applied: Arc::new(Mutex::new(0)),
+            }
+        }
+    }
+
+    impl LotteryAssetGateway for FakeLotteryGateway {
+        fn find_voucher<'a>(
+            &'a self,
+            _character_id: &'a str,
+            _item_id: i32,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<Output = Result<Option<LotteryVoucher>, String>>
+                    + Send
+                    + 'a,
+            >,
+        > {
+            let voucher = self.voucher.clone();
+            Box::pin(async move { Ok(voucher.lock().await.clone()) })
+        }
+
+        fn apply_draw<'a>(
+            &'a self,
+            _character_id: &'a str,
+            _request_id: &'a str,
+            exchange: Option<crate::core::reward_source::InventoryRequiredExchange>,
+            _selection: &'a LotterySelection,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<AssetResultState, String>> + Send + 'a>,
+        > {
+            let result = self.result;
+            let applied = self.applied.clone();
+            Box::pin(async move {
+                if let Some(exchange) = exchange {
+                    assert!(matches!(
+                        exchange.command.operations[0],
+                        AssetOperation::Consume { .. }
+                    ));
+                    assert!(matches!(
+                        exchange.command.operations[1],
+                        AssetOperation::Grant { .. }
+                    ));
+                }
+                *applied.lock().await += 1;
+                Ok(result)
+            })
+        }
+    }
+
+    async fn lottery_fixture(
+        now: DateTime<Utc>,
+        config: serde_json::Value,
+        gateway: Arc<dyn LotteryAssetGateway>,
+    ) -> ActivityEngine {
+        let repo = Arc::new(InMemoryActivityRepository::default());
+        let activity = Activity::new(
+            "lottery-1",
+            "lottery-1",
+            ActivityType::new("lottery").unwrap(),
+            ActivityScope::Character,
+            now - ChronoDuration::hours(1),
+            now + ChronoDuration::hours(1),
+            now + ChronoDuration::hours(2),
+            "UTC",
+        )
+        .unwrap();
+        let version = ActivityVersion::draft(
+            activity.id.clone(),
+            1,
+            json!({}),
+            config,
+            activity.start_at,
+            activity.end_at,
+            activity.claim_deadline,
+            "UTC",
+        )
+        .unwrap();
+        repo.save_draft(activity.clone(), version).await.unwrap();
+        repo.publish(&activity.id, 1, None).await.unwrap();
+        ActivityEngine::new(repo).with_lottery_asset_gateway(gateway)
+    }
+
+    fn lottery_config(free: u32, daily: u32, total: u32) -> serde_json::Value {
+        json!({
+            "schema_version": 1,
+            "draw_source": "player_action",
+            "pool_version": 1,
+            "free_draw_count": free,
+            "voucher_item_id": 9001,
+            "daily_draw_limit": daily,
+            "total_draw_limit": total,
+            "pool_items": [{"item_id": 1001, "quantity": 1, "weight": 1}]
+        })
+    }
 
     async fn fixture_with_window(
         now: DateTime<Utc>,
@@ -1009,6 +1457,85 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn lottery_draw_consumes_free_once_and_replays_same_request() {
+        let now = Utc.with_ymd_and_hms(2026, 8, 21, 1, 0, 0).unwrap();
+        let gateway = Arc::new(FakeLotteryGateway::free());
+        let engine = lottery_fixture(now, lottery_config(1, 2, 2), gateway.clone()).await;
+        let request = ActivityActionRequest {
+            activity_id: "lottery-1".into(),
+            version: 1,
+            stage_id: String::new(),
+            action_type: "draw".into(),
+            client_request_id: "draw-free-1".into(),
+        };
+        let first = engine
+            .dispatch_action("character-1", request.clone(), now)
+            .await;
+        assert!(first.ok);
+        assert_eq!(*gateway.applied.lock().await, 1);
+        let duplicate = engine.dispatch_action("character-1", request, now).await;
+        assert!(duplicate.ok);
+        assert!(duplicate.duplicate);
+        assert_eq!(*gateway.applied.lock().await, 1);
+    }
+
+    #[tokio::test]
+    async fn lottery_voucher_path_uses_atomic_exchange_and_limit() {
+        let now = Utc.with_ymd_and_hms(2026, 8, 21, 1, 0, 0).unwrap();
+        let gateway = Arc::new(FakeLotteryGateway::voucher());
+        let engine = lottery_fixture(now, lottery_config(0, 1, 1), gateway.clone()).await;
+        let request = |id: &str| ActivityActionRequest {
+            activity_id: "lottery-1".into(),
+            version: 1,
+            stage_id: String::new(),
+            action_type: "draw".into(),
+            client_request_id: id.into(),
+        };
+        let first = engine
+            .dispatch_action("character-1", request("draw-voucher-1"), now)
+            .await;
+        assert!(first.ok);
+        assert_eq!(*gateway.applied.lock().await, 1);
+        tokio::time::sleep(std::time::Duration::from_millis(110)).await;
+        let limited = engine
+            .dispatch_action("character-1", request("draw-voucher-2"), now)
+            .await;
+        assert_eq!(limited.error_code, Some("ACTIVITY_QUALIFICATION_NOT_MET"));
+        assert_eq!(*gateway.applied.lock().await, 1);
+    }
+
+    #[tokio::test]
+    async fn lottery_draw_rejects_ended_and_offline_activity() {
+        let now = Utc.with_ymd_and_hms(2026, 8, 21, 1, 0, 0).unwrap();
+        let gateway = Arc::new(FakeLotteryGateway::free());
+        let ended = lottery_fixture(
+            now - ChronoDuration::hours(3),
+            lottery_config(1, 1, 1),
+            gateway.clone(),
+        )
+        .await;
+        let request = ActivityActionRequest {
+            activity_id: "lottery-1".into(),
+            version: 1,
+            stage_id: String::new(),
+            action_type: "draw".into(),
+            client_request_id: "draw-ended".into(),
+        };
+        let ended_response = ended
+            .dispatch_action("character-1", request.clone(), now)
+            .await;
+        assert_eq!(ended_response.error_code, Some("ACTIVITY_ENDED"));
+
+        let offline = lottery_fixture(now, lottery_config(1, 1, 1), gateway.clone()).await;
+        // The published snapshot is running at `now`; taking the activity
+        // offline exercises the lifecycle gate before lottery qualification.
+        offline.repository.offline("lottery-1", 1).await.unwrap();
+        let offline_response = offline.dispatch_action("character-1", request, now).await;
+        assert_eq!(offline_response.error_code, Some("ACTIVITY_OFFLINE"));
+        assert_eq!(*gateway.applied.lock().await, 0);
+    }
+
+    #[tokio::test]
     async fn trusted_game_entry_updates_login_progress_and_is_idempotent() {
         let now = Utc.with_ymd_and_hms(2026, 8, 21, 1, 0, 0).unwrap();
         let engine = fixture(now).await;
@@ -1035,11 +1562,19 @@ mod tests {
         let now = Utc.with_ymd_and_hms(2026, 8, 21, 1, 0, 0).unwrap();
         let engine = fixture(now).await;
         assert_eq!(
-            engine.on_game_entry("character-1", "a1", 9, now).await.unwrap_err().code,
+            engine
+                .on_game_entry("character-1", "a1", 9, now)
+                .await
+                .unwrap_err()
+                .code,
             "ACTIVITY_INVALID_VERSION"
         );
         assert_eq!(
-            engine.on_game_entry("", "a1", 1, now).await.unwrap_err().code,
+            engine
+                .on_game_entry("", "a1", 1, now)
+                .await
+                .unwrap_err()
+                .code,
             "ACTIVITY_AUTH_REQUIRED"
         );
 
@@ -1050,7 +1585,11 @@ mod tests {
         )
         .await;
         assert_eq!(
-            ended.on_game_entry("character-1", "a1", 1, now).await.unwrap_err().code,
+            ended
+                .on_game_entry("character-1", "a1", 1, now)
+                .await
+                .unwrap_err()
+                .code,
             "ACTIVITY_ENDED"
         );
 
@@ -1062,7 +1601,11 @@ mod tests {
         .await;
         repo.offline("a1", 1).await.unwrap();
         assert_eq!(
-            offline.on_game_entry("character-1", "a1", 1, now).await.unwrap_err().code,
+            offline
+                .on_game_entry("character-1", "a1", 1, now)
+                .await
+                .unwrap_err()
+                .code,
             "ACTIVITY_OFFLINE"
         );
     }
