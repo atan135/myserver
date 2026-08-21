@@ -41,6 +41,10 @@ export type AdminPermission =
   | "proxy.maintenance.write"
   | "proxy.rollout.write"
   | "proxy.route.write"
+  | "activities.read"
+  | "activities.write"
+  | "activities.publish"
+  | "activities.records.read"
   | "service.shutdown";
 
 export const ROLE_PERMISSIONS: Record<AdminRole, readonly AdminPermission[] | "*"> = {
@@ -50,7 +54,8 @@ export const ROLE_PERMISSIONS: Record<AdminRole, readonly AdminPermission[] | "*
     "players.read",
     "maintenance.read",
     "monitoring.read",
-    "id.read"
+    "id.read",
+    "activities.read"
   ],
   operator: [
     "audit.read",

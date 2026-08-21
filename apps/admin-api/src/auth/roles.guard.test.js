@@ -69,7 +69,8 @@ test("admin-api role permission matrix covers read, player, GM, maintenance, mon
     "players.read",
     "maintenance.read",
     "monitoring.read",
-    "id.read"
+    "id.read",
+    "activities.read"
   ]);
 
   assert.equal(roleHasPermission("viewer", "players.read"), true);

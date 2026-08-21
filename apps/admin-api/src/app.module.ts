@@ -39,6 +39,8 @@ import { MyforgeWebsocketGateway } from "./myforge/myforge-websocket.js";
 import { MyforgeOrchestrator } from "./myforge/myforge-orchestrator.js";
 import { MyforgeController } from "./myforge/myforge.controller.js";
 import { HealthController } from "./health.controller.js";
+import { ActivityController } from "./activity/activity.controller.js";
+import { ActivityControlUnavailableService } from "./activity/activity-control.service.js";
 import { RequestLogMiddleware } from "./common/request-log.middleware.js";
 import {
   ADMIN_CONFIG,
@@ -60,7 +62,8 @@ import {
   ADMIN_STORE,
   MYFORGE_GATEWAY,
   MYFORGE_ORCHESTRATOR,
-  MYFORGE_STORE
+  MYFORGE_STORE,
+  ADMIN_ACTIVITY_CONTROL
 } from "./tokens.js";
 
 class GameDbPoolShutdown implements OnModuleDestroy {
@@ -88,7 +91,8 @@ class GameDbPoolShutdown implements OnModuleDestroy {
     RolloutController,
     AdminOperationController,
     MyforgeController,
-    HealthController
+    HealthController,
+    ActivityController
   ],
   providers: [
     AuthService,
@@ -104,6 +108,7 @@ class GameDbPoolShutdown implements OnModuleDestroy {
     GameDbPoolShutdown,
     MonitoringService,
     RoomTransferService,
+    { provide: ADMIN_ACTIVITY_CONTROL, useClass: ActivityControlUnavailableService },
     {
       provide: ADMIN_CONFIG,
       useFactory: () => getConfig()
