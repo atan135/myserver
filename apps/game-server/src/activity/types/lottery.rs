@@ -4,8 +4,12 @@ use super::{
     TransactionContext, contract_decision,
 };
 use crate::activity::{Activity, ActivityVersion, PlayerActivityState};
-use serde_json::{Value, json};
 use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
+use std::collections::BTreeSet;
+
+pub(crate) const LOTTERY_RANDOM_ALGORITHM_VERSION: &str = "os_rng_rejection_v1";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -58,6 +62,21 @@ pub(crate) struct LotteryDrawResult {
     pub(crate) state: LotteryState,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct LotteryPoolMetadata {
+    pub(crate) pool_version: u32,
+    pub(crate) total_weight: u64,
+    pub(crate) weight_digest: String,
+    pub(crate) random_algorithm_version: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct LotterySelection {
+    pub(crate) item_id: i32,
+    pub(crate) quantity: u32,
+    pub(crate) metadata: LotteryPoolMetadata,
+}
+
 #[derive(Default)]
 pub(crate) struct LotteryHandler;
 
@@ -69,17 +88,156 @@ impl ConfigValidator for LotteryHandler {
                 message: "type config must be an object".into(),
             });
         }
-        let parsed: LotteryConfig = serde_json::from_value(config.clone()).map_err(|error| ActivityTypeError { code: super::ActivityTypeErrorCode::InvalidConfig, message: format!("lottery config is invalid: {error}") })?;
-        if parsed.schema_version != self.schema_version() { return Err(ActivityTypeError { code: super::ActivityTypeErrorCode::SchemaVersionUnsupported, message: "lottery schema version is unsupported".into() }); }
-        if parsed.draw_source != "player_action" || parsed.pool_version == 0 { return Err(invalid("draw_source/player pool version is invalid")); }
-        if let Some(item_id) = parsed.voucher_item_id { if item_id <= 0 { return Err(invalid("voucher_item_id must be positive")); } }
-        if parsed.pool_items.is_empty() { return Err(invalid("pool_items must not be empty")); }
-        let mut ids = std::collections::BTreeSet::new();
-        let mut total = 0u64;
-        for item in parsed.pool_items { if item.item_id <= 0 || item.quantity == 0 || item.weight == 0 || !ids.insert(item.item_id) { return Err(invalid("pool item id, quantity and weight must be positive and unique")); } total = total.checked_add(item.weight).ok_or_else(|| invalid("pool weights exceed u64"))?; }
-        if total == 0 { return Err(invalid("pool total weight must be positive")); }
-        Ok(())
+        let parsed: LotteryConfig = serde_json::from_value(config.clone()).map_err(|error| {
+            ActivityTypeError {
+                code: super::ActivityTypeErrorCode::InvalidConfig,
+                message: format!("lottery config is invalid: {error}"),
+            }
+        })?;
+        validate_parsed_config(&parsed, self.schema_version()).map(|_| ())
     }
+}
+
+fn validate_parsed_config(config: &LotteryConfig, schema_version: i64) -> Result<u64, ActivityTypeError> {
+    if config.schema_version != schema_version {
+        return Err(ActivityTypeError {
+            code: super::ActivityTypeErrorCode::SchemaVersionUnsupported,
+            message: "lottery schema version is unsupported".into(),
+        });
+    }
+    if config.draw_source != "player_action" || config.pool_version == 0 {
+        return Err(invalid("draw_source/player pool version is invalid"));
+    }
+    if let Some(item_id) = config.voucher_item_id {
+        if item_id <= 0 {
+            return Err(invalid("voucher_item_id must be positive"));
+        }
+    }
+    if config.pool_items.is_empty() {
+        return Err(invalid("pool_items must not be empty"));
+    }
+    let mut ids = BTreeSet::new();
+    let mut total = 0u64;
+    for item in &config.pool_items {
+        if item.item_id <= 0
+            || item.quantity == 0
+            || item.weight == 0
+            || !ids.insert(item.item_id)
+        {
+            return Err(invalid(
+                "pool item id, quantity and weight must be positive and unique",
+            ));
+        }
+        total = total
+            .checked_add(item.weight)
+            .ok_or_else(|| invalid("pool weights exceed u64"))?;
+    }
+    if total == 0 {
+        return Err(invalid("pool total weight must be positive"));
+    }
+    Ok(total)
+}
+
+pub(crate) fn lottery_pool_weight_digest(config: &LotteryConfig) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"lottery-pool-weight-v1");
+    hasher.update(config.pool_version.to_le_bytes());
+    for item in &config.pool_items {
+        hasher.update(item.item_id.to_le_bytes());
+        hasher.update(item.quantity.to_le_bytes());
+        hasher.update(item.weight.to_le_bytes());
+    }
+    format!("sha256:{:x}", hasher.finalize())
+}
+
+pub(crate) fn validate_lottery_reward_catalog(
+    config: &LotteryConfig,
+    available_item_ids: &BTreeSet<i32>,
+) -> Result<(), ActivityTypeError> {
+    validate_parsed_config(config, ACTIVITY_TYPE_SCHEMA_VERSION)?;
+    for item in &config.pool_items {
+        if !available_item_ids.contains(&item.item_id) {
+            return Err(invalid(format!(
+                "pool item {} is not present in the reward catalog",
+                item.item_id
+            )));
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_lottery_pool_version_frozen(
+    previous: &LotteryConfig,
+    current: &LotteryConfig,
+) -> Result<(), ActivityTypeError> {
+    validate_parsed_config(previous, ACTIVITY_TYPE_SCHEMA_VERSION)?;
+    validate_parsed_config(current, ACTIVITY_TYPE_SCHEMA_VERSION)?;
+    if previous.pool_version == current.pool_version
+        && lottery_pool_weight_digest(previous) != lottery_pool_weight_digest(current)
+    {
+        return Err(invalid(
+            "published lottery pool version cannot change weights or rewards",
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn select_lottery_item_with_random_word(
+    config: &LotteryConfig,
+    random_target: u64,
+) -> Result<LotterySelection, ActivityTypeError> {
+    let total_weight = validate_parsed_config(config, ACTIVITY_TYPE_SCHEMA_VERSION)?;
+    if random_target >= total_weight {
+        return Err(invalid("lottery random target must be below total weight"));
+    }
+    build_lottery_selection(config, total_weight, random_target)
+}
+
+fn build_lottery_selection(
+    config: &LotteryConfig,
+    total_weight: u64,
+    target: u64,
+) -> Result<LotterySelection, ActivityTypeError> {
+    let mut cumulative = 0u64;
+    for item in &config.pool_items {
+        cumulative = cumulative
+            .checked_add(item.weight)
+            .ok_or_else(|| invalid("pool weights exceed u64"))?;
+        if target < cumulative {
+            return Ok(LotterySelection {
+                item_id: item.item_id,
+                quantity: item.quantity,
+                metadata: LotteryPoolMetadata {
+                    pool_version: config.pool_version,
+                    total_weight,
+                    weight_digest: lottery_pool_weight_digest(config),
+                    random_algorithm_version: LOTTERY_RANDOM_ALGORITHM_VERSION.to_string(),
+                },
+            });
+        }
+    }
+    Err(invalid("weighted pool selection did not resolve an item"))
+}
+
+fn secure_random_target(total_weight: u64) -> Result<u64, ActivityTypeError> {
+    let acceptance_zone = u64::MAX - (u64::MAX % total_weight);
+    loop {
+        let mut bytes = [0u8; 8];
+        getrandom::getrandom(&mut bytes).map_err(|error| ActivityTypeError {
+            code: super::ActivityTypeErrorCode::HandlerRejected,
+            message: format!("secure lottery random source unavailable: {error}"),
+        })?;
+        let random_word = u64::from_le_bytes(bytes);
+        if random_word < acceptance_zone {
+            return Ok(random_word % total_weight);
+        }
+    }
+}
+
+pub(crate) fn draw_lottery_item(config: &LotteryConfig) -> Result<LotterySelection, ActivityTypeError> {
+    let total_weight = validate_parsed_config(config, ACTIVITY_TYPE_SCHEMA_VERSION)?;
+    let target = secure_random_target(total_weight)?;
+    build_lottery_selection(config, total_weight, target)
 }
 
 impl PlayerViewBuilder for LotteryHandler {
@@ -133,6 +291,96 @@ mod tests {
         assert!(!outcome.applied);
         assert_eq!(outcome.result["contract_only"], true);
         assert!(outcome.result.get("result_item_id").is_none());
+    }
+
+    #[test]
+    fn weighted_selection_uses_integer_boundaries_and_records_metadata() {
+        let parsed: LotteryConfig = serde_json::from_value(config()).unwrap();
+        let first = select_lottery_item_with_random_word(&parsed, 0).unwrap();
+        let first_boundary = select_lottery_item_with_random_word(&parsed, 2).unwrap();
+        let second = select_lottery_item_with_random_word(&parsed, 3).unwrap();
+        assert_eq!(first.item_id, 1001);
+        assert_eq!(first_boundary.item_id, 1001);
+        assert_eq!(second.item_id, 1002);
+        assert_eq!(second.metadata.total_weight, 10);
+        assert_eq!(second.metadata.pool_version, 3);
+        assert_eq!(second.metadata.random_algorithm_version, LOTTERY_RANDOM_ALGORITHM_VERSION);
+        assert!(second.metadata.weight_digest.starts_with("sha256:"));
+        assert_eq!(
+            select_lottery_item_with_random_word(&parsed, 10)
+                .unwrap_err()
+                .code,
+            super::super::ActivityTypeErrorCode::InvalidConfig
+        );
+    }
+
+    #[test]
+    fn weighted_selection_has_expected_integer_distribution() {
+        let parsed: LotteryConfig = serde_json::from_value(config()).unwrap();
+        let mut counts = BTreeSet::new();
+        let mut first_count = 0usize;
+        let mut second_count = 0usize;
+        for random_word in 0..1000u64 {
+            let selection =
+                select_lottery_item_with_random_word(&parsed, random_word % 10).unwrap();
+            counts.insert(selection.item_id);
+            if selection.item_id == 1001 {
+                first_count += 1;
+            } else {
+                second_count += 1;
+            }
+        }
+        assert_eq!(counts, BTreeSet::from([1001, 1002]));
+        assert_eq!(first_count, 300);
+        assert_eq!(second_count, 700);
+    }
+
+    #[test]
+    fn pool_version_freezes_weight_digest_and_catalog_references() {
+        let previous: LotteryConfig = serde_json::from_value(config()).unwrap();
+        let mut changed = previous.clone();
+        changed.pool_items[0].weight = 4;
+        assert_eq!(
+            validate_lottery_pool_version_frozen(&previous, &changed)
+                .unwrap_err()
+                .code,
+            super::super::ActivityTypeErrorCode::InvalidConfig
+        );
+        changed.pool_version = previous.pool_version + 1;
+        validate_lottery_pool_version_frozen(&previous, &changed).unwrap();
+
+        let catalog = BTreeSet::from([1001, 1002]);
+        validate_lottery_reward_catalog(&previous, &catalog).unwrap();
+        let missing = BTreeSet::from([1001]);
+        assert_eq!(
+            validate_lottery_reward_catalog(&previous, &missing)
+                .unwrap_err()
+                .code,
+            super::super::ActivityTypeErrorCode::InvalidConfig
+        );
+    }
+
+    #[test]
+    fn rejects_weight_sum_overflow_before_selection() {
+        let mut value = config();
+        value["pool_items"][0]["weight"] = json!(u64::MAX);
+        value["pool_items"][1]["weight"] = json!(1);
+        let parsed: LotteryConfig = serde_json::from_value(value).unwrap();
+        assert_eq!(
+            select_lottery_item_with_random_word(&parsed, 0)
+                .unwrap_err()
+                .code,
+            super::super::ActivityTypeErrorCode::InvalidConfig
+        );
+    }
+
+    #[test]
+    fn secure_draw_returns_only_server_selection_metadata() {
+        let parsed: LotteryConfig = serde_json::from_value(config()).unwrap();
+        let selection = draw_lottery_item(&parsed).unwrap();
+        assert!([1001, 1002].contains(&selection.item_id));
+        assert_eq!(selection.metadata.total_weight, 10);
+        assert_eq!(selection.metadata.pool_version, 3);
     }
 }
 

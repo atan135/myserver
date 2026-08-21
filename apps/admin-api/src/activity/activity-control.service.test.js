@@ -32,11 +32,57 @@ function draft(overrides = {}) {
   };
 }
 
+function lotteryDraft(overrides = {}) {
+  return draft({
+    activityType: "lottery",
+    typeConfig: {
+      schema_version: 1,
+      draw_source: "player_action",
+      pool_version: 3,
+      free_draw_count: 2,
+      voucher_item_id: 9001,
+      daily_draw_limit: 10,
+      total_draw_limit: 100,
+      pool_items: [{ item_id: 1001, quantity: 1, weight: 3 }, { item_id: 1002, quantity: 2, weight: 7 }]
+    },
+    stages: [],
+    rewardGroups: [{ key: "pool", selectionMode: "fixed", items: [{ item_id: 1001, quantity: 1 }, { item_id: 1002, quantity: 2 }] }],
+    ...overrides
+  });
+}
+
 test("domain service returns field-level preflight errors and refuses invalid drafts", async () => {
   const service = new ActivityControlDomainService();
   await assert.rejects(
     () => service.createDraft(draft({ endAt: "2026-08-31T00:00:00Z", timezone: "Mars/Base" })),
     (error) => error instanceof ActivityControlError && error.code === "ACTIVITY_INVALID_CONFIG" && error.details.some((item) => item.path === "endAt") && error.details.some((item) => item.path === "timezone")
+  );
+});
+
+test("lottery preflight validates pool quantities and reward catalog references", async () => {
+  const service = new ActivityControlDomainService();
+  await assert.rejects(
+    () => service.createDraft(lotteryDraft({ typeConfig: { ...lotteryDraft().typeConfig, pool_items: [{ item_id: 9999, quantity: 0, weight: 1 }] } })),
+    (error) => error instanceof ActivityControlError
+      && error.details.some((item) => item.path === "typeConfig.pool_items[0].quantity" && item.code === "INVALID")
+      && error.details.some((item) => item.path === "typeConfig.pool_items[0].item_id" && item.code === "UNKNOWN_REFERENCE")
+  );
+});
+
+test("lottery publish rejects changing weights without a new pool version", async () => {
+  const repository = new InMemoryActivityControlRepository();
+  const service = new ActivityControlDomainService(repository);
+  await service.createDraft(lotteryDraft({ activityId: "lottery-freeze" }));
+  const published = await service.publish("lottery-freeze", { version: 1, reason: "publish" });
+  await service.createDraftFromPublished("lottery-freeze", {
+    sourceVersion: 1,
+    ifMatch: published.etag,
+    reason: "change pool",
+    overrides: { typeConfig: { ...lotteryDraft().typeConfig, pool_items: [{ item_id: 1001, quantity: 1, weight: 4 }, { item_id: 1002, quantity: 2, weight: 6 }] } }
+  });
+  await assert.rejects(
+    () => service.publish("lottery-freeze", { version: 2, reason: "publish changed pool" }),
+    (error) => error.code === "ACTIVITY_PRECHECK_FAILED" && error.details.some((item) => item.code === "POOL_VERSION_IMMUTABLE")
   );
 });
 

@@ -742,6 +742,7 @@ dependencies = [
  "ed25519-dalek",
  "futures-util",
  "game-protocol",
+ "getrandom 0.2.17",
  "global-id",
  "hmac",
  "interprocess",

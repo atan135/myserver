@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 import { createActivityTypeRegistry, validateActivityTypeConfig } from "../activity-types.js";
 
@@ -101,6 +101,7 @@ interface StoredActivity {
   draft: Record<string, unknown>;
   currentVersion?: number;
   versions: Map<number, Record<string, unknown>>;
+  sourceSnapshot?: Record<string, unknown>;
   offlineReason?: string;
 }
 
@@ -239,6 +240,7 @@ export class InMemoryActivityControlRepository implements ActivityControlReposit
       revision: item.revision,
       version: item.status === "draft" ? item.draftVersion : item.currentVersion ?? item.draftVersion,
       ...(item.currentVersion !== undefined && includeDraft ? { snapshot: clone(item.versions.get(item.currentVersion)) } : {}),
+      ...(item.sourceSnapshot !== undefined && includeDraft ? { sourceSnapshot: clone(item.sourceSnapshot) } : {}),
       etag: etag(item),
       ...(includeDraft ? { draft: clone(item.draft), offlineReason: item.offlineReason } : {}),
     };
@@ -260,6 +262,7 @@ export class InMemoryActivityControlRepository implements ActivityControlReposit
     item.draftVersion = sourceVersion + 1;
     item.revision += 1;
     item.draft = draft;
+    item.sourceSnapshot = clone(source);
     return this.summary(item, true);
   }
 }
@@ -268,6 +271,47 @@ export interface ActivityPreflightError { path: string; code: string; message: s
 
 function pushError(errors: ActivityPreflightError[], path: string, code: string, message: string): void {
   errors.push({ path, code, message });
+}
+
+function lotteryPoolDigest(typeConfig: Record<string, unknown>): string | undefined {
+  if (typeConfig.pool_version === undefined || !Array.isArray(typeConfig.pool_items)) return undefined;
+  const chunks: Buffer[] = [Buffer.from("lottery-pool-weight-v1")];
+  const poolVersion = Buffer.alloc(4);
+  poolVersion.writeUInt32LE(Number(typeConfig.pool_version));
+  chunks.push(poolVersion);
+  for (const item of typeConfig.pool_items as any[]) {
+    const itemId = Buffer.alloc(4);
+    itemId.writeInt32LE(Number(item?.item_id));
+    const quantity = Buffer.alloc(4);
+    quantity.writeUInt32LE(Number(item?.quantity));
+    const weight = Buffer.alloc(8);
+    weight.writeBigUInt64LE(BigInt(item?.weight));
+    chunks.push(itemId, quantity, weight);
+  }
+  return `sha256:${createHash("sha256").update(Buffer.concat(chunks)).digest("hex")}`;
+}
+
+function lotteryPoolFreezeErrors(previous: Record<string, unknown> | undefined, current: Record<string, unknown>): ActivityPreflightError[] {
+  if (current.activityType !== "lottery" || !previous || previous.activityType !== "lottery") return [];
+  const previousTypeConfig = previous.typeConfig && typeof previous.typeConfig === "object" && !Array.isArray(previous.typeConfig)
+    ? previous.typeConfig as Record<string, unknown>
+    : undefined;
+  const currentTypeConfig = current.typeConfig && typeof current.typeConfig === "object" && !Array.isArray(current.typeConfig)
+    ? current.typeConfig as Record<string, unknown>
+    : undefined;
+  if (!previousTypeConfig || !currentTypeConfig) return [];
+  const previousVersion = Number(previousTypeConfig.pool_version);
+  const currentVersion = Number(currentTypeConfig.pool_version);
+  const previousDigest = lotteryPoolDigest(previousTypeConfig);
+  const currentDigest = lotteryPoolDigest(currentTypeConfig);
+  const errors: ActivityPreflightError[] = [];
+  if (Number.isInteger(previousVersion) && Number.isInteger(currentVersion) && currentVersion < previousVersion) {
+    pushError(errors, "typeConfig.pool_version", "POOL_VERSION_ROLLBACK", "lottery pool_version cannot move backwards after publish");
+  }
+  if (previousVersion === currentVersion && previousDigest && currentDigest && previousDigest !== currentDigest) {
+    pushError(errors, "typeConfig.pool_items", "POOL_VERSION_IMMUTABLE", "lottery pool items and weights require a new pool_version");
+  }
+  return errors;
 }
 
 function validateDraft(command: Record<string, unknown>): ActivityPreflightError[] {
@@ -342,6 +386,32 @@ function validateDraft(command: Record<string, unknown>): ActivityPreflightError
       }
     });
   }
+  if (command.activityType === "lottery") {
+    const typeConfig = command.typeConfig && typeof command.typeConfig === "object" && !Array.isArray(command.typeConfig)
+      ? command.typeConfig as Record<string, unknown>
+      : undefined;
+    const poolItems = typeConfig && Array.isArray(typeConfig.pool_items) ? typeConfig.pool_items : [];
+    const catalogItemIds = new Set<number>();
+    groups.forEach((group: any) => {
+      for (const item of Array.isArray(group?.items) ? group.items : []) {
+        const rawId = item?.item_id ?? item?.itemId ?? item?.asset_id ?? item?.assetId ?? item?.id;
+        const itemId = Number(rawId);
+        if (Number.isInteger(itemId) && itemId > 0) catalogItemIds.add(itemId);
+      }
+    });
+    if (poolItems.length > 0 && groups.length === 0) {
+      pushError(errors, "rewardGroups", "REQUIRED", "lottery rewardGroups must provide the pool item catalog");
+    }
+    poolItems.forEach((item: any, index: number) => {
+      const path = `typeConfig.pool_items[${index}]`;
+      if (!item || typeof item !== "object" || Array.isArray(item)) return;
+      if (!Number.isInteger(item.quantity) || item.quantity <= 0) pushError(errors, `${path}.quantity`, "INVALID", "quantity must be positive");
+      if (!Number.isInteger(item.weight) || item.weight <= 0) pushError(errors, `${path}.weight`, "INVALID", "weight must be positive");
+      if (groups.length > 0 && !catalogItemIds.has(Number(item.item_id))) {
+        pushError(errors, `${path}.item_id`, "UNKNOWN_REFERENCE", "pool item must reference an item in rewardGroups");
+      }
+    });
+  }
   if (!Array.isArray(command.stages)) pushError(errors, "stages", "REQUIRED", "stages must be an array");
   if (!Array.isArray(command.rewardGroups)) pushError(errors, "rewardGroups", "REQUIRED", "rewardGroups must be an array");
   return errors;
@@ -411,6 +481,7 @@ export class ActivityControlDomainService implements ActivityControlService {
       const draft = detail?.draft as Record<string, unknown> | undefined;
       if (!draft) throw new ActivityControlError("ACTIVITY_NOT_FOUND", "activity draft was not found");
       const errors = validateDraft(draft);
+      errors.push(...lotteryPoolFreezeErrors((detail?.snapshot || detail?.sourceSnapshot) as Record<string, unknown> | undefined, draft));
       if (errors.length) throw new ActivityControlError("ACTIVITY_PRECHECK_FAILED", "activity cannot be published", errors);
       const result: any = await this.repository.publish(activityId, command);
       let notification: Record<string, unknown> = { status: "sent" };
