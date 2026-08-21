@@ -245,7 +245,8 @@ test("baseline schema is split from bootstrap and development seed", () => {
       : database === "game"
         ? [
           "20260718161350_initial_schema.sql",
-          "20260729190000_restore_character_asset_ledger_guard.sql"
+          "20260729190000_restore_character_asset_ledger_guard.sql",
+          "20260821120000_add_activity_schema.sql"
         ]
       : database === "chat"
         ? [
@@ -258,12 +259,36 @@ test("baseline schema is split from bootstrap and development seed", () => {
     assert.match(schema, new RegExp(`^-- Logical owner: ${owners[database]}\\r?\\n-- Compatibility phase: expand\\r?\\n-- Irreversible risk: `));
     assert.doesNotMatch(schema, /\\connect|CREATE DATABASE/i);
     assert.doesNotMatch(schema, /local-dev|INSERT INTO id_origins|INSERT INTO worlds/i);
-    const next = database === "mail" ? "$" : `\\n\\connect myserver_${database === "auth" ? "game" : database === "game" ? "chat" : database === "chat" ? "announce" : "mail"}`;
-    const source = new RegExp(`\\\\connect myserver_${database}\\n([\\s\\S]*?)(?=${next})`).exec(init)?.[1] || "";
+    let source;
+    if (database === "game") {
+      const connectMarker = `\\connect myserver_${database}`;
+      const startOffset = init.indexOf(`${connectMarker}\n`);
+      const endOffset = init.indexOf(`\n\\connect myserver_chat`, startOffset);
+      source = startOffset >= 0 && endOffset >= 0
+        ? init.slice(startOffset + connectMarker.length + 1, endOffset)
+        : "";
+    } else {
+      const next = database === "mail" ? "$" : `\\n\\connect myserver_${database === "auth" ? "game" : database === "chat" ? "announce" : "mail"}`;
+      source = new RegExp(`\\\\connect myserver_${database}\n([\s\S]*?)(?=${next})`).exec(init)?.[1] || "";
+    }
     const sourceSchema = database === "auth"
       ? source.replace(/INSERT INTO id_origins[\s\S]*?\n\);\n\n/, "")
       : source;
-    assert.equal(schema.replaceAll("\r\n", "\n").trim().endsWith(sourceSchema.trim()), true, `${database} baseline must preserve init.sql DDL`);
+    const normalizedSchema = schema.replaceAll("\r\n", "\n").trim();
+    const normalizedSource = sourceSchema.replaceAll("\r\n", "\n").trim();
+    if (database === "game") {
+      const normalizedInitialBody = normalizedSchema.replace(/^(?:--[^\n]*\n)+/, "").trim();
+      assert.equal(normalizedSource.startsWith(normalizedInitialBody), true, `${database} initial migration must remain the prefix of init.sql DDL`);
+      for (const filename of files.slice(1)) {
+        const migration = readFileSync(join(directory, filename), "utf8")
+          .replaceAll("\r\n", "\n")
+          .match(/(?:^|\n)(?:CREATE|ALTER|DROP|REVOKE)\b[\s\S]*/)?.[0]
+          .trim() || "";
+        assert.equal(normalizedSource.includes(migration), true, `${filename} DDL must be present in init.sql`);
+      }
+    } else {
+      assert.equal(normalizedSchema.endsWith(normalizedSource), true, `${database} baseline must preserve init.sql DDL`);
+    }
   }
 });
 
