@@ -465,6 +465,12 @@ mod tests {
     #[test]
     fn rejects_invalid_pool_and_client_result_fields() {
         let handler = LotteryHandler::default();
+        let mut empty = config();
+        empty["pool_items"] = json!([]);
+        assert_eq!(
+            handler.validate_config(&empty).unwrap_err().code,
+            super::super::ActivityTypeErrorCode::InvalidConfig
+        );
         let mut bad = config();
         bad["pool_items"][0]["weight"] = json!(0);
         assert_eq!(
@@ -481,6 +487,12 @@ mod tests {
         result["result_item_id"] = json!(1001);
         assert_eq!(
             handler.validate_config(&result).unwrap_err().code,
+            super::super::ActivityTypeErrorCode::InvalidConfig
+        );
+        let mut negative = config();
+        negative["pool_items"][0]["weight"] = json!(-1);
+        assert_eq!(
+            handler.validate_config(&negative).unwrap_err().code,
             super::super::ActivityTypeErrorCode::InvalidConfig
         );
     }

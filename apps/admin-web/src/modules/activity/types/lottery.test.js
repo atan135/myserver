@@ -9,6 +9,11 @@ test("admin-web lottery rejects unknown nested fields and marks missing catalog 
   assert.throws(() => validateLottery({ ...config, editor_only: true }), { code: "ACTIVITY_INVALID_CONFIG" });
   assert.throws(() => validateLottery({ ...config, pool_items: [{ ...config.pool_items[0], reward_exists: true }, config.pool_items[1]] }), { code: "ACTIVITY_INVALID_CONFIG" });
   assert.throws(() => validateLottery({ ...config, limited_stock: { enabled: true, unexpected: 1 } }), { code: "ACTIVITY_INVALID_CONFIG" });
+  assert.throws(() => validateLottery({ ...config, pool_version: 0x100000000 }), { code: "ACTIVITY_INVALID_CONFIG" });
+  assert.throws(() => validateLottery({ ...config, voucher_item_id: 0x80000000 }), { code: "ACTIVITY_INVALID_CONFIG" });
+  assert.throws(() => validateLottery({ ...config, pool_items: [{ item_id: 0x80000000, quantity: 1, weight: 1 }] }), { code: "ACTIVITY_INVALID_CONFIG" });
+  assert.throws(() => validateLottery({ ...config, pool_items: [{ item_id: 1, quantity: 0x100000000, weight: 1 }] }), { code: "ACTIVITY_INVALID_CONFIG" });
+  assert.throws(() => validateLottery({ ...config, limited_stock: { stock: 0x100000000 } }), { code: "ACTIVITY_INVALID_CONFIG" });
   assert.deepEqual(buildLotteryPoolEditor(config, [1001]).map((item) => item.reward_exists), [true, false]);
 });
 test("admin-web lottery serializer strips server-owned view fields", () => {

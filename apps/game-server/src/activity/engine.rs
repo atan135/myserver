@@ -1822,6 +1822,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn lottery_distinct_concurrent_requests_cannot_bypass_limits() {
+        let now = Utc.with_ymd_and_hms(2026, 8, 21, 1, 0, 0).unwrap();
+        let gateway = Arc::new(FakeLotteryGateway::free());
+        let engine = lottery_fixture(now, lottery_config(1, 1, 1), gateway.clone()).await;
+        let request = |id: &str| ActivityActionRequest {
+            activity_id: "lottery-1".into(),
+            version: 1,
+            stage_id: String::new(),
+            action_type: "draw".into(),
+            client_request_id: id.into(),
+        };
+        let (first, second) = tokio::join!(
+            engine.dispatch_action("character-1", request("concurrent-a"), now),
+            engine.dispatch_action("character-1", request("concurrent-b"), now)
+        );
+        assert_eq!((first.ok as usize) + (second.ok as usize), 1);
+        assert!(first.error_code.is_some() || second.error_code.is_some());
+        assert_eq!(*gateway.applied.lock().await, 1);
+    }
+
+    #[tokio::test]
     async fn lottery_retryable_reuses_original_selection_without_randomizing() {
         let now = Utc.with_ymd_and_hms(2026, 8, 21, 1, 0, 0).unwrap();
         let gateway = Arc::new(FakeLotteryGateway {

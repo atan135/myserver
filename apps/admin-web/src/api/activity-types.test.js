@@ -18,3 +18,11 @@ test("admin-web rejects unknown type, action and schema version", () => {
   assert.throws(() => validateActivityAction(registry, "lottery", "claim"), { code: "ACTIVITY_UNKNOWN_ACTION" });
   assert.throws(() => validateActivityTypeConfig(registry, "login_reward", { schema_version: 2 }), { code: "ACTIVITY_SCHEMA_VERSION_UNSUPPORTED" });
 });
+
+test("admin-web shared lottery contract rejects unknown and out-of-range fields", () => {
+  const registry = createActivityTypeRegistry();
+  const config = { schema_version: 1, draw_source: "player_action", pool_version: 1, free_draw_count: 0, daily_draw_limit: 1, total_draw_limit: 1, pool_items: [{ item_id: 1, quantity: 1, weight: 1 }] };
+  assert.throws(() => validateActivityTypeConfig(registry, "lottery", { ...config, result_item_id: 1 }), { code: "ACTIVITY_INVALID_CONFIG" });
+  assert.throws(() => validateActivityTypeConfig(registry, "lottery", { ...config, pool_version: 0x100000000 }), { code: "ACTIVITY_INVALID_CONFIG" });
+  assert.throws(() => validateActivityTypeConfig(registry, "lottery", { ...config, pool_items: [{ item_id: 1, quantity: 1, weight: 1, reward_exists: true }] }), { code: "ACTIVITY_INVALID_CONFIG" });
+});

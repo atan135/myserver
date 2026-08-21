@@ -15,6 +15,11 @@ test("admin-api lottery rejects unknown nested fields and unsafe total weights",
   assert.throws(() => validateLottery({ ...config, pool_items: [{ ...config.pool_items[0], reward_exists: true }, config.pool_items[1]] }), { code: "ACTIVITY_INVALID_CONFIG" });
   assert.throws(() => validateLottery({ ...config, pity: { enabled: true, unexpected: 1 } }), { code: "ACTIVITY_INVALID_CONFIG" });
   assert.throws(() => validateLottery({ ...config, pool_items: [{ item_id: 1, quantity: 1, weight: Number.MAX_SAFE_INTEGER }, { item_id: 2, quantity: 1, weight: 1 }] }), { code: "ACTIVITY_INVALID_CONFIG" });
+  assert.throws(() => validateLottery({ ...config, pool_version: 0x100000000 }), { code: "ACTIVITY_INVALID_CONFIG" });
+  assert.throws(() => validateLottery({ ...config, voucher_item_id: 0x80000000 }), { code: "ACTIVITY_INVALID_CONFIG" });
+  assert.throws(() => validateLottery({ ...config, pool_items: [{ item_id: 0x80000000, quantity: 1, weight: 1 }] }), { code: "ACTIVITY_INVALID_CONFIG" });
+  assert.throws(() => validateLottery({ ...config, pool_items: [{ item_id: 1, quantity: 0x100000000, weight: 1 }] }), { code: "ACTIVITY_INVALID_CONFIG" });
+  assert.throws(() => validateLottery({ ...config, pity: { threshold: 0x100000000 } }), { code: "ACTIVITY_INVALID_CONFIG" });
 });
 test("admin-api lottery serializer strips server-owned view fields", () => {
   const serialized = serializeLotteryConfig({ ...buildLotteryView(config), result_item_id: 1001, random_value: 7, winner: { item_id: 1001 }, pool_items: config.pool_items.map((item) => ({ ...item, reward_exists: true })) });
