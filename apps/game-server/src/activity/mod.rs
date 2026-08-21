@@ -32,6 +32,10 @@ pub(crate) use domain::{
 #[allow(unused_imports)]
 pub(crate) use engine::{ActivityActionRequest, ActivityActionResponse, ActivityEngine};
 #[allow(unused_imports)]
+pub(crate) use types::{
+    GameEntryEvent, LoginRewardProgressError, LoginRewardProgressResult,
+};
+#[allow(unused_imports)]
 pub(crate) use repository::{
     ActivityRepository, ActivityRepositoryError, InMemoryActivityRepository,
     PublishedActivitySnapshot,

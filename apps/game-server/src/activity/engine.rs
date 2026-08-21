@@ -3,7 +3,11 @@ use super::repository::{
     ActivityRepository, InMemoryActivityRepository, PublishedActivitySnapshot,
 };
 use super::settlement::{ActivityClaimCoordinator, ClaimStatus, build_reward_order};
-use super::types::{ActivityTypeRegistry, PlayerContext, TransactionContext};
+use super::types::{
+    apply_game_entry, ActivityTypeRegistry, GameEntryEvent,
+    InMemoryLoginRewardProgressRepository, LoginRewardConfig, LoginRewardProgressError,
+    LoginRewardProgressRepository, LoginRewardProgressResult, PlayerContext, TransactionContext,
+};
 use crate::core::inventory::{NormalizedAssetItem, RewardDeliveryPolicy};
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
@@ -54,6 +58,7 @@ pub(crate) struct ActivityEngine {
     repository: Arc<InMemoryActivityRepository>,
     registry: Arc<ActivityTypeRegistry>,
     request_state: Arc<Mutex<RequestState>>,
+    login_progress: Arc<dyn LoginRewardProgressRepository>,
     enabled: bool,
     claim_coordinator: Option<ActivityClaimCoordinator>,
 }
@@ -70,6 +75,7 @@ impl ActivityEngine {
             repository,
             registry: Arc::new(ActivityTypeRegistry::with_defaults()),
             request_state: Arc::new(Mutex::new(RequestState::default())),
+            login_progress: Arc::new(InMemoryLoginRewardProgressRepository::default()),
             enabled: true,
             claim_coordinator: None,
         }
@@ -88,6 +94,93 @@ impl ActivityEngine {
     pub(crate) fn with_claim_coordinator(mut self, coordinator: ActivityClaimCoordinator) -> Self {
         self.claim_coordinator = Some(coordinator);
         self
+    }
+
+    pub(crate) fn with_login_reward_progress_repository(
+        mut self,
+        repository: Arc<dyn LoginRewardProgressRepository>,
+    ) -> Self {
+        self.login_progress = repository;
+        self
+    }
+
+    /// Records a server-trusted game entry for a login-reward activity.
+    ///
+    /// The character identity and occurrence time come from the server entry
+    /// context; no client-supplied period key is accepted here.
+    pub(crate) async fn on_game_entry(
+        &self,
+        character_id: &str,
+        activity_id: &str,
+        version: u32,
+        occurred_at: DateTime<Utc>,
+    ) -> Result<LoginRewardProgressResult, ActivityEngineError> {
+        if !self.enabled {
+            return Err(Self::unavailable_error());
+        }
+        if character_id.trim().is_empty() {
+            return Err(Self::auth_error());
+        }
+        if activity_id.trim().is_empty() || version == 0 {
+            return Err(ActivityEngineError::new(
+                "ACTIVITY_INVALID_REQUEST",
+                "activity id and version are required",
+            ));
+        }
+
+        let snapshot = self.load_detail(activity_id, occurred_at).await?;
+        if snapshot.version.version_no != version as i32 {
+            return Err(ActivityEngineError::new(
+                "ACTIVITY_INVALID_VERSION",
+                "requested activity version is not current",
+            ));
+        }
+
+        // Evaluate lifecycle at the event time so a delayed event cannot be
+        // accepted outside the activity's effective running window.
+        Self::validate_read_status(&snapshot, occurred_at)?;
+        if snapshot.activity.activity_type.as_str() != "login_reward" {
+            return Err(ActivityEngineError::new(
+                "ACTIVITY_INVALID_TYPE",
+                "activity type does not support game entry progress",
+            ));
+        }
+        self.registry
+            .validate_config(snapshot.activity.activity_type.as_str(), &snapshot.version.type_config)
+            .map_err(|error| ActivityEngineError::new("ACTIVITY_INVALID_CONFIG", error.message))?;
+        let config: LoginRewardConfig = serde_json::from_value(snapshot.version.type_config.clone())
+            .map_err(|error| ActivityEngineError::new("ACTIVITY_INVALID_CONFIG", error.to_string()))?;
+        let event = GameEntryEvent {
+            character_id: character_id.to_string(),
+            activity_id: activity_id.to_string(),
+            version_no: version as i32,
+            occurred_at,
+        };
+        apply_game_entry(
+            &config,
+            snapshot.activity.effective_status(occurred_at),
+            snapshot.activity.start_at,
+            snapshot.activity.end_at,
+            &snapshot.activity.timezone,
+            &event,
+            self.login_progress.as_ref(),
+        )
+        .map_err(Self::map_login_progress_error)
+    }
+
+    fn map_login_progress_error(error: LoginRewardProgressError) -> ActivityEngineError {
+        match error {
+            LoginRewardProgressError::InvalidEvent(message) =>
+                ActivityEngineError::new("ACTIVITY_INVALID_REQUEST", message),
+            LoginRewardProgressError::InvalidConfig(message) =>
+                ActivityEngineError::new("ACTIVITY_INVALID_CONFIG", message),
+            LoginRewardProgressError::ActivityNotActive =>
+                ActivityEngineError::new("ACTIVITY_NOT_STARTED", "activity is not active"),
+            LoginRewardProgressError::VersionConflict =>
+                ActivityEngineError::new("ACTIVITY_VERSION_CONFLICT", "login progress changed concurrently"),
+            LoginRewardProgressError::StorageUnavailable =>
+                ActivityEngineError::new("ACTIVITY_STORAGE_UNAVAILABLE", "activity storage unavailable"),
+        }
     }
 
     pub(crate) async fn list(
@@ -403,7 +496,15 @@ mod tests {
             activity.id.clone(),
             1,
             json!({}),
-            json!({"schema_version": 1}),
+            json!({
+                "schema_version": 1,
+                "event_source": "game_entry",
+                "cycle_unit": "natural_day",
+                "progression": "consecutive",
+                "miss_policy": "reset",
+                "claim_mode": "manual",
+                "stages": [{"stage_no": 1, "required_count": 1, "reward_group_key": "login-day-1"}]
+            }),
             activity.start_at,
             activity.end_at,
             activity.claim_deadline,
@@ -652,5 +753,72 @@ mod tests {
             )
             .await;
         assert_eq!(response.error_code, Some("ACTIVITY_ENGINE_UNAVAILABLE"));
+        assert_eq!(
+            engine
+                .on_game_entry("character-1", "a1", 1, now)
+                .await
+                .unwrap_err()
+                .code,
+            "ACTIVITY_ENGINE_UNAVAILABLE"
+        );
+    }
+
+    #[tokio::test]
+    async fn trusted_game_entry_updates_login_progress_and_is_idempotent() {
+        let now = Utc.with_ymd_and_hms(2026, 8, 21, 1, 0, 0).unwrap();
+        let engine = fixture(now).await;
+        let first = engine
+            .on_game_entry("character-1", "a1", 1, now)
+            .await
+            .unwrap();
+        assert!(!first.duplicate);
+        assert_eq!(first.state.cumulative_count, 1);
+        assert_eq!(first.state.consecutive_count, 1);
+        assert_eq!(first.current_stage_no, Some(1));
+
+        let duplicate = engine
+            .on_game_entry("character-1", "a1", 1, now + ChronoDuration::minutes(10))
+            .await
+            .unwrap();
+        assert!(duplicate.duplicate);
+        assert_eq!(duplicate.state.cumulative_count, 1);
+        assert_eq!(duplicate.state_revision, first.state_revision);
+    }
+
+    #[tokio::test]
+    async fn trusted_game_entry_rejects_version_lifecycle_and_identity_boundaries() {
+        let now = Utc.with_ymd_and_hms(2026, 8, 21, 1, 0, 0).unwrap();
+        let engine = fixture(now).await;
+        assert_eq!(
+            engine.on_game_entry("character-1", "a1", 9, now).await.unwrap_err().code,
+            "ACTIVITY_INVALID_VERSION"
+        );
+        assert_eq!(
+            engine.on_game_entry("", "a1", 1, now).await.unwrap_err().code,
+            "ACTIVITY_AUTH_REQUIRED"
+        );
+
+        let (ended, _) = fixture_with_window(
+            now,
+            now - ChronoDuration::hours(2),
+            now - ChronoDuration::hours(1),
+        )
+        .await;
+        assert_eq!(
+            ended.on_game_entry("character-1", "a1", 1, now).await.unwrap_err().code,
+            "ACTIVITY_ENDED"
+        );
+
+        let (offline, repo) = fixture_with_window(
+            now,
+            now - ChronoDuration::hours(1),
+            now + ChronoDuration::hours(1),
+        )
+        .await;
+        repo.offline("a1", 1).await.unwrap();
+        assert_eq!(
+            offline.on_game_entry("character-1", "a1", 1, now).await.unwrap_err().code,
+            "ACTIVITY_OFFLINE"
+        );
     }
 }

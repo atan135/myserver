@@ -12,7 +12,11 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
 
-pub(crate) use login_reward::LoginRewardHandler;
+pub(crate) use login_reward::{
+    apply_game_entry, GameEntryEvent, InMemoryLoginRewardProgressRepository,
+    LoginRewardConfig, LoginRewardProgressError, LoginRewardProgressRepository,
+    LoginRewardProgressResult, LoginRewardHandler,
+};
 pub(crate) use lottery::LotteryHandler;
 
 pub(crate) const ACTIVITY_TYPE_SCHEMA_VERSION: i64 = 1;

@@ -6,6 +6,11 @@ use super::{
 use crate::activity::{Activity, ActivityVersion, PlayerActivityState};
 use serde_json::{Value, json};
 use serde::{Deserialize, Serialize};
+use chrono::{DateTime, Duration, NaiveDate, Utc};
+use chrono_tz::Tz;
+use chrono::TimeZone;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -27,7 +32,7 @@ pub(crate) struct LoginRewardConfig {
     pub(crate) stages: Vec<LoginRewardStageConfig>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct LoginRewardState {
     pub(crate) last_period_key: Option<String>,
     pub(crate) consecutive_count: u32,
@@ -44,6 +49,135 @@ pub(crate) struct LoginRewardView {
     pub(crate) claim_mode: String,
     pub(crate) stages: Vec<LoginRewardStageConfig>,
     pub(crate) state: LoginRewardState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct GameEntryEvent {
+    pub(crate) character_id: String,
+    pub(crate) activity_id: String,
+    pub(crate) version_no: i32,
+    pub(crate) occurred_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LoginRewardProgressResult {
+    pub(crate) period_key: String,
+    pub(crate) duplicate: bool,
+    pub(crate) state_revision: i64,
+    pub(crate) state: LoginRewardState,
+    pub(crate) current_stage_no: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum LoginRewardProgressError {
+    InvalidEvent(String),
+    InvalidConfig(String),
+    ActivityNotActive,
+    VersionConflict,
+    StorageUnavailable,
+}
+
+pub(crate) trait LoginRewardProgressRepository: Send + Sync {
+    fn load(&self, character_id: &str, activity_id: &str, version_no: i32) -> Result<(LoginRewardState, i64), LoginRewardProgressError>;
+    fn compare_and_set(&self, character_id: &str, activity_id: &str, version_no: i32, expected_revision: i64, state: LoginRewardState, current_stage_id: Option<String>) -> Result<i64, LoginRewardProgressError>;
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct InMemoryLoginRewardProgressRepository {
+    state: Arc<Mutex<HashMap<(String, String, i32), PlayerActivityState>>>,
+}
+
+impl LoginRewardProgressRepository for InMemoryLoginRewardProgressRepository {
+    fn load(&self, character_id: &str, activity_id: &str, version_no: i32) -> Result<(LoginRewardState, i64), LoginRewardProgressError> {
+        let state = self.state.lock().map_err(|_| LoginRewardProgressError::StorageUnavailable)?;
+        let Some(record) = state.get(&(character_id.to_string(), activity_id.to_string(), version_no)) else {
+            return Ok((LoginRewardState::default(), 0));
+        };
+        let login_state = serde_json::from_value(record.type_state.clone()).map_err(|_| LoginRewardProgressError::StorageUnavailable)?;
+        Ok((login_state, record.state_revision))
+    }
+
+    fn compare_and_set(&self, character_id: &str, activity_id: &str, version_no: i32, expected_revision: i64, next: LoginRewardState, current_stage_id: Option<String>) -> Result<i64, LoginRewardProgressError> {
+        let mut state = self.state.lock().map_err(|_| LoginRewardProgressError::StorageUnavailable)?;
+        let key = (character_id.to_string(), activity_id.to_string(), version_no);
+        let current_revision = state.get(&key).map(|record| record.state_revision).unwrap_or(0);
+        if current_revision != expected_revision { return Err(LoginRewardProgressError::VersionConflict); }
+        let next_revision = current_revision.saturating_add(1);
+        let progress = json!({
+            "last_period_key": next.last_period_key,
+            "consecutive_count": next.consecutive_count,
+            "cumulative_count": next.cumulative_count,
+        });
+        let type_state = serde_json::to_value(&next).map_err(|_| LoginRewardProgressError::StorageUnavailable)?;
+        state.insert(key, PlayerActivityState {
+            character_id: character_id.to_string(),
+            activity_id: activity_id.to_string(),
+            version_no,
+            current_stage_id,
+            progress,
+            type_state,
+            state_revision: next_revision,
+        });
+        Ok(next_revision)
+    }
+}
+
+impl InMemoryLoginRewardProgressRepository {
+    pub(crate) fn load_activity_state(
+        &self,
+        character_id: &str,
+        activity_id: &str,
+        version_no: i32,
+    ) -> Option<PlayerActivityState> {
+        self.state.lock().ok()?.get(&(
+            character_id.to_string(),
+            activity_id.to_string(),
+            version_no,
+        )).cloned()
+    }
+}
+
+pub(crate) fn login_period_key(occurred_at: DateTime<Utc>, timezone: &str) -> Result<String, LoginRewardProgressError> {
+    let zone: Tz = timezone.parse().map_err(|_| LoginRewardProgressError::InvalidConfig(format!("unsupported IANA timezone '{timezone}'")))?;
+    Ok(zone.from_utc_datetime(&occurred_at.naive_utc()).date_naive().format("%Y-%m-%d").to_string())
+}
+
+fn period_date(period_key: &str) -> Result<NaiveDate, LoginRewardProgressError> {
+    NaiveDate::parse_from_str(period_key, "%Y-%m-%d").map_err(|_| LoginRewardProgressError::InvalidEvent("stored period key is invalid".into()))
+}
+
+pub(crate) fn apply_game_entry(
+    config: &LoginRewardConfig,
+    activity_status: crate::activity::domain::ActivityStatus,
+    activity_start: DateTime<Utc>,
+    activity_end: DateTime<Utc>,
+    timezone: &str,
+    event: &GameEntryEvent,
+    repository: &dyn LoginRewardProgressRepository,
+) -> Result<LoginRewardProgressResult, LoginRewardProgressError> {
+    if event.character_id.trim().is_empty() || event.activity_id.trim().is_empty() || event.version_no <= 0 { return Err(LoginRewardProgressError::InvalidEvent("trusted game entry identity is required".into())); }
+    if !matches!(activity_status, crate::activity::domain::ActivityStatus::Published | crate::activity::domain::ActivityStatus::Running) || event.occurred_at < activity_start || event.occurred_at >= activity_end { return Err(LoginRewardProgressError::ActivityNotActive); }
+    if config.event_source != "game_entry" || config.cycle_unit != "natural_day" { return Err(LoginRewardProgressError::InvalidConfig("login_reward requires game_entry/natural_day".into())); }
+    let period_key = login_period_key(event.occurred_at, timezone)?;
+    let (current, revision) = repository.load(&event.character_id, &event.activity_id, event.version_no)?;
+    if current.last_period_key.as_deref() == Some(period_key.as_str()) {
+        return Ok(LoginRewardProgressResult { period_key, duplicate: true, state_revision: revision, current_stage_no: current_stage(config, &current), state: current });
+    }
+    let mut next = current.clone();
+    let current_date = period_date(&period_key)?;
+    let previous_date = current.last_period_key.as_deref().map(period_date).transpose()?;
+    let consecutive = previous_date.is_some_and(|date| current_date.signed_duration_since(date) == Duration::days(1));
+    next.cumulative_count = next.cumulative_count.saturating_add(1);
+    next.consecutive_count = if consecutive || config.miss_policy == "carry" { next.consecutive_count.saturating_add(1) } else { 1 };
+    next.last_period_key = Some(period_key.clone());
+    let stage_id = current_stage(config, &next).map(|stage_no| stage_no.to_string());
+    let next_revision = repository.compare_and_set(&event.character_id, &event.activity_id, event.version_no, revision, next.clone(), stage_id)?;
+    Ok(LoginRewardProgressResult { period_key, duplicate: false, state_revision: next_revision, current_stage_no: current_stage(config, &next), state: next })
+}
+
+fn current_stage(config: &LoginRewardConfig, state: &LoginRewardState) -> Option<u32> {
+    let count = if config.progression == "cumulative" { state.cumulative_count } else { state.consecutive_count };
+    config.stages.iter().filter(|stage| stage.required_count <= count).max_by_key(|stage| stage.stage_no).map(|stage| stage.stage_no)
 }
 
 fn invalid(message: impl Into<String>) -> ActivityTypeError {
@@ -150,5 +284,96 @@ mod tests {
         let mut duplicate = config();
         duplicate["stages"] = json!([{ "stage_no": 1, "required_count": 1, "reward_group_key": "g1" }, { "stage_no": 1, "required_count": 2, "reward_group_key": "g2" }]);
         assert_eq!(handler.validate_config(&duplicate).unwrap_err().code, super::super::ActivityTypeErrorCode::InvalidConfig);
+    }
+
+    #[test]
+    fn game_entry_is_idempotent_and_uses_activity_timezone_boundary() {
+        let handler = LoginRewardHandler::default();
+        let config: LoginRewardConfig = serde_json::from_value(config()).unwrap();
+        let repository = InMemoryLoginRewardProgressRepository::default();
+        let first = GameEntryEvent { character_id: "c1".into(), activity_id: "a1".into(), version_no: 1, occurred_at: chrono::DateTime::parse_from_rfc3339("2026-08-21T16:30:00Z").unwrap().with_timezone(&chrono::Utc) };
+        let second = GameEntryEvent { occurred_at: chrono::DateTime::parse_from_rfc3339("2026-08-21T16:45:00Z").unwrap().with_timezone(&chrono::Utc), ..first.clone() };
+        let result = apply_game_entry(&config, crate::activity::domain::ActivityStatus::Running, first.occurred_at - chrono::Duration::hours(1), first.occurred_at + chrono::Duration::days(2), "Asia/Shanghai", &first, &repository).unwrap();
+        assert_eq!(result.period_key, "2026-08-22");
+        assert!(!result.duplicate);
+        let duplicate = apply_game_entry(&config, crate::activity::domain::ActivityStatus::Running, first.occurred_at - chrono::Duration::hours(1), first.occurred_at + chrono::Duration::days(2), "Asia/Shanghai", &second, &repository).unwrap();
+        assert!(duplicate.duplicate);
+        assert_eq!(duplicate.state.cumulative_count, 1);
+        let _ = handler;
+    }
+
+    #[test]
+    fn game_entry_handles_consecutive_cumulative_reset_and_carry() {
+        let mut config: LoginRewardConfig = serde_json::from_value(config()).unwrap();
+        let repository = InMemoryLoginRewardProgressRepository::default();
+        let at = chrono::DateTime::parse_from_rfc3339("2026-08-21T12:00:00Z").unwrap().with_timezone(&chrono::Utc);
+        let event = |day| GameEntryEvent { character_id: "c1".into(), activity_id: "a1".into(), version_no: 1, occurred_at: at + chrono::Duration::days(day) };
+        let range_start = at - chrono::Duration::hours(1);
+        let range_end = at + chrono::Duration::days(10);
+        let first = apply_game_entry(&config, crate::activity::domain::ActivityStatus::Running, range_start, range_end, "UTC", &event(0), &repository).unwrap();
+        assert_eq!(first.state.consecutive_count, 1);
+        let second = apply_game_entry(&config, crate::activity::domain::ActivityStatus::Running, range_start, range_end, "UTC", &event(1), &repository).unwrap();
+        assert_eq!(second.state.consecutive_count, 2);
+        let gap = apply_game_entry(&config, crate::activity::domain::ActivityStatus::Running, range_start, range_end, "UTC", &event(3), &repository).unwrap();
+        assert_eq!(gap.state.consecutive_count, 1);
+        assert_eq!(gap.state.cumulative_count, 3);
+        config.miss_policy = "carry".into();
+        let carry_repo = InMemoryLoginRewardProgressRepository::default();
+        let _ = apply_game_entry(&config, crate::activity::domain::ActivityStatus::Running, range_start, range_end, "UTC", &event(0), &carry_repo).unwrap();
+        let carry = apply_game_entry(&config, crate::activity::domain::ActivityStatus::Running, range_start, range_end, "UTC", &event(3), &carry_repo).unwrap();
+        assert_eq!(carry.state.consecutive_count, 2);
+    }
+
+    #[test]
+    fn game_entry_rejects_ended_offline_and_version_isolation() {
+        let config: LoginRewardConfig = serde_json::from_value(config()).unwrap();
+        let repository = InMemoryLoginRewardProgressRepository::default();
+        let event = GameEntryEvent { character_id: "c1".into(), activity_id: "a1".into(), version_no: 1, occurred_at: chrono::DateTime::parse_from_rfc3339("2026-08-21T12:00:00Z").unwrap().with_timezone(&chrono::Utc) };
+        let start = event.occurred_at - chrono::Duration::hours(1);
+        let end = event.occurred_at + chrono::Duration::hours(1);
+        assert!(matches!(apply_game_entry(&config, crate::activity::domain::ActivityStatus::Ended, start, end, "UTC", &event, &repository), Err(LoginRewardProgressError::ActivityNotActive)));
+        assert!(matches!(apply_game_entry(&config, crate::activity::domain::ActivityStatus::Offline, start, end, "UTC", &event, &repository), Err(LoginRewardProgressError::ActivityNotActive)));
+        let mut version_two = event.clone(); version_two.version_no = 2;
+        let result = apply_game_entry(&config, crate::activity::domain::ActivityStatus::Running, start, end, "UTC", &version_two, &repository).unwrap();
+        assert_eq!(result.state.cumulative_count, 1);
+    }
+
+    #[test]
+    fn progress_repository_syncs_player_activity_state_and_isolates_versions() {
+        let config: LoginRewardConfig = serde_json::from_value(config()).unwrap();
+        let repository = InMemoryLoginRewardProgressRepository::default();
+        let occurred_at = chrono::DateTime::parse_from_rfc3339("2026-08-21T12:00:00Z").unwrap().with_timezone(&chrono::Utc);
+        let event = |version_no| GameEntryEvent {
+            character_id: "c1".into(),
+            activity_id: "a1".into(),
+            version_no,
+            occurred_at,
+        };
+        apply_game_entry(&config, crate::activity::domain::ActivityStatus::Running, occurred_at - chrono::Duration::hours(1), occurred_at + chrono::Duration::hours(1), "UTC", &event(1), &repository).unwrap();
+        let stored = repository.load_activity_state("c1", "a1", 1).unwrap();
+        assert_eq!(stored.character_id, "c1");
+        assert_eq!(stored.activity_id, "a1");
+        assert_eq!(stored.version_no, 1);
+        assert_eq!(stored.current_stage_id.as_deref(), Some("1"));
+        assert_eq!(stored.progress["cumulative_count"], 1);
+        assert_eq!(stored.type_state["consecutive_count"], 1);
+        assert_eq!(stored.state_revision, 1);
+
+        apply_game_entry(&config, crate::activity::domain::ActivityStatus::Running, occurred_at - chrono::Duration::hours(1), occurred_at + chrono::Duration::hours(1), "UTC", &event(2), &repository).unwrap();
+        let version_two = repository.load_activity_state("c1", "a1", 2).unwrap();
+        assert_eq!(version_two.version_no, 2);
+        assert_eq!(version_two.state_revision, 1);
+        assert_eq!(repository.load_activity_state("c1", "a1", 1).unwrap().state_revision, 1);
+    }
+
+    #[test]
+    fn login_period_key_uses_full_iana_timezone_and_dst_boundaries() {
+        let before_midnight = chrono::DateTime::parse_from_rfc3339("2026-03-08T04:59:00Z").unwrap().with_timezone(&chrono::Utc);
+        let after_midnight = chrono::DateTime::parse_from_rfc3339("2026-03-08T05:01:00Z").unwrap().with_timezone(&chrono::Utc);
+        assert_eq!(login_period_key(before_midnight, "America/New_York").unwrap(), "2026-03-07");
+        assert_eq!(login_period_key(after_midnight, "America/New_York").unwrap(), "2026-03-08");
+        let dst_transition = chrono::DateTime::parse_from_rfc3339("2026-03-08T07:30:00Z").unwrap().with_timezone(&chrono::Utc);
+        assert_eq!(login_period_key(dst_transition, "America/New_York").unwrap(), "2026-03-08");
+        assert!(matches!(login_period_key(after_midnight, "Mars/Olympus"), Err(LoginRewardProgressError::InvalidConfig(_))));
     }
 }
