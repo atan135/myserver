@@ -426,6 +426,32 @@ impl ActivityEngine {
         Ok(snapshot)
     }
 
+    pub(crate) fn player_view_json(
+        &self,
+        character_id: &str,
+        snapshot: &PublishedActivitySnapshot,
+        now: DateTime<Utc>,
+    ) -> Result<serde_json::Value, ActivityEngineError> {
+        let player_state = if snapshot.activity.activity_type.as_str() == "login_reward" {
+            self.login_progress
+                .load_activity_state(character_id, &snapshot.activity.id, snapshot.version.version_no)
+                .map_err(Self::map_login_progress_error)?
+        } else {
+            None
+        };
+        let mut view = self.registry
+            .build_player_view(&snapshot.activity, &snapshot.version, player_state.as_ref())
+            .map_err(|error| ActivityEngineError::new("ACTIVITY_INVALID_CONFIG", error.message))?;
+        if snapshot.activity.activity_type.as_str() == "login_reward" {
+            if let Some(last_period_key) = view.get("last_period_key").and_then(|value| value.as_str()) {
+                let current_period = super::types::login_period_key(now, &snapshot.activity.timezone)
+                    .map_err(Self::map_login_progress_error)?;
+                view["today_status"] = serde_json::json!(if last_period_key == current_period { "logged_in" } else { "not_logged_in" });
+            }
+        }
+        Ok(view)
+    }
+
     async fn load_detail(
         &self,
         activity_id: &str,

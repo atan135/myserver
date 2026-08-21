@@ -325,6 +325,23 @@ function validateDraft(command: Record<string, unknown>): ActivityPreflightError
     if (typeof stage.rewardGroupKey !== "string" || !groupKeys.has(stage.rewardGroupKey)) pushError(errors, `${path}.rewardGroupKey`, "UNKNOWN_REFERENCE", "rewardGroupKey must reference a reward group");
     if (!stage.qualification || typeof stage.qualification !== "object" || Array.isArray(stage.qualification)) pushError(errors, `${path}.qualification`, "INVALID_OBJECT", "qualification must be an object");
   });
+  if (command.activityType === "login_reward" && stages.length > 0) {
+    const typedStages = command.typeConfig && typeof command.typeConfig === "object" && !Array.isArray(command.typeConfig)
+      ? Array.isArray((command.typeConfig as any).stages) ? (command.typeConfig as any).stages : []
+      : [];
+    const configuredByNo = new Map(typedStages.map((stage: any) => [Number(stage.stage_no), stage]));
+    const draftNos = stages.map((stage: any) => Number(stage.stageNo));
+    if (draftNos.some((stageNo, index) => stageNo !== [...draftNos].sort((left, right) => left - right)[index])) {
+      pushError(errors, "stages", "UNSORTED", "login_reward stages must be sorted by stageNo");
+    }
+    stages.forEach((stage: any, index) => {
+      const typed = configuredByNo.get(Number(stage.stageNo));
+      if (!typed) return;
+      if (typed.reward_group_key !== stage.rewardGroupKey) {
+        pushError(errors, `stages[${index}].rewardGroupKey`, "MISMATCH", "stage reward group must match typeConfig");
+      }
+    });
+  }
   if (!Array.isArray(command.stages)) pushError(errors, "stages", "REQUIRED", "stages must be an array");
   if (!Array.isArray(command.rewardGroups)) pushError(errors, "rewardGroups", "REQUIRED", "rewardGroups must be an array");
   return errors;

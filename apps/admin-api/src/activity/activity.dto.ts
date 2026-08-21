@@ -8,6 +8,7 @@ export class ActivityStageDto {
   @IsInt() @Min(1) stageNo!: number;
   @IsString() rewardGroupKey!: string;
   @IsObject() qualification!: Record<string, unknown>;
+  @IsOptional() @IsObject() display?: Record<string, unknown>;
 }
 
 export class ActivityRewardGroupDto {
@@ -65,7 +66,7 @@ export function assertActivityDraftShape(body: Record<string, unknown>): void {
     throw new Error("ACTIVITY_INVALID_CONFIG:stages and rewardGroups must be arrays");
   }
   body.stages.forEach((stage, index) =>
-    assertStrictJson(stage, ["stageId", "stageNo", "rewardGroupKey", "qualification"], `stages[${index}]`)
+    assertStrictJson(stage, ["stageId", "stageNo", "rewardGroupKey", "qualification", "display"], `stages[${index}]`)
   );
   body.rewardGroups.forEach((group, index) =>
     assertStrictJson(group, ["key", "selectionMode", "items"], `rewardGroups[${index}]`)

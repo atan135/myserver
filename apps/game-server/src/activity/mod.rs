@@ -118,7 +118,11 @@ pub(crate) async fn handle_packet(
                     ok: true,
                     error_code: String::new(),
                     activity: Some(summary(&snapshot, now)),
-                    progress_json: "{}".into(),
+                    progress_json: engine
+                        .player_view_json(identity.character_id(), &snapshot, now)
+                        .ok()
+                        .and_then(|view| serde_json::to_string(&view).ok())
+                        .unwrap_or_else(|| "{}".into()),
                     state_revision: 0,
                 },
                 Err(error) => ActivityDetailRes {

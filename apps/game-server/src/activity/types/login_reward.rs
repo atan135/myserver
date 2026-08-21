@@ -81,6 +81,7 @@ pub(crate) enum LoginRewardProgressError {
 
 pub(crate) trait LoginRewardProgressRepository: Send + Sync {
     fn load(&self, character_id: &str, activity_id: &str, version_no: i32) -> Result<(LoginRewardState, i64), LoginRewardProgressError>;
+    fn load_activity_state(&self, character_id: &str, activity_id: &str, version_no: i32) -> Result<Option<PlayerActivityState>, LoginRewardProgressError>;
     fn compare_and_set(&self, character_id: &str, activity_id: &str, version_no: i32, expected_revision: i64, state: LoginRewardState, current_stage_id: Option<String>) -> Result<i64, LoginRewardProgressError>;
     fn claim_stage(&self, character_id: &str, activity_id: &str, version_no: i32, expected_revision: i64, claim_key: &str, current_stage_id: Option<String>) -> Result<i64, LoginRewardProgressError>;
 }
@@ -98,6 +99,11 @@ impl LoginRewardProgressRepository for InMemoryLoginRewardProgressRepository {
         };
         let login_state = serde_json::from_value(record.type_state.clone()).map_err(|_| LoginRewardProgressError::StorageUnavailable)?;
         Ok((login_state, record.state_revision))
+    }
+
+    fn load_activity_state(&self, character_id: &str, activity_id: &str, version_no: i32) -> Result<Option<PlayerActivityState>, LoginRewardProgressError> {
+        let state = self.state.lock().map_err(|_| LoginRewardProgressError::StorageUnavailable)?;
+        Ok(state.get(&(character_id.to_string(), activity_id.to_string(), version_no)).cloned())
     }
 
     fn compare_and_set(&self, character_id: &str, activity_id: &str, version_no: i32, expected_revision: i64, next: LoginRewardState, current_stage_id: Option<String>) -> Result<i64, LoginRewardProgressError> {
@@ -249,10 +255,28 @@ impl PlayerViewBuilder for LoginRewardHandler {
         &self,
         activity: &Activity,
         _version: &ActivityVersion,
-        _player_state: Option<&PlayerActivityState>,
+        player_state: Option<&PlayerActivityState>,
     ) -> Result<Value, ActivityTypeError> {
         let config: LoginRewardConfig = serde_json::from_value(_version.type_config.clone()).map_err(|error| invalid(error.to_string()))?;
-        Ok(json!({"type": activity.activity_type.as_str(), "schema_version": self.schema_version(), "contract_only": true, "event_source": config.event_source, "cycle_unit": config.cycle_unit, "progression": config.progression, "miss_policy": config.miss_policy, "claim_mode": config.claim_mode, "stages": config.stages}))
+        let state = player_state
+            .and_then(|value| serde_json::from_value::<LoginRewardState>(value.type_state.clone()).ok())
+            .unwrap_or_default();
+        let progression_count = if config.progression == "cumulative" { state.cumulative_count } else { state.consecutive_count };
+        let claimed = state.claimed_stage_ids.iter().cloned().collect::<std::collections::BTreeSet<_>>();
+        let stages = config.stages.iter().map(|stage| {
+            let stage_id = stage.stage_no.to_string();
+            let claim_key = crate::activity::types::login_reward_claim_key(&stage_id, state.last_period_key.as_deref().unwrap_or(""), _version.version_no);
+            json!({
+                "stage_no": stage.stage_no,
+                "required_count": stage.required_count,
+                "reward_group_key": stage.reward_group_key,
+                "achieved": progression_count >= stage.required_count,
+                "claimable": progression_count >= stage.required_count && !claimed.contains(&claim_key),
+                "claimed": claimed.contains(&claim_key),
+            })
+        }).collect::<Vec<_>>();
+        let current_stage_id = player_state.and_then(|value| value.current_stage_id.clone());
+        Ok(json!({"type": activity.activity_type.as_str(), "schema_version": self.schema_version(), "contract_only": true, "event_source": config.event_source, "cycle_unit": config.cycle_unit, "progression": config.progression, "miss_policy": config.miss_policy, "claim_mode": config.claim_mode, "stages": stages, "current_stage_id": current_stage_id, "last_period_key": state.last_period_key, "consecutive_days": state.consecutive_count, "cumulative_days": state.cumulative_count, "today_status": if state.last_period_key.is_some() { "logged_in" } else { "not_logged_in" }}))
     }
 }
 

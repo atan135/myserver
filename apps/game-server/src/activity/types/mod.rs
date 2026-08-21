@@ -15,7 +15,7 @@ use std::sync::Arc;
 pub(crate) use login_reward::{
     apply_game_entry, GameEntryEvent, InMemoryLoginRewardProgressRepository,
     LoginRewardConfig, LoginRewardProgressError, LoginRewardProgressRepository,
-    LoginRewardProgressResult, LoginRewardHandler, eligible_stage_numbers, login_reward_claim_key,
+    LoginRewardProgressResult, LoginRewardHandler, eligible_stage_numbers, login_period_key, login_reward_claim_key,
 };
 pub(crate) use lottery::LotteryHandler;
 

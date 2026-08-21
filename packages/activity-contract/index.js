@@ -107,6 +107,9 @@ export function validateLoginRewardConfig(config) {
   const choices = [["event_source", LOGIN_REWARD_SCHEMA.eventSources], ["cycle_unit", LOGIN_REWARD_SCHEMA.cycleUnits], ["progression", LOGIN_REWARD_SCHEMA.progressions], ["miss_policy", LOGIN_REWARD_SCHEMA.missPolicies], ["claim_mode", LOGIN_REWARD_SCHEMA.claimModes]];
   for (const [field, values] of choices) if (!values.includes(config[field])) throw new ActivityTypeContractError("ACTIVITY_INVALID_CONFIG", `${field} is not supported for login_reward`);
   if (!Array.isArray(config.stages) || config.stages.length === 0) throw new ActivityTypeContractError("ACTIVITY_INVALID_CONFIG", "login_reward stages must be a non-empty array");
+  for (const field of ["progress", "state", "last_period_key", "consecutive_count", "cumulative_count", "claimed_stage_ids", "current_stage_id", "today_period_key", "reward_items"]) {
+    if (field in config) throw new ActivityTypeContractError("ACTIVITY_INVALID_CONFIG", `${field} is server-owned and cannot be submitted`);
+  }
   const stageNos = new Set();
   for (const [index, stage] of config.stages.entries()) {
     if (!stage || typeof stage !== "object" || Array.isArray(stage)) throw new ActivityTypeContractError("ACTIVITY_INVALID_CONFIG", `stages[${index}] must be an object`);
