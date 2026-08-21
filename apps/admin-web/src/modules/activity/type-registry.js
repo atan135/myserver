@@ -47,6 +47,7 @@ export function buildActivityDraftTemplate(type, key) {
 export async function loadActivityTypeEditor(type) {
   const definition = resolveActivityTypeDefinition(type);
   if (!definition) throw Object.assign(new Error(`unknown activity type: ${type}`), { code: "ACTIVITY_UNKNOWN_TYPE" });
+  await definition.module();
   const module = await definition.editor();
   return module.default || module;
 }
