@@ -337,7 +337,7 @@ mod tests {
             .dispatch_action(
                 &activity,
                 &version,
-                "claim",
+                "draw",
                 &PlayerContext {
                     character_id: "c1".into(),
                 },
