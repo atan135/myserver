@@ -6,10 +6,13 @@ import { AdminPolicyGuard } from "../auth/admin-policy.guard.js";
 import { Permissions } from "../auth/roles.decorator.js";
 import { ApiHttpException, badRequest } from "../common/http-exception.js";
 import { ADMIN_ACTIVITY_CONTROL } from "../tokens.js";
-import { assertActivityDraftShape, assertStrictJson } from "./activity.dto.js";
+import { assertActivityDraftShape, assertJsonObject, assertStrictJson } from "./activity.dto.js";
+import { ActivityControlError } from "./activity-control.service.js";
 import type { ActivityControlService } from "./activity-control.service.js";
 
 const DRAFT_FIELDS = ["key", "activityType", "schemaVersion", "startAt", "endAt", "claimDeadline", "timezone", "publicConfig", "typeConfig", "stages", "rewardGroups", "reason"] as const;
+const UPDATE_DRAFT_FIELDS = [...DRAFT_FIELDS, "ifMatch"] as const;
+const NEW_DRAFT_FIELDS = ["sourceVersion", "ifMatch", "reason", "overrides"] as const;
 const VERSION_FIELDS = ["version", "ifMatch", "reason"] as const;
 
 function text(value: unknown, name: string, max = 128): string {
@@ -51,14 +54,20 @@ export class ActivityController {
   @Post("drafts")
   @Permissions("activities.write")
   async createDraft(@Body() body: any) {
-    const command = this.draft(body);
+    const command = this.draft(body, DRAFT_FIELDS);
     return this.invoke(() => this.service.createDraft(command));
+  }
+
+  @Post(":activityId/drafts")
+  @Permissions("activities.write")
+  async createDraftFromPublished(@Param("activityId") activityId: string, @Body() body: any) {
+    return this.invoke(() => this.service.createDraftFromPublished(text(activityId, "activityId"), this.newDraftCommand(body)));
   }
 
   @Patch(":activityId/drafts")
   @Permissions("activities.write")
   async updateDraft(@Param("activityId") activityId: string, @Body() body: any) {
-    const command = this.draft(body);
+    const command = this.draft(body, UPDATE_DRAFT_FIELDS);
     return this.invoke(() => this.service.updateDraft(text(activityId, "activityId"), command));
   }
 
@@ -88,15 +97,22 @@ export class ActivityController {
     return this.invoke(() => this.service.records(text(activityId, "activityId"), { ...page(query), status: query?.status, characterId: query?.characterId }));
   }
 
-  private draft(body: any) {
+  private draft(body: any, fields: readonly string[]) {
     try {
-      assertStrictJson(body, DRAFT_FIELDS);
+      assertStrictJson(body, fields);
       assertActivityDraftShape(body);
       const type = text(body.activityType, "activityType", 64);
       const schemaVersion = Number(body.schemaVersion);
       if (!Number.isInteger(schemaVersion) || schemaVersion < 1) throw new Error("ACTIVITY_SCHEMA_VERSION_UNSUPPORTED");
       validateActivityTypeConfig(this.schemas, type, { ...body.typeConfig, schema_version: schemaVersion });
-      return { ...body, key: text(body.key, "key", 64), activityType: type, schemaVersion, reason: text(body.reason, "reason", 512) };
+      return {
+        ...body,
+        key: text(body.key, "key", 64),
+        activityType: type,
+        schemaVersion,
+        reason: text(body.reason, "reason", 512),
+        ifMatch: body.ifMatch ? text(body.ifMatch, "ifMatch", 128) : undefined
+      };
     } catch (error: any) {
       throw this.contractError(error);
     }
@@ -111,6 +127,22 @@ export class ActivityController {
     } catch (error: any) { throw this.contractError(error); }
   }
 
+  private newDraftCommand(body: any) {
+    try {
+      assertStrictJson(body, NEW_DRAFT_FIELDS);
+      const sourceVersion = Number(body.sourceVersion);
+      if (!Number.isInteger(sourceVersion) || sourceVersion < 1) throw new Error("ACTIVITY_VERSION_CONFLICT");
+      if (!body.overrides || typeof body.overrides !== "object" || Array.isArray(body.overrides)) throw new Error("ACTIVITY_INVALID_CONFIG");
+      assertJsonObject(body.overrides, "overrides");
+      return {
+        sourceVersion,
+        ifMatch: body.ifMatch ? text(body.ifMatch, "ifMatch", 128) : undefined,
+        reason: text(body.reason, "reason", 512),
+        overrides: body.overrides
+      };
+    } catch (error: any) { throw this.contractError(error); }
+  }
+
   private contractError(error: any) {
     const code = error?.code || String(error?.message || "ACTIVITY_INVALID_REQUEST").split(":")[0];
     return badRequest(code, "activity request does not satisfy the control-plane contract");
@@ -121,6 +153,13 @@ export class ActivityController {
     catch (error: any) {
       if (error?.code === "ACTIVITY_CONTROL_UNAVAILABLE") {
         throw new ApiHttpException(503, { ok: false, error: error.code, message: "activity control persistence is not enabled" });
+      }
+      if (error instanceof ActivityControlError) {
+        const status = error.code === "ACTIVITY_NOT_FOUND" ? 404
+          : error.code === "ACTIVITY_PRECHECK_FAILED" ? 422
+            : error.code.startsWith("ACTIVITY_VERSION_CONFLICT") || error.code.startsWith("ACTIVITY_ALREADY_") || error.code === "ACTIVITY_INVALID_STATE" || error.code === "ACTIVITY_PUBLISHED_IMMUTABLE" ? 409
+              : 400;
+        throw new ApiHttpException(status, { ok: false, error: error.code, message: error.message, details: error.details });
       }
       throw error;
     }

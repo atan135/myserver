@@ -14,6 +14,7 @@ function service() {
     async list(query) { return { items: [], total: 0, ...query }; },
     async detail(activityId) { return { activityId }; },
     async createDraft(command) { return command; },
+    async createDraftFromPublished(activityId, command) { return { activityId, ...command }; },
     async updateDraft(activityId, command) { return { activityId, ...command }; },
     async preflight(activityId, command) { return { activityId, ...command, ok: true }; },
     async publish(activityId, command) { return { activityId, ...command, ok: true }; },
@@ -47,6 +48,38 @@ test("activity controller exposes paginated list and strict draft contract", asy
     reason: "test"
   });
   assert.equal(draft.activityType, "login_reward");
+
+  const typedDraft = await controller.createDraft({
+    key: "typed", activityType: "login_reward", schemaVersion: 1,
+    startAt: "2026-01-01T00:00:00Z", endAt: "2026-01-02T00:00:00Z", claimDeadline: "2026-01-03T00:00:00Z",
+    timezone: "UTC", publicConfig: {}, typeConfig: { schema_version: 1, cadence: "daily" }, stages: [], rewardGroups: [], reason: "typed"
+  });
+  assert.equal(typedDraft.typeConfig.cadence, "daily");
+
+  await assert.rejects(
+    () => controller.createDraft({
+      key: "summer", activityType: "login_reward", schemaVersion: 1,
+      startAt: "2026-01-01T00:00:00Z", endAt: "2026-01-02T00:00:00Z", claimDeadline: "2026-01-03T00:00:00Z",
+      timezone: "UTC", publicConfig: {}, typeConfig: { schema_version: 1 }, stages: [], rewardGroups: [], reason: "test", ifMatch: "1"
+    }),
+    (error) => error.getResponse().error === "ACTIVITY_UNKNOWN_FIELD"
+  );
+  const updated = await controller.updateDraft("activity-1", {
+    key: "summer", activityType: "login_reward", schemaVersion: 1,
+    startAt: "2026-01-01T00:00:00Z", endAt: "2026-01-02T00:00:00Z", claimDeadline: "2026-01-03T00:00:00Z",
+    timezone: "UTC", publicConfig: {}, typeConfig: { schema_version: 1 }, stages: [], rewardGroups: [], reason: "edit", ifMatch: "W/\"activity-1-1\""
+  });
+  assert.equal(updated.ifMatch, "W/\"activity-1-1\"");
+
+  const forked = await controller.createDraftFromPublished("activity-1", {
+    sourceVersion: "1", ifMatch: "W/\"activity-1-1\"", reason: "new season", overrides: { publicConfig: { title: "next" } }
+  });
+  assert.equal(forked.activityId, "activity-1");
+  assert.equal(forked.sourceVersion, 1);
+  await assert.rejects(
+    () => controller.createDraftFromPublished("activity-1", { sourceVersion: 1, reason: "bad", overrides: { unknown: true }, extra: true }),
+    (error) => error.getResponse().error === "ACTIVITY_UNKNOWN_FIELD"
+  );
 });
 
 test("activity controller rejects schema version, deep and oversized JSON", async () => {

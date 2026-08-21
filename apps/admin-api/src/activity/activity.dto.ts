@@ -29,6 +29,7 @@ export class ActivityDraftDto {
   @IsArray() stages!: ActivityStageDto[];
   @IsArray() rewardGroups!: ActivityRewardGroupDto[];
   @IsString() reason!: string;
+  @IsOptional() @IsString() ifMatch?: string;
 }
 
 export class ActivityVersionCommandDto {
@@ -59,7 +60,7 @@ export function assertStrictJson(value: unknown, allowed: readonly string[], pat
 }
 
 export function assertActivityDraftShape(body: Record<string, unknown>): void {
-  assertStrictJson(body.typeConfig, ["schema_version"], "typeConfig");
+  assertJsonObject(body.typeConfig, "typeConfig");
   if (!Array.isArray(body.stages) || !Array.isArray(body.rewardGroups)) {
     throw new Error("ACTIVITY_INVALID_CONFIG:stages and rewardGroups must be arrays");
   }
@@ -69,6 +70,15 @@ export function assertActivityDraftShape(body: Record<string, unknown>): void {
   body.rewardGroups.forEach((group, index) =>
     assertStrictJson(group, ["key", "selectionMode", "items"], `rewardGroups[${index}]`)
   );
+}
+
+export function assertJsonObject(value: unknown, path: string): void {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`ACTIVITY_INVALID_CONFIG:${path} must be an object`);
+  }
+  const bytes = Buffer.byteLength(JSON.stringify(value));
+  if (bytes > ACTIVITY_JSON_MAX_BYTES) throw new Error("ACTIVITY_JSON_TOO_LARGE");
+  assertJsonDepth(value, 1);
 }
 
 function assertJsonDepth(value: object, depth: number): void {
