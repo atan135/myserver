@@ -8,6 +8,7 @@ mod cache;
 mod domain;
 mod engine;
 mod repository;
+mod settlement;
 mod types;
 
 use crate::core::context::ConnectionContext;
@@ -34,6 +35,11 @@ pub(crate) use engine::{ActivityActionRequest, ActivityActionResponse, ActivityE
 pub(crate) use repository::{
     ActivityRepository, ActivityRepositoryError, InMemoryActivityRepository,
     PublishedActivitySnapshot,
+};
+#[allow(unused_imports)]
+pub(crate) use settlement::{
+    ActivityClaimCoordinator, ActivityClaimRecord, ActivityDeliveryOutcome, ActivityRewardDelivery,
+    ClaimSettlement, ClaimStatus, build_reward_order, stable_reward_request_id,
 };
 #[allow(unused_imports)]
 pub(crate) use types::{

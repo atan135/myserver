@@ -2,7 +2,9 @@ use super::domain::ActivityStatus;
 use super::repository::{
     ActivityRepository, InMemoryActivityRepository, PublishedActivitySnapshot,
 };
+use super::settlement::{ActivityClaimCoordinator, ClaimStatus, build_reward_order};
 use super::types::{ActivityTypeRegistry, PlayerContext, TransactionContext};
+use crate::core::inventory::{NormalizedAssetItem, RewardDeliveryPolicy};
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -53,6 +55,7 @@ pub(crate) struct ActivityEngine {
     registry: Arc<ActivityTypeRegistry>,
     request_state: Arc<Mutex<RequestState>>,
     enabled: bool,
+    claim_coordinator: Option<ActivityClaimCoordinator>,
 }
 
 #[derive(Default)]
@@ -68,6 +71,7 @@ impl ActivityEngine {
             registry: Arc::new(ActivityTypeRegistry::with_defaults()),
             request_state: Arc::new(Mutex::new(RequestState::default())),
             enabled: true,
+            claim_coordinator: None,
         }
     }
 
@@ -79,6 +83,11 @@ impl ActivityEngine {
         let mut engine = Self::in_memory();
         engine.enabled = false;
         engine
+    }
+
+    pub(crate) fn with_claim_coordinator(mut self, coordinator: ActivityClaimCoordinator) -> Self {
+        self.claim_coordinator = Some(coordinator);
+        self
     }
 
     pub(crate) async fn list(
@@ -139,7 +148,7 @@ impl ActivityEngine {
         now: DateTime<Utc>,
     ) -> Result<PublishedActivitySnapshot, ActivityEngineError> {
         self.repository
-            .get_published(activity_id, now)
+            .get_published_for_detail(activity_id, now)
             .await
             .map_err(|_| {
                 ActivityEngineError::new(
@@ -227,7 +236,76 @@ impl ActivityEngine {
             &mut transaction,
         );
         let response = match outcome {
-            Ok(outcome) if outcome.applied => ActivityActionResponse { ok: true, ..base },
+            Ok(outcome) if outcome.applied => {
+                if request.action_type == "claim" {
+                    if let Some(coordinator) = &self.claim_coordinator {
+                        let items: Vec<NormalizedAssetItem> = outcome
+                            .result
+                            .get("reward_items")
+                            .and_then(|items| serde_json::from_value(items.clone()).ok())
+                            .unwrap_or_default();
+                        if items.is_empty() {
+                            return Self::failed(base, "ACTIVITY_MANUAL_REVIEW");
+                        }
+                        let semantic_claim_key = request.stage_id.clone();
+                        let order = match build_reward_order(
+                            character_id,
+                            &request.activity_id,
+                            snapshot.version.version_no,
+                            &semantic_claim_key,
+                            &items,
+                            RewardDeliveryPolicy::PreferInventory,
+                        ) {
+                            Ok(order) => order,
+                            Err(_) => return Self::failed(base, "ACTIVITY_MANUAL_REVIEW"),
+                        };
+                        let settlement = coordinator
+                            .settle(
+                                character_id,
+                                &request.activity_id,
+                                snapshot.version.version_no,
+                                &semantic_claim_key,
+                                &request.client_request_id,
+                                order,
+                            )
+                            .await;
+                        let duplicate = settlement.duplicate;
+                        match settlement.status {
+                            ClaimStatus::Granted => ActivityActionResponse {
+                                ok: true,
+                                duplicate,
+                                ..base
+                            },
+                            ClaimStatus::Processing => {
+                                let mut response = Self::failed(base, "ACTIVITY_PROCESSING");
+                                response.processing = true;
+                                response.duplicate = duplicate;
+                                response
+                            }
+                            ClaimStatus::RetryableFailure => {
+                                let mut response = Self::failed(base, "ACTIVITY_RETRYABLE_FAILURE");
+                                response.duplicate = duplicate;
+                                response
+                            }
+                            ClaimStatus::ReconciliationPending => {
+                                let mut response =
+                                    Self::failed(base, "ACTIVITY_RECONCILIATION_PENDING");
+                                response.duplicate = duplicate;
+                                response
+                            }
+                            ClaimStatus::ManualReview => {
+                                let mut response = Self::failed(base, "ACTIVITY_MANUAL_REVIEW");
+                                response.duplicate = duplicate;
+                                response
+                            }
+                        }
+                    } else {
+                        ActivityActionResponse { ok: true, ..base }
+                    }
+                } else {
+                    ActivityActionResponse { ok: true, ..base }
+                }
+            }
             Ok(_) => Self::failed(base, "ACTIVITY_QUALIFICATION_NOT_MET"),
             Err(error) => Self::failed(base, error.code.as_str()),
         };

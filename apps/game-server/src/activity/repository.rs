@@ -57,6 +57,17 @@ pub(crate) trait ActivityRepository: Send + Sync {
         now: DateTime<Utc>,
     ) -> RepositoryFuture<'a, Result<Option<PublishedActivitySnapshot>, ActivityRepositoryError>>;
 
+    /// Detail/action reads may inspect an offline row to return a stable lifecycle error. The
+    /// historical published read contract remains hidden for callers using get_published.
+    fn get_published_for_detail<'a>(
+        &'a self,
+        activity_id: &'a str,
+        now: DateTime<Utc>,
+    ) -> RepositoryFuture<'a, Result<Option<PublishedActivitySnapshot>, ActivityRepositoryError>>
+    {
+        self.get_published(activity_id, now)
+    }
+
     fn list_published<'a>(
         &'a self,
         now: DateTime<Utc>,
@@ -266,6 +277,20 @@ impl ActivityRepository for InMemoryActivityRepository {
     }
 
     fn get_published<'a>(
+        &'a self,
+        activity_id: &'a str,
+        now: DateTime<Utc>,
+    ) -> RepositoryFuture<'a, Result<Option<PublishedActivitySnapshot>, ActivityRepositoryError>>
+    {
+        Box::pin(async move {
+            let state = self.state.read().map_err(|_| Self::lock_error())?;
+            Ok(state
+                .get(activity_id)
+                .and_then(|stored| Self::snapshot(stored, now)))
+        })
+    }
+
+    fn get_published_for_detail<'a>(
         &'a self,
         activity_id: &'a str,
         now: DateTime<Utc>,
