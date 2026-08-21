@@ -108,11 +108,13 @@ test("audit sink receives bounded success/failure summaries without configuratio
   const service = new ActivityControlDomainService(repository, new NoopActivityRefreshNotifier(), { async write(event) { events.push(event); } });
   await service.createDraft(draft({ activityId: "activity-audit", publicConfig: { secret: "do-not-audit" }, actorId: "admin-7" }));
   await service.records("activity-audit", { limit: 10, offset: 0 });
+  await assert.rejects(() => service.records("missing-activity", { actorId: "admin-7" }));
   await assert.rejects(() => service.updateDraft("activity-audit", { ...draft({ activityId: "activity-audit", ifMatch: "stale" }), actorId: "admin-7" }));
   assert.equal(events[0].action, "draft_created");
   assert.equal(events[0].actorId, "admin-7");
   assert.equal(events[0].result, "success");
   assert.equal(events.some((event) => event.action === "records_read"), true);
+  assert.equal(events.some((event) => event.action === "records_read" && event.result === "failure" && event.actorId === "admin-7"), true);
   assert.equal(events.some((event) => event.result === "failure"), true);
   assert.equal(JSON.stringify(events).includes("do-not-audit"), false);
 
