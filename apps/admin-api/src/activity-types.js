@@ -8,5 +8,7 @@ export {
   validateActivityAction,
   validateActivityTypeConfig,
   validateLoginRewardConfig,
-  LOGIN_REWARD_SCHEMA
+  LOGIN_REWARD_SCHEMA,
+  validateLotteryConfig,
+  LOTTERY_SCHEMA
 } from "../../../packages/activity-contract/index.js";

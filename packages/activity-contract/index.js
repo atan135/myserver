@@ -16,7 +16,8 @@ export const ACTIVITY_TYPE_SCHEMAS = Object.freeze([
     type: "lottery",
     schemaVersion: ACTIVITY_TYPE_SCHEMA_VERSION,
     actions: Object.freeze(["list", "detail", "draw", "progress"]),
-    configShape: "object"
+    configShape: "lottery",
+    fields: Object.freeze(["schema_version", "draw_source", "pool_version", "free_draw_count", "voucher_item_id", "daily_draw_limit", "total_draw_limit", "pool_items", "pity", "limited_stock"])
   })
 ]);
 
@@ -28,6 +29,12 @@ export const LOGIN_REWARD_SCHEMA = Object.freeze({
   progressions: Object.freeze(["consecutive", "cumulative"]),
   missPolicies: Object.freeze(["reset", "carry"]),
   claimModes: Object.freeze(["manual", "automatic"])
+});
+
+export const LOTTERY_SCHEMA = Object.freeze({
+  type: "lottery",
+  schemaVersion: ACTIVITY_TYPE_SCHEMA_VERSION,
+  drawSources: Object.freeze(["player_action"]),
 });
 
 export class ActivityTypeContractError extends Error {
@@ -96,7 +103,46 @@ export function validateActivityTypeConfig(registry, type, config) {
     throw new ActivityTypeContractError("ACTIVITY_SCHEMA_VERSION_UNSUPPORTED", `schema version is not supported for '${type}'`);
   }
   if (type === "login_reward") validateLoginRewardConfig(config);
+  if (type === "lottery") validateLotteryConfig(config);
   return schema;
+}
+
+export function validateLotteryConfig(config) {
+  if (!config || typeof config !== "object" || Array.isArray(config)) throw new ActivityTypeContractError("ACTIVITY_INVALID_CONFIG", "lottery config must be an object");
+  if (config.schema_version !== LOTTERY_SCHEMA.schemaVersion) throw new ActivityTypeContractError("ACTIVITY_SCHEMA_VERSION_UNSUPPORTED", "lottery schema version is unsupported");
+  if (config.draw_source !== "player_action") throw new ActivityTypeContractError("ACTIVITY_INVALID_CONFIG", "draw_source must be player_action");
+  for (const field of ["pool_version", "free_draw_count", "daily_draw_limit", "total_draw_limit"]) {
+    if (!Number.isInteger(config[field]) || config[field] < 0 || (field === "pool_version" && config[field] < 1)) throw new ActivityTypeContractError("ACTIVITY_INVALID_CONFIG", `${field} must be a non-negative integer`);
+  }
+  if (config.voucher_item_id !== undefined && (!Number.isInteger(config.voucher_item_id) || config.voucher_item_id < 1)) throw new ActivityTypeContractError("ACTIVITY_INVALID_CONFIG", "voucher_item_id must be positive");
+  if (!Array.isArray(config.pool_items) || config.pool_items.length === 0) throw new ActivityTypeContractError("ACTIVITY_INVALID_CONFIG", "pool_items must be non-empty");
+  const itemIds = new Set();
+  let totalWeight = 0;
+  for (const [index, item] of config.pool_items.entries()) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) throw new ActivityTypeContractError("ACTIVITY_INVALID_CONFIG", `pool_items[${index}] must be an object`);
+    if (!Number.isInteger(item.item_id) || item.item_id < 1 || itemIds.has(item.item_id)) throw new ActivityTypeContractError("ACTIVITY_INVALID_CONFIG", `pool_items[${index}].item_id must be unique and positive`);
+    if (!Number.isInteger(item.quantity) || item.quantity < 1) throw new ActivityTypeContractError("ACTIVITY_INVALID_CONFIG", `pool_items[${index}].quantity must be positive`);
+    if (!Number.isInteger(item.weight) || item.weight < 1) throw new ActivityTypeContractError("ACTIVITY_INVALID_CONFIG", `pool_items[${index}].weight must be positive`);
+    itemIds.add(item.item_id); totalWeight += item.weight;
+    if (!Number.isSafeInteger(totalWeight)) throw new ActivityTypeContractError("ACTIVITY_INVALID_CONFIG", "pool item weights exceed safe integer range");
+  }
+  for (const field of ["pity", "limited_stock"]) if (config[field] !== undefined && (!config[field] || typeof config[field] !== "object" || Array.isArray(config[field]))) throw new ActivityTypeContractError("ACTIVITY_INVALID_CONFIG", `${field} must be an object when provided`);
+  for (const field of [
+    "progress",
+    "state",
+    "result",
+    "random_value",
+    "draw_request_id",
+    "consumed_items",
+    "free_draws_remaining",
+    "voucher_count",
+    "daily_draw_count",
+    "total_draw_count",
+    "last_draw_period_key",
+    "result_item_id",
+    "result_state"
+  ]) if (field in config) throw new ActivityTypeContractError("ACTIVITY_INVALID_CONFIG", `${field} is server-owned and cannot be submitted`);
+  return config;
 }
 
 export function validateLoginRewardConfig(config) {

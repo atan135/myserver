@@ -1,0 +1,12 @@
+import assert from "node:assert/strict";
+import { register } from "node:module";
+import test from "node:test";
+import { fileURLToPath, pathToFileURL } from "node:url";
+process.env.TS_NODE_PROJECT ??= fileURLToPath(new URL("../../../../tsconfig.json", import.meta.url));
+process.env.TS_NODE_TRANSPILE_ONLY ??= "true";
+register("ts-node/esm", pathToFileURL("./"));
+const { buildLotteryView, parseLotteryState, validateLottery } = await import("./lottery.ts");
+const config = { schema_version: 1, draw_source: "player_action", pool_version: 3, free_draw_count: 2, voucher_item_id: 9001, daily_draw_limit: 10, total_draw_limit: 100, pool_items: [{ item_id: 1001, quantity: 1, weight: 3 }, { item_id: 1002, quantity: 2, weight: 7 }] };
+test("admin-api lottery validates weighted pool and builds view", () => { assert.equal(validateLottery(config).pool_version, 3); assert.equal(buildLotteryView(config).pool_total_weight, 10); assert.equal(parseLotteryState({ free_draws_remaining: 1, result_state: "granted" }).result_state, "granted"); });
+test("admin-api lottery rejects invalid weights and client-owned result fields", () => { assert.throws(() => validateLottery({ ...config, pool_items: [{ item_id: 1, quantity: 1, weight: 0 }] }), { code: "ACTIVITY_INVALID_CONFIG" }); assert.throws(() => validateLottery({ ...config, result_item_id: 1 }), { code: "ACTIVITY_INVALID_CONFIG" }); });
+test("admin-api lottery rejects missing and unsupported schema versions", () => { const { schema_version: _schemaVersion, ...withoutVersion } = config; assert.throws(() => validateLottery(withoutVersion), { code: "ACTIVITY_SCHEMA_VERSION_UNSUPPORTED" }); assert.throws(() => validateLottery({ ...config, schema_version: 2 }), { code: "ACTIVITY_SCHEMA_VERSION_UNSUPPORTED" }); });

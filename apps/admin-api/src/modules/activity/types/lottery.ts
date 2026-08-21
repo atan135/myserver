@@ -1,0 +1,49 @@
+import { LOTTERY_SCHEMA, validateLotteryConfig } from "../../../activity-types.js";
+
+export interface LotteryPoolItem { item_id: number; quantity: number; weight: number; }
+export interface LotteryExtension { enabled?: boolean; threshold?: number; stock?: number; }
+export interface LotteryConfig {
+  schema_version: 1;
+  draw_source: "player_action";
+  pool_version: number;
+  free_draw_count: number;
+  voucher_item_id?: number;
+  daily_draw_limit: number;
+  total_draw_limit: number;
+  pool_items: LotteryPoolItem[];
+  pity?: LotteryExtension;
+  limited_stock?: LotteryExtension;
+}
+export interface LotteryState {
+  free_draws_remaining: number;
+  voucher_count: number;
+  daily_draw_count: number;
+  total_draw_count: number;
+  last_draw_period_key?: string;
+  pool_version?: number;
+  draw_request_id?: string;
+  result_item_id?: number;
+  result_state?: "pending" | "granted" | "retryable_failure" | "reconciliation_pending" | "manual_review";
+}
+export interface LotteryView extends LotteryConfig { type: "lottery"; state?: LotteryState; pool_total_weight: number; contract_only: true; }
+export const lotterySchema = LOTTERY_SCHEMA;
+export function validateLottery(config: unknown): LotteryConfig { return validateLotteryConfig(config) as LotteryConfig; }
+export function buildLotteryView(config: LotteryConfig, state?: LotteryState): LotteryView {
+  validateLottery(config);
+  return { type: "lottery", ...config, pool_items: config.pool_items.map((item) => ({ ...item })), pool_total_weight: config.pool_items.reduce((sum, item) => sum + item.weight, 0), state, contract_only: true };
+}
+export function parseLotteryState(value: unknown): LotteryState {
+  const state = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+  return {
+    free_draws_remaining: Number.isInteger(state.free_draws_remaining) && Number(state.free_draws_remaining) >= 0 ? Number(state.free_draws_remaining) : 0,
+    voucher_count: Number.isInteger(state.voucher_count) && Number(state.voucher_count) >= 0 ? Number(state.voucher_count) : 0,
+    daily_draw_count: Number.isInteger(state.daily_draw_count) && Number(state.daily_draw_count) >= 0 ? Number(state.daily_draw_count) : 0,
+    total_draw_count: Number.isInteger(state.total_draw_count) && Number(state.total_draw_count) >= 0 ? Number(state.total_draw_count) : 0,
+    last_draw_period_key: typeof state.last_draw_period_key === "string" ? state.last_draw_period_key : undefined,
+    pool_version: Number.isInteger(state.pool_version) ? Number(state.pool_version) : undefined,
+    draw_request_id: typeof state.draw_request_id === "string" ? state.draw_request_id : undefined,
+    result_item_id: Number.isInteger(state.result_item_id) ? Number(state.result_item_id) : undefined,
+    result_state: ["pending", "granted", "retryable_failure", "reconciliation_pending", "manual_review"].includes(String(state.result_state)) ? state.result_state as LotteryState["result_state"] : undefined
+  };
+}
+export const lotteryHandler = Object.freeze({ type: "lottery", schemaVersion: 1, supportedActions: ["list", "detail", "draw", "progress"] as const });
