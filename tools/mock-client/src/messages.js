@@ -332,6 +332,24 @@ export function encodeApplyCharacterProgressReq(progressId) {
   return encodeStringField(1, progressId);
 }
 
+// Activity player requests. Identity, progress and reward contents are never client fields.
+export function encodeActivityListReq() {
+  return Buffer.alloc(0);
+}
+
+export function encodeActivityDetailReq(activityId, version = 0) {
+  return Buffer.concat([encodeStringField(1, activityId), encodeUInt32Field(2, version)]);
+}
+
+export function encodeActivityClaimReq(activityId, version, stageId, clientRequestId) {
+  return Buffer.concat([
+    encodeStringField(1, activityId),
+    encodeUInt32Field(2, version),
+    encodeStringField(3, stageId),
+    encodeStringField(4, clientRequestId)
+  ]);
+}
+
 export function encodeDebugCharacterTitleReq({
   action = "",
   titleId = "",
@@ -588,6 +606,20 @@ function decodeCharacterProgressRewardSummary(buffer) {
     title: fields.get(4) ? decodeCharacterTitleSummary(fields.get(4)) : null,
     discipline: fields.get(5) ? decodeCharacterDisciplineSummary(fields.get(5)) : null,
     eligibility: readString(fields, 6)
+  };
+}
+
+function decodeActivitySummary(buffer) {
+  const fields = decodeFieldsWithRepeated(buffer);
+  return {
+    activityId: readString(fields, 1),
+    version: readUInt32(fields, 2),
+    activityType: readString(fields, 3),
+    status: readString(fields, 4),
+    startAtMs: readInt64(fields, 5),
+    endAtMs: readInt64(fields, 6),
+    claimDeadlineMs: readInt64(fields, 7),
+    timezone: readString(fields, 8)
   };
 }
 
@@ -878,6 +910,33 @@ export function decodeByMessageType(messageType, body) {
         sourceType: readString(fields, 6),
         sourceId: readString(fields, 7),
         rewards: decodeRepeatedMessage(fields, 8, decodeCharacterProgressRewardSummary)
+      };
+    case MESSAGE_TYPE.ACTIVITY_LIST_RES:
+      return {
+        ok: readBool(fields, 1),
+        errorCode: readString(fields, 2),
+        serverTimeMs: readInt64(fields, 3),
+        activities: decodeRepeatedMessage(fields, 4, decodeActivitySummary)
+      };
+    case MESSAGE_TYPE.ACTIVITY_DETAIL_RES:
+      return {
+        ok: readBool(fields, 1),
+        errorCode: readString(fields, 2),
+        activity: fields.get(3) ? decodeActivitySummary(fields.get(3)) : null,
+        progressJson: readString(fields, 4),
+        stateRevision: readUInt32(fields, 5)
+      };
+    case MESSAGE_TYPE.ACTIVITY_CLAIM_RES:
+      return {
+        ok: readBool(fields, 1),
+        errorCode: readString(fields, 2),
+        activityId: readString(fields, 3),
+        version: readUInt32(fields, 4),
+        stageId: readString(fields, 5),
+        clientRequestId: readString(fields, 6),
+        processing: readBool(fields, 7),
+        duplicate: readBool(fields, 8),
+        stateRevision: readUInt32(fields, 9)
       };
     case MESSAGE_TYPE.DEBUG_CHARACTER_TITLE_RES:
       return {

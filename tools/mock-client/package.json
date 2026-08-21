@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "node src/index.js",
     "flow": "node src/index.js",
-    "test": "node --test src/mail-https.test.js src/scenarios/room-control.test.js",
+    "test": "node --test src/mail-https.test.js src/scenarios/room-control.test.js src/activity.test.js",
     "rollout-transfer": "node ../rollout/rollout-control-plane-cli.js",
     "rollout-fault-drill": "node ../rollout/rollout-fault-drill-cli.js"
   },

@@ -268,6 +268,7 @@ export const SCENARIO = {
   INVENTORY_WAREHOUSE: "inventory-warehouse",
   INVENTORY_GET: "inventory-get",
   INVENTORY_FULL: "inventory-full",
+  ACTIVITY: "activity",
   // Character scenarios
   CHARACTER_LIST: "character-list",
   CHARACTER_CREATE: "character-create",

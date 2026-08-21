@@ -33,6 +33,7 @@ export {
 
 // Game scenarios
 export { runGameplayRoundtrip } from "./game.js";
+export { runActivityScenario } from "./activity.js";
 export { runCombatDualClient } from "./combat.js";
 export {
   buildRobotMovePayload,

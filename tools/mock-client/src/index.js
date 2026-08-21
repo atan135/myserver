@@ -37,6 +37,7 @@ import {
   runCreateMatchedRoomAndJoin,
   // Game scenarios
   runGameplayRoundtrip,
+  runActivityScenario,
   runCombatDualClient,
   runRobotSyncRoom,
   // Movement scenarios
@@ -137,6 +138,14 @@ async function runChatScenario(options) {
 
 async function main() {
   const options = parseArgs(process.argv.slice(2));
+
+  if (options.scenario === SCENARIO.ACTIVITY) {
+    await runActivityScenario(async (messageType, body) => {
+      console.log(JSON.stringify({ messageType, bodyHex: body.toString("hex") }));
+    });
+    console.log(`scenario completed: ${options.scenario}`);
+    return;
+  }
 
   // Multi-client scenarios (handled separately)
   if (options.scenario === SCENARIO.TWO_CLIENT_ROOM) {

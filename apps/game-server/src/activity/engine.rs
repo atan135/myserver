@@ -455,6 +455,28 @@ mod tests {
             engine.list("", now).await.unwrap_err().code,
             "ACTIVITY_AUTH_REQUIRED"
         );
+        assert_eq!(
+            engine
+                .detail("character-1", "not-owned-activity", 0, now)
+                .await
+                .unwrap_err()
+                .code,
+            "ACTIVITY_NOT_FOUND"
+        );
+        let unauthorized_action = engine
+            .dispatch_action(
+                "character-1",
+                ActivityActionRequest {
+                    activity_id: "not-owned-activity".into(),
+                    version: 0,
+                    stage_id: "stage-1".into(),
+                    action_type: "claim".into(),
+                    client_request_id: "unauthorized-activity".into(),
+                },
+                now,
+            )
+            .await;
+        assert_eq!(unauthorized_action.error_code, Some("ACTIVITY_NOT_FOUND"));
         let request = ActivityActionRequest {
             activity_id: "a1".into(),
             version: 1,
