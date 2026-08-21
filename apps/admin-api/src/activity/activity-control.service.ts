@@ -425,9 +425,10 @@ export class ActivityControlDomainService implements ActivityControlService {
   }
 
   private async withAudit<T>(result: T, event: Omit<ActivityAuditEvent, "result">): Promise<T> {
+    let auditStatus: Record<string, unknown> = { status: "sent" };
     try { await this.audit.write({ ...event, result: "success", summary: summarize(result) }); }
-    catch { /* audit storage is reported by the production adapter; never leak payload */ }
-    return result;
+    catch (error: any) { auditStatus = { status: "failed", error: String(error?.message || "audit storage unavailable") }; }
+    return result && typeof result === "object" ? { ...(result as Record<string, unknown>), audit: auditStatus } as T : result;
   }
 
   private async auditFailure(action: ActivityAuditEvent["action"], command: Record<string, unknown>, error: any): Promise<void> {

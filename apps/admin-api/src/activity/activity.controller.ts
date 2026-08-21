@@ -1,5 +1,5 @@
 import { Body, Controller, Get, Inject, Param, Patch, Post, Query, Req, UseGuards } from "@nestjs/common";
-import { ApiBearerAuth, ApiTags } from "@nestjs/swagger";
+import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from "@nestjs/swagger";
 import { createActivityTypeRegistry, validateActivityTypeConfig } from "../activity-types.js";
 import { JwtAuthGuard } from "../auth/jwt-auth.guard.js";
 import { AdminPolicyGuard } from "../auth/admin-policy.guard.js";
@@ -43,6 +43,8 @@ export class ActivityController {
   constructor(@Inject(ADMIN_ACTIVITY_CONTROL) private readonly service: ActivityControlService) {}
 
   @Get()
+  @ApiOperation({ summary: "List activity control-plane records" })
+  @ApiResponse({ status: 503, description: "Activity persistence provider is unavailable" })
   @Permissions("activities.read")
   async list(@Query() query: any) {
     try { assertStrictJson(query ?? {}, ["status", "activityType", "key", "limit", "offset"], "query"); }
@@ -51,12 +53,15 @@ export class ActivityController {
   }
 
   @Get(":activityId")
+  @ApiOperation({ summary: "Get activity detail and version summary" })
   @Permissions("activities.read")
   async detail(@Param("activityId") activityId: string) {
     return this.invoke(() => this.service.detail(text(activityId, "activityId")));
   }
 
   @Post("drafts")
+  @ApiOperation({ summary: "Create an activity draft" })
+  @ApiResponse({ status: 422, description: "Draft preflight failed" })
   @Permissions("activities.write")
   async createDraft(@Body() body: any, @Req() request?: any) {
     const command = this.draft(body, DRAFT_FIELDS);
@@ -64,12 +69,16 @@ export class ActivityController {
   }
 
   @Post(":activityId/drafts")
+  @ApiOperation({ summary: "Fork a published immutable version into a new draft" })
+  @ApiResponse({ status: 409, description: "Source version CAS or lifecycle conflict" })
   @Permissions("activities.write")
   async createDraftFromPublished(@Param("activityId") activityId: string, @Body() body: any, @Req() request?: any) {
     return this.invoke(() => this.service.createDraftFromPublished(text(activityId, "activityId"), actorCommand(this.newDraftCommand(body), request)));
   }
 
   @Patch(":activityId/drafts")
+  @ApiOperation({ summary: "Update an unpublished activity draft" })
+  @ApiResponse({ status: 409, description: "Stale draft or published version is immutable" })
   @Permissions("activities.write")
   async updateDraft(@Param("activityId") activityId: string, @Body() body: any, @Req() request?: any) {
     const command = this.draft(body, UPDATE_DRAFT_FIELDS);
@@ -77,24 +86,32 @@ export class ActivityController {
   }
 
   @Post(":activityId/preflight")
+  @ApiOperation({ summary: "Run field-level publish preflight" })
+  @ApiResponse({ status: 422, description: "Preflight failed" })
   @Permissions("activities.publish")
   async preflight(@Param("activityId") activityId: string, @Body() body: any, @Req() request?: any) {
     return this.invoke(() => this.service.preflight(text(activityId, "activityId"), actorCommand(this.versionCommand(body), request)));
   }
 
   @Post(":activityId/publish")
+  @ApiOperation({ summary: "Publish an immutable activity version" })
+  @ApiResponse({ status: 409, description: "CAS or repeated publish conflict" })
   @Permissions("activities.publish")
   async publish(@Param("activityId") activityId: string, @Body() body: any, @Req() request?: any) {
     return this.invoke(() => this.service.publish(text(activityId, "activityId"), actorCommand(this.versionCommand(body), request)));
   }
 
   @Post(":activityId/offline")
+  @ApiOperation({ summary: "Take a published activity offline" })
+  @ApiResponse({ status: 409, description: "CAS or repeated offline conflict" })
   @Permissions("activities.offline")
   async offline(@Param("activityId") activityId: string, @Body() body: any, @Req() request?: any) {
     return this.invoke(() => this.service.offline(text(activityId, "activityId"), actorCommand(this.versionCommand(body), request)));
   }
 
   @Get(":activityId/records")
+  @ApiOperation({ summary: "Read append-only claims, draws and reward grant records" })
+  @ApiResponse({ status: 503, description: "Activity persistence provider is unavailable" })
   @Permissions("activities.records.read")
   async records(@Param("activityId") activityId: string, @Query() query: any, @Req() request?: any) {
     try {

@@ -20,5 +20,6 @@
 - `apps/game-server/src/activity/cache.rs` 提供 Redis 版本/活动列表缓存和刷新通知适配器；Redis 不是活动事实源。
 - `apps/game-server/src/activity/types/` 注册 `login_reward` 与 `lottery` 的契约验证 handler。当前 handler 只验证 schema/action 并返回 contract-only 结果，不包含登录累计、抽奖随机、保底或奖励算法。
 - `packages/activity-contract/` 是 `admin-api` 与 `admin-web` 共用的类型 schema 注册契约；未知类型、动作或 schema 版本会被拒绝。
+- `apps/admin-api/src/activity/` 已提供运营控制面公共 API 契约：草稿保存、字段级预检、发布/下线 CAS、已发布版本 fork 新草稿、只读事实查询、RBAC 权限和最小审计事件。当前生产 provider 仍显式返回 `ACTIVITY_CONTROL_UNAVAILABLE`；内存 repository 仅用于离线契约测试，不是生产事实源。
 
 目录约定：公共领域代码放在 `activity/` 根下，类型独有代码只放在同级 `activity/types/` 的独立文件中；活动奖励只能经统一资产交付能力处理，不复用任务 `progress_id` 作为活动事实。当前尚未新增玩家协议消息号，外部客户端仍使用既有最小进度协议边界。

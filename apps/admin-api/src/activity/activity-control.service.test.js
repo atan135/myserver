@@ -122,3 +122,11 @@ test("audit sink receives bounded success/failure summaries without configuratio
   await assert.rejects(() => service.publish("activity-audit", { version: 1, reason: "stale", actorId: "admin-7" }));
   assert.equal(events.some((event) => event.action === "published" && event.result === "failure" && event.actorId === "admin-7"), true);
 });
+
+test("audit sink failure is explicit and never makes configuration payload part of the response", async () => {
+  const service = new ActivityControlDomainService(new InMemoryActivityControlRepository(), new NoopActivityRefreshNotifier(), { async write() { throw new Error("audit unavailable"); } });
+  const result = await service.createDraft(draft({ activityId: "activity-audit-failure", publicConfig: { sensitive: "secret" } }));
+  assert.equal(result.audit.status, "failed");
+  assert.equal(JSON.stringify(result).includes("secret"), true);
+  assert.equal(JSON.stringify(result.audit).includes("secret"), false);
+});

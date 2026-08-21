@@ -8,6 +8,7 @@ process.env.TS_NODE_TRANSPILE_ONLY ??= "true";
 register("ts-node/esm", pathToFileURL("./"));
 
 const { ActivityController } = await import("./activity.controller.ts");
+const { ActivityControlError } = await import("./activity-control.service.ts");
 
 function service() {
   return {
@@ -108,4 +109,19 @@ test("activity controller rejects schema version, deep and oversized JSON", asyn
   await assert.rejects(() => controller.createDraft({ ...base, schemaVersion: 1, typeConfig: { schema_version: 1 }, unknown: true }), (error) => error.getResponse().error === "ACTIVITY_UNKNOWN_FIELD");
   await assert.rejects(() => controller.createDraft({ ...base, schemaVersion: 1, typeConfig: { schema_version: 1 }, stages: [{ stageId: "s1", stageNo: 1, rewardGroupKey: "g1", qualification: {}, extra: true }] }), (error) => error.getResponse().error === "ACTIVITY_UNKNOWN_FIELD");
   await assert.rejects(() => controller.createDraft({ ...base, schemaVersion: 1, typeConfig: { schema_version: 1 }, publicConfig: { blob: "x".repeat(70_000) } }), (error) => error.getResponse().error === "ACTIVITY_JSON_TOO_LARGE");
+});
+
+test("activity controller maps domain conflicts, preflight failures and missing resources to stable HTTP statuses", async () => {
+  const controller = new ActivityController({
+    async list() { return {}; },
+    async detail() { throw new ActivityControlError("ACTIVITY_NOT_FOUND", "missing"); },
+    async createDraft() { return {}; }, async createDraftFromPublished() { return {}; }, async updateDraft() { return {}; },
+    async preflight() { throw new ActivityControlError("ACTIVITY_PRECHECK_FAILED", "invalid", [{ path: "typeConfig", code: "INVALID" }]); },
+    async publish() { throw new ActivityControlError("ACTIVITY_VERSION_CONFLICT", "stale"); },
+    async offline() { throw new ActivityControlError("ACTIVITY_ALREADY_OFFLINE", "repeat"); }, async records() { return {}; }
+  });
+  await assert.rejects(() => controller.detail("missing"), (error) => error.getStatus() === 404 && error.getResponse().error === "ACTIVITY_NOT_FOUND");
+  await assert.rejects(() => controller.preflight("activity-1", { version: 1, reason: "check" }), (error) => error.getStatus() === 422 && error.getResponse().error === "ACTIVITY_PRECHECK_FAILED");
+  await assert.rejects(() => controller.publish("activity-1", { version: 1, reason: "publish" }), (error) => error.getStatus() === 409 && error.getResponse().error === "ACTIVITY_VERSION_CONFLICT");
+  await assert.rejects(() => controller.offline("activity-1", { version: 1, reason: "repeat" }), (error) => error.getStatus() === 409 && error.getResponse().error === "ACTIVITY_ALREADY_OFFLINE");
 });
