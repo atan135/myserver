@@ -1,4 +1,5 @@
 import { LOTTERY_SCHEMA, validateLotteryConfig } from "../../../activity-types.js";
+import { createHash } from "node:crypto";
 
 export interface LotteryPoolItem { item_id: number; quantity: number; weight: number; }
 export interface LotteryExtension { enabled?: boolean; threshold?: number; stock?: number; }
@@ -25,12 +26,69 @@ export interface LotteryState {
   result_item_id?: number;
   result_state?: "pending" | "granted" | "retryable_failure" | "reconciliation_pending" | "manual_review";
 }
-export interface LotteryView extends LotteryConfig { type: "lottery"; state?: LotteryState; pool_total_weight: number; contract_only: true; }
+export interface LotteryView extends LotteryConfig { type: "lottery"; state?: LotteryState; pool_total_weight: number; weight_digest: string; pool_summary: { item_count: number; total_weight: number }; contract_only: true; }
 export const lotterySchema = LOTTERY_SCHEMA;
-export function validateLottery(config: unknown): LotteryConfig { return validateLotteryConfig(config) as LotteryConfig; }
+const CONFIG_FIELDS = new Set(["schema_version", "draw_source", "pool_version", "free_draw_count", "voucher_item_id", "daily_draw_limit", "total_draw_limit", "pool_items", "pity", "limited_stock"]);
+const POOL_FIELDS = new Set(["item_id", "quantity", "weight"]);
+const EXTENSION_FIELDS = new Set(["enabled", "threshold", "stock"]);
+const SERVER_VIEW_FIELDS = new Set(["type", "state", "pool_total_weight", "pool_summary", "weight_digest", "contract_only", "progress", "result", "random_value", "draw_request_id", "consumed_items", "free_draws_remaining", "voucher_count", "daily_draw_count", "total_draw_count", "last_draw_period_key", "result_item_id", "result_state", "winner", "winner_item_id", "winner_quantity"]);
+function strictObject(value: unknown, path: string): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw Object.assign(new Error(`${path} must be an object`), { code: "ACTIVITY_INVALID_CONFIG" });
+  return value as Record<string, unknown>;
+}
+function rejectUnknown(value: Record<string, unknown>, allowed: Set<string>, path: string): void {
+  for (const key of Object.keys(value)) if (!allowed.has(key)) throw Object.assign(new Error(`${path}.${key} is not allowed`), { code: "ACTIVITY_INVALID_CONFIG" });
+}
+function validateStrictShape(config: unknown): void {
+  const root = strictObject(config, "lottery config");
+  rejectUnknown(root, CONFIG_FIELDS, "lottery config");
+  if (Array.isArray(root.pool_items)) root.pool_items.forEach((item, index) => rejectUnknown(strictObject(item, `pool_items[${index}]`), POOL_FIELDS, `pool_items[${index}]`));
+  for (const key of ["pity", "limited_stock"]) if (key in root) rejectUnknown(strictObject(root[key], key), EXTENSION_FIELDS, key);
+}
+export function validateLottery(config: unknown): LotteryConfig {
+  validateStrictShape(config);
+  return validateLotteryConfig(config) as LotteryConfig;
+}
+export function lotteryWeightDigest(config: LotteryConfig): string {
+  const hash = createHash("sha256");
+  hash.update("lottery-pool-weight-v1");
+  const buffer = Buffer.alloc(4);
+  buffer.writeUInt32LE(config.pool_version);
+  hash.update(buffer);
+  for (const item of config.pool_items) {
+    const itemBuffer = Buffer.alloc(16);
+    itemBuffer.writeInt32LE(item.item_id, 0);
+    itemBuffer.writeUInt32LE(item.quantity, 4);
+    itemBuffer.writeBigUInt64LE(BigInt(item.weight), 8);
+    hash.update(itemBuffer);
+  }
+  return `sha256:${hash.digest("hex")}`;
+}
 export function buildLotteryView(config: LotteryConfig, state?: LotteryState): LotteryView {
   validateLottery(config);
-  return { type: "lottery", ...config, pool_items: config.pool_items.map((item) => ({ ...item })), pool_total_weight: config.pool_items.reduce((sum, item) => sum + item.weight, 0), state, contract_only: true };
+  const totalWeight = config.pool_items.reduce((sum, item) => sum + item.weight, 0);
+  return { type: "lottery", ...config, pool_items: config.pool_items.map((item) => ({ ...item })), pool_total_weight: totalWeight, weight_digest: lotteryWeightDigest(config), pool_summary: { item_count: config.pool_items.length, total_weight: totalWeight }, state: state ? parseLotteryState(state) : undefined, contract_only: true };
+}
+export function serializeLotteryConfig(value: unknown): LotteryConfig {
+  const source = strictObject(value, "lottery config");
+  const sanitized = Object.fromEntries(Object.entries(source).filter(([key]) => !SERVER_VIEW_FIELDS.has(key))) as Record<string, unknown>;
+  if (Array.isArray(sanitized.pool_items)) sanitized.pool_items = sanitized.pool_items.map((item, index) => {
+    const poolItem = strictObject(item, `pool_items[${index}]`);
+    return Object.fromEntries(Object.entries(poolItem).filter(([key]) => key !== "reward_exists"));
+  });
+  const config = validateLottery(sanitized);
+  return {
+    schema_version: 1,
+    draw_source: "player_action",
+    pool_version: config.pool_version,
+    free_draw_count: config.free_draw_count,
+    ...(config.voucher_item_id === undefined ? {} : { voucher_item_id: config.voucher_item_id }),
+    daily_draw_limit: config.daily_draw_limit,
+    total_draw_limit: config.total_draw_limit,
+    pool_items: config.pool_items.map(({ item_id, quantity, weight }) => ({ item_id, quantity, weight })),
+    ...(config.pity ? { pity: { ...config.pity } } : {}),
+    ...(config.limited_stock ? { limited_stock: { ...config.limited_stock } } : {})
+  };
 }
 export function parseLotteryState(value: unknown): LotteryState {
   const state = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};

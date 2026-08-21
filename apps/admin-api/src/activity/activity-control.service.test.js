@@ -67,6 +67,11 @@ test("lottery preflight validates pool quantities and reward catalog references"
       && error.details.some((item) => item.path === "typeConfig.pool_items[0].quantity" && item.code === "INVALID")
       && error.details.some((item) => item.path === "typeConfig.pool_items[0].item_id" && item.code === "UNKNOWN_REFERENCE")
   );
+  await assert.rejects(
+    () => service.createDraft(lotteryDraft({ typeConfig: { ...lotteryDraft().typeConfig, pool_version: 0x100000000, pity: { enabled: true, unexpected: 1 } } })),
+    (error) => error instanceof ActivityControlError
+      && error.details.some((item) => item.path === "typeConfig" && item.code === "ACTIVITY_INVALID_CONFIG")
+  );
 });
 
 test("lottery publish rejects changing weights without a new pool version", async () => {
