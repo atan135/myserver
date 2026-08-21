@@ -201,7 +201,7 @@ function pushError(errors: ActivityPreflightError[], path: string, code: string,
 
 function validateDraft(command: Record<string, unknown>): ActivityPreflightError[] {
   const errors: ActivityPreflightError[] = [];
-  for (const field of ["key", "activityType", "startAt", "endAt", "claimDeadline", "timezone"]) {
+  for (const field of ["key", "activityType", "startAt", "endAt", "claimDeadline", "timezone", "reason"]) {
     if (typeof command[field] !== "string" || !String(command[field]).trim()) pushError(errors, field, "REQUIRED", `${field} is required`);
   }
   if (!Number.isInteger(Number(command.schemaVersion)) || Number(command.schemaVersion) < 1) pushError(errors, "schemaVersion", "INVALID", "schemaVersion must be a positive integer");
@@ -293,6 +293,7 @@ export class ActivityControlDomainService implements ActivityControlService {
     return { activityId, version: requestedVersion, valid: errors.length === 0, errors };
   }
   async publish(activityId: string, command: Record<string, unknown>): Promise<unknown> {
+    if (typeof command.reason !== "string" || !command.reason.trim()) throw new ActivityControlError("ACTIVITY_INVALID_REQUEST", "reason is required");
     const detail: any = await this.repository.detail(activityId);
     const draft = detail?.draft as Record<string, unknown> | undefined;
     if (!draft) throw new ActivityControlError("ACTIVITY_NOT_FOUND", "activity draft was not found");
@@ -307,6 +308,7 @@ export class ActivityControlDomainService implements ActivityControlService {
     }
   }
   async offline(activityId: string, command: Record<string, unknown>): Promise<unknown> {
+    if (typeof command.reason !== "string" || !command.reason.trim()) throw new ActivityControlError("ACTIVITY_INVALID_REQUEST", "reason is required");
     const result: any = await this.repository.offline(activityId, command);
     try {
       await this.notifier.notify({ activityId, version: Number(result.version), action: "offline" });
