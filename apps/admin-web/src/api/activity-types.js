@@ -6,5 +6,7 @@ export {
   registerActivityTypeSchema,
   resolveActivityTypeSchema,
   validateActivityAction,
-  validateActivityTypeConfig
+  validateActivityTypeConfig,
+  validateLoginRewardConfig,
+  LOGIN_REWARD_SCHEMA
 } from "../../../../packages/activity-contract/index.js";

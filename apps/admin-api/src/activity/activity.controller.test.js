@@ -43,7 +43,7 @@ test("activity controller exposes paginated list and strict draft contract", asy
     claimDeadline: "2026-01-03T00:00:00Z",
     timezone: "UTC",
     publicConfig: {},
-    typeConfig: { schema_version: 1 },
+    typeConfig: { schema_version: 1, event_source: "game_entry", cycle_unit: "natural_day", progression: "consecutive", miss_policy: "reset", claim_mode: "manual", stages: [{ stage_no: 1, required_count: 1, reward_group_key: "g1" }] },
     stages: [],
     rewardGroups: [],
     reason: "test"
@@ -52,14 +52,14 @@ test("activity controller exposes paginated list and strict draft contract", asy
   const actorDraft = await controller.createDraft({
     key: "actor", activityType: "login_reward", schemaVersion: 1,
     startAt: "2026-01-01T00:00:00Z", endAt: "2026-01-02T00:00:00Z", claimDeadline: "2026-01-03T00:00:00Z",
-    timezone: "UTC", publicConfig: {}, typeConfig: { schema_version: 1 }, stages: [], rewardGroups: [], reason: "actor"
+    timezone: "UTC", publicConfig: {}, typeConfig: { schema_version: 1, event_source: "game_entry", cycle_unit: "natural_day", progression: "consecutive", miss_policy: "reset", claim_mode: "manual", stages: [{ stage_no: 1, required_count: 1, reward_group_key: "g1" }] }, stages: [], rewardGroups: [], reason: "actor"
   }, { admin: { sub: 77 } });
   assert.equal(actorDraft.actorId, "77");
 
   const typedDraft = await controller.createDraft({
     key: "typed", activityType: "login_reward", schemaVersion: 1,
     startAt: "2026-01-01T00:00:00Z", endAt: "2026-01-02T00:00:00Z", claimDeadline: "2026-01-03T00:00:00Z",
-    timezone: "UTC", publicConfig: {}, typeConfig: { schema_version: 1, cadence: "daily" }, stages: [], rewardGroups: [], reason: "typed"
+    timezone: "UTC", publicConfig: {}, typeConfig: { schema_version: 1, event_source: "game_entry", cycle_unit: "natural_day", progression: "consecutive", miss_policy: "reset", claim_mode: "manual", stages: [{ stage_no: 1, required_count: 1, reward_group_key: "g1" }], cadence: "daily" }, stages: [], rewardGroups: [], reason: "typed"
   });
   assert.equal(typedDraft.typeConfig.cadence, "daily");
 
@@ -67,14 +67,14 @@ test("activity controller exposes paginated list and strict draft contract", asy
     () => controller.createDraft({
       key: "summer", activityType: "login_reward", schemaVersion: 1,
       startAt: "2026-01-01T00:00:00Z", endAt: "2026-01-02T00:00:00Z", claimDeadline: "2026-01-03T00:00:00Z",
-      timezone: "UTC", publicConfig: {}, typeConfig: { schema_version: 1 }, stages: [], rewardGroups: [], reason: "test", ifMatch: "1"
+      timezone: "UTC", publicConfig: {}, typeConfig: { schema_version: 1, event_source: "game_entry", cycle_unit: "natural_day", progression: "consecutive", miss_policy: "reset", claim_mode: "manual", stages: [{ stage_no: 1, required_count: 1, reward_group_key: "g1" }] }, stages: [], rewardGroups: [], reason: "test", ifMatch: "1"
     }),
     (error) => error.getResponse().error === "ACTIVITY_UNKNOWN_FIELD"
   );
   const updated = await controller.updateDraft("activity-1", {
     key: "summer", activityType: "login_reward", schemaVersion: 1,
     startAt: "2026-01-01T00:00:00Z", endAt: "2026-01-02T00:00:00Z", claimDeadline: "2026-01-03T00:00:00Z",
-    timezone: "UTC", publicConfig: {}, typeConfig: { schema_version: 1 }, stages: [], rewardGroups: [], reason: "edit", ifMatch: "W/\"activity-1-1\""
+    timezone: "UTC", publicConfig: {}, typeConfig: { schema_version: 1, event_source: "game_entry", cycle_unit: "natural_day", progression: "consecutive", miss_policy: "reset", claim_mode: "manual", stages: [{ stage_no: 1, required_count: 1, reward_group_key: "g1" }] }, stages: [], rewardGroups: [], reason: "edit", ifMatch: "W/\"activity-1-1\""
   });
   assert.equal(updated.ifMatch, "W/\"activity-1-1\"");
 

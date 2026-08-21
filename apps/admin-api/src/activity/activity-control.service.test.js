@@ -24,7 +24,7 @@ function draft(overrides = {}) {
     claimDeadline: "2026-09-03T00:00:00Z",
     timezone: "UTC",
     publicConfig: {},
-    typeConfig: { schema_version: 1 },
+    typeConfig: { schema_version: 1, event_source: "game_entry", cycle_unit: "natural_day", progression: "consecutive", miss_policy: "reset", claim_mode: "manual", stages: [{ stage_no: 1, required_count: 1, reward_group_key: "g1" }] },
     stages: [{ stageId: "day-1", stageNo: 1, rewardGroupKey: "g1", qualification: {} }],
     rewardGroups: [{ key: "g1", selectionMode: "fixed", items: [{ quantity: 1 }] }],
     reason: "test",

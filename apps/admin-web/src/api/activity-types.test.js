@@ -8,7 +8,7 @@ import {
 
 test("admin-web uses the shared activity type schemas", () => {
   const registry = createActivityTypeRegistry();
-  assert.equal(validateActivityTypeConfig(registry, "login_reward", { schema_version: 1 }).schemaVersion, 1);
+  assert.equal(validateActivityTypeConfig(registry, "login_reward", { schema_version: 1, event_source: "game_entry", cycle_unit: "natural_day", progression: "consecutive", miss_policy: "reset", claim_mode: "manual", stages: [{ stage_no: 1, required_count: 1, reward_group_key: "g1" }] }).schemaVersion, 1);
   assert.equal(validateActivityAction(registry, "lottery", "draw").type, "lottery");
 });
 
