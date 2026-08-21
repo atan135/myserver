@@ -1062,14 +1062,16 @@ DECLARE
   target_activity_id varchar(64);
   target_version_no integer;
 BEGIN
-  IF TG_OP IN ('UPDATE', 'DELETE') AND EXISTS (
-    SELECT 1
-    FROM activity_version
-    WHERE activity_id = OLD.activity_id
-      AND version_no = OLD.version_no
-      AND published_at IS NOT NULL
-  ) THEN
-    RAISE EXCEPTION 'published activity configuration is immutable';
+  IF TG_OP IN ('UPDATE', 'DELETE') THEN
+    IF EXISTS (
+      SELECT 1
+      FROM activity_version
+      WHERE activity_id = OLD.activity_id
+        AND version_no = OLD.version_no
+        AND published_at IS NOT NULL
+    ) THEN
+      RAISE EXCEPTION 'published activity configuration is immutable';
+    END IF;
   END IF;
   IF TG_OP = 'DELETE' THEN
     target_activity_id := OLD.activity_id;
@@ -1078,14 +1080,16 @@ BEGIN
     target_activity_id := NEW.activity_id;
     target_version_no := NEW.version_no;
   END IF;
-  IF TG_OP IN ('INSERT', 'UPDATE') AND EXISTS (
-    SELECT 1
-    FROM activity_version
-    WHERE activity_id = target_activity_id
-      AND version_no = target_version_no
-      AND published_at IS NOT NULL
-  ) THEN
-    RAISE EXCEPTION 'published activity configuration is immutable';
+  IF TG_OP IN ('INSERT', 'UPDATE') THEN
+    IF EXISTS (
+      SELECT 1
+      FROM activity_version
+      WHERE activity_id = target_activity_id
+        AND version_no = target_version_no
+        AND published_at IS NOT NULL
+    ) THEN
+      RAISE EXCEPTION 'published activity configuration is immutable';
+    END IF;
   END IF;
   IF TG_OP = 'DELETE' THEN
     RETURN OLD;
