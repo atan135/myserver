@@ -92,8 +92,8 @@ const authDatabase = {
 const authGate = {
   keyTables: ["public.player_accounts", "public.admin_accounts"],
   services: [
-    { name: "auth-http", minimumMigrationVersion: "20260718161350", maximumMigrationVersion: "20260729173000" },
-    { name: "admin-api", minimumMigrationVersion: "20260718161350", maximumMigrationVersion: "20260729173000" }
+    { name: "auth-http", minimumMigrationVersion: "20260718161350", maximumMigrationVersion: "20260822160000" },
+    { name: "admin-api", minimumMigrationVersion: "20260718161350", maximumMigrationVersion: "20260822160000" }
   ],
   readiness: [
     { service: "auth-http", urlEnvironment: "MYSERVER_DB_DEPLOY_AUTH_HTTP_READINESS_URL" },
