@@ -15,6 +15,83 @@ use tracing::{error, info};
 
 use crate::protocol_version_policy::ClientProtocolVersionMetric;
 
+const ACTIVITY_ACTION_COUNT: usize = 7;
+const ACTIVITY_CACHE_FAILURE_COUNT: usize = 3;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ActivityActionMetric {
+    List,
+    Detail,
+    Progress,
+    Claim,
+    Draw,
+    GameEntry,
+    Unknown,
+}
+
+impl ActivityActionMetric {
+    const ALL: [Self; ACTIVITY_ACTION_COUNT] = [
+        Self::List,
+        Self::Detail,
+        Self::Progress,
+        Self::Claim,
+        Self::Draw,
+        Self::GameEntry,
+        Self::Unknown,
+    ];
+
+    pub(crate) fn from_action(action: &str) -> Self {
+        match action {
+            "list" => Self::List,
+            "detail" => Self::Detail,
+            "progress" => Self::Progress,
+            "claim" => Self::Claim,
+            "draw" => Self::Draw,
+            "game_entry" => Self::GameEntry,
+            _ => Self::Unknown,
+        }
+    }
+
+    fn index(self) -> usize {
+        self as usize
+    }
+
+    fn field_suffix(self) -> &'static str {
+        match self {
+            Self::List => "list",
+            Self::Detail => "detail",
+            Self::Progress => "progress",
+            Self::Claim => "claim",
+            Self::Draw => "draw",
+            Self::GameEntry => "game_entry",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ActivityCacheFailureMetric {
+    Read,
+    Write,
+    Refresh,
+}
+
+impl ActivityCacheFailureMetric {
+    const ALL: [Self; ACTIVITY_CACHE_FAILURE_COUNT] = [Self::Read, Self::Write, Self::Refresh];
+
+    fn index(self) -> usize {
+        self as usize
+    }
+
+    fn field_suffix(self) -> &'static str {
+        match self {
+            Self::Read => "read",
+            Self::Write => "write",
+            Self::Refresh => "refresh",
+        }
+    }
+}
+
 /// 计算当前 bucket 时间戳（5秒对齐）
 fn current_bucket() -> u64 {
     std::time::SystemTime::now()
@@ -98,6 +175,15 @@ pub struct MetricsCollector {
     reward_mail_dispatch_retry: AtomicU64,
     reward_mail_dispatch_manual_review: AtomicU64,
     activity_cache_failure: AtomicU64,
+    activity_cache_failures: [AtomicU64; ACTIVITY_CACHE_FAILURE_COUNT],
+    activity_requests: [AtomicU64; ACTIVITY_ACTION_COUNT],
+    activity_successes: [AtomicU64; ACTIVITY_ACTION_COUNT],
+    activity_qualification_failures: [AtomicU64; ACTIVITY_ACTION_COUNT],
+    activity_duplicates: [AtomicU64; ACTIVITY_ACTION_COUNT],
+    activity_rate_limits: [AtomicU64; ACTIVITY_ACTION_COUNT],
+    activity_reward_delivery_duration_ms: AtomicU64,
+    activity_reward_delivery_count: AtomicU64,
+    activity_recovery_backlog: AtomicU64,
     client_protocol_auth_accepted_legacy: AtomicU64,
     client_protocol_auth_accepted_current: AtomicU64,
     client_protocol_auth_accepted_supported_older: AtomicU64,
@@ -130,6 +216,15 @@ impl MetricsCollector {
             reward_mail_dispatch_retry: AtomicU64::new(0),
             reward_mail_dispatch_manual_review: AtomicU64::new(0),
             activity_cache_failure: AtomicU64::new(0),
+            activity_cache_failures: std::array::from_fn(|_| AtomicU64::new(0)),
+            activity_requests: std::array::from_fn(|_| AtomicU64::new(0)),
+            activity_successes: std::array::from_fn(|_| AtomicU64::new(0)),
+            activity_qualification_failures: std::array::from_fn(|_| AtomicU64::new(0)),
+            activity_duplicates: std::array::from_fn(|_| AtomicU64::new(0)),
+            activity_rate_limits: std::array::from_fn(|_| AtomicU64::new(0)),
+            activity_reward_delivery_duration_ms: AtomicU64::new(0),
+            activity_reward_delivery_count: AtomicU64::new(0),
+            activity_recovery_backlog: AtomicU64::new(0),
             client_protocol_auth_accepted_legacy: AtomicU64::new(0),
             client_protocol_auth_accepted_current: AtomicU64::new(0),
             client_protocol_auth_accepted_supported_older: AtomicU64::new(0),
@@ -217,8 +312,107 @@ impl MetricsCollector {
             .fetch_add(1, Ordering::Relaxed);
     }
 
-    pub fn record_activity_cache_failure(&self) {
+    pub(crate) fn record_activity_cache_failure(&self, reason: ActivityCacheFailureMetric) {
         self.activity_cache_failure.fetch_add(1, Ordering::Relaxed);
+        self.activity_cache_failures[reason.index()].fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn record_activity_request(&self, action: ActivityActionMetric) {
+        self.activity_requests[action.index()].fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn record_activity_response(
+        &self,
+        action: ActivityActionMetric,
+        ok: bool,
+        duplicate: bool,
+        error_code: Option<&str>,
+    ) {
+        let index = action.index();
+        if ok {
+            self.activity_successes[index].fetch_add(1, Ordering::Relaxed);
+        }
+        if duplicate {
+            self.activity_duplicates[index].fetch_add(1, Ordering::Relaxed);
+        }
+        match error_code {
+            Some("ACTIVITY_QUALIFICATION_NOT_MET") => {
+                self.activity_qualification_failures[index].fetch_add(1, Ordering::Relaxed);
+            }
+            Some("ACTIVITY_RATE_LIMITED") => {
+                self.activity_rate_limits[index].fetch_add(1, Ordering::Relaxed);
+            }
+            _ => {}
+        }
+    }
+
+    pub(crate) fn record_activity_reward_delivery_duration(&self, duration_ms: u64) {
+        self.activity_reward_delivery_duration_ms
+            .fetch_add(duration_ms, Ordering::Relaxed);
+        self.activity_reward_delivery_count
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn set_activity_recovery_backlog(&self, count: u64) {
+        self.activity_recovery_backlog
+            .store(count, Ordering::Relaxed);
+    }
+
+    pub(crate) fn drain_activity_fields(&self) -> Vec<(String, String)> {
+        let mut fields = Vec::with_capacity(ACTIVITY_ACTION_COUNT * 5 + 6);
+        for action in ActivityActionMetric::ALL {
+            let index = action.index();
+            let suffix = action.field_suffix();
+            for (kind, counters) in [
+                ("request", &self.activity_requests),
+                ("success", &self.activity_successes),
+                (
+                    "qualification_failure",
+                    &self.activity_qualification_failures,
+                ),
+                ("duplicate", &self.activity_duplicates),
+                ("rate_limit", &self.activity_rate_limits),
+            ] {
+                fields.push((
+                    format!("activity_{kind}_{suffix}_total"),
+                    counters[index].swap(0, Ordering::Relaxed).to_string(),
+                ));
+            }
+        }
+        for reason in ActivityCacheFailureMetric::ALL {
+            fields.push((
+                format!("activity_cache_failure_{}_total", reason.field_suffix()),
+                self.activity_cache_failures[reason.index()]
+                    .swap(0, Ordering::Relaxed)
+                    .to_string(),
+            ));
+        }
+        let delivery_duration = self
+            .activity_reward_delivery_duration_ms
+            .swap(0, Ordering::Relaxed);
+        let delivery_count = self
+            .activity_reward_delivery_count
+            .swap(0, Ordering::Relaxed);
+        fields.push((
+            "activity_reward_delivery_latency_ms".to_string(),
+            if delivery_count == 0 {
+                0
+            } else {
+                delivery_duration / delivery_count
+            }
+            .to_string(),
+        ));
+        fields.push((
+            "activity_reward_delivery_count".to_string(),
+            delivery_count.to_string(),
+        ));
+        fields.push((
+            "activity_recovery_backlog".to_string(),
+            self.activity_recovery_backlog
+                .load(Ordering::Relaxed)
+                .to_string(),
+        ));
+        fields
     }
 
     pub fn record_client_protocol_version(&self, metric: ClientProtocolVersionMetric) {
@@ -427,6 +621,8 @@ impl MetricsCollector {
                 ),
             ];
 
+            fields.extend(self.drain_activity_fields());
+
             fields.extend(collect_discovery_metric_fields(true));
 
             for (k, v) in extra {
@@ -558,5 +754,77 @@ mod tests {
                 .load(Ordering::Relaxed),
             1
         );
+    }
+
+    #[test]
+    fn activity_metrics_use_only_fixed_low_cardinality_fields() {
+        let collector = MetricsCollector::new();
+        collector.record_activity_request(ActivityActionMetric::Claim);
+        collector.record_activity_response(
+            ActivityActionMetric::Claim,
+            true,
+            true,
+            Some("ACTIVITY_QUALIFICATION_NOT_MET"),
+        );
+        collector.record_activity_response(
+            ActivityActionMetric::Draw,
+            false,
+            false,
+            Some("ACTIVITY_RATE_LIMITED"),
+        );
+        collector.record_activity_reward_delivery_duration(15);
+        collector.record_activity_reward_delivery_duration(25);
+        collector.set_activity_recovery_backlog(3);
+        collector.record_activity_cache_failure(ActivityCacheFailureMetric::Refresh);
+
+        let fields = collector
+            .drain_activity_fields()
+            .into_iter()
+            .collect::<HashMap<_, _>>();
+
+        assert_eq!(
+            fields.get("activity_request_claim_total"),
+            Some(&"1".into())
+        );
+        assert_eq!(
+            fields.get("activity_success_claim_total"),
+            Some(&"1".into())
+        );
+        assert_eq!(
+            fields.get("activity_duplicate_claim_total"),
+            Some(&"1".into())
+        );
+        assert_eq!(
+            fields.get("activity_qualification_failure_claim_total"),
+            Some(&"1".into())
+        );
+        assert_eq!(
+            fields.get("activity_rate_limit_draw_total"),
+            Some(&"1".into())
+        );
+        assert_eq!(
+            fields.get("activity_reward_delivery_latency_ms"),
+            Some(&"20".into())
+        );
+        assert_eq!(fields.get("activity_recovery_backlog"), Some(&"3".into()));
+        assert_eq!(
+            fields.get("activity_cache_failure_refresh_total"),
+            Some(&"1".into())
+        );
+        assert!(fields.keys().all(|key| {
+            ![
+                "character",
+                "account",
+                "role",
+                "request_id",
+                "claim_id",
+                "token",
+                "activity_id",
+                "version",
+            ]
+            .iter()
+            .any(|forbidden| key.contains(forbidden))
+        }));
+        assert_eq!(fields.len(), ACTIVITY_ACTION_COUNT * 5 + 6);
     }
 }

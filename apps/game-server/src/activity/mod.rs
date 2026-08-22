@@ -53,6 +53,29 @@ pub(crate) use types::{
 #[allow(unused_imports)]
 pub(crate) use types::{GameEntryEvent, LoginRewardProgressError, LoginRewardProgressResult};
 
+async fn read_snapshot_for_message(
+    engine: &ActivityEngine,
+    request_context: &ActivityRequestContext,
+    message_type: MessageType,
+    activity_id: &str,
+    version: u32,
+    now: chrono::DateTime<Utc>,
+) -> Result<PublishedActivitySnapshot, engine::ActivityEngineError> {
+    match message_type {
+        MessageType::ActivityDetailReq => {
+            engine
+                .detail_with_context(request_context, activity_id, version, now)
+                .await
+        }
+        MessageType::ActivityProgressReq => {
+            engine
+                .progress_with_context(request_context, activity_id, version, now)
+                .await
+        }
+        _ => unreachable!("activity read routing only accepts detail or progress"),
+    }
+}
+
 pub(crate) async fn handle_packet(
     engine: &ActivityEngine,
     connection: &ConnectionContext,
@@ -113,9 +136,17 @@ pub(crate) async fn handle_packet(
                     return Ok(());
                 }
             };
-            let response = match engine
-                .detail_with_context(&request_context, &request.activity_id, request.version, now)
-                .await
+            let response = match read_snapshot_for_message(
+                engine,
+                &request_context,
+                packet
+                    .message_type()
+                    .expect("matched activity detail request"),
+                &request.activity_id,
+                request.version,
+                now,
+            )
+            .await
             {
                 Ok(snapshot) => ActivityDetailRes {
                     ok: true,
@@ -152,9 +183,17 @@ pub(crate) async fn handle_packet(
                         return Ok(());
                     }
                 };
-            let response = match engine
-                .detail_with_context(&request_context, &request.activity_id, request.version, now)
-                .await
+            let response = match read_snapshot_for_message(
+                engine,
+                &request_context,
+                packet
+                    .message_type()
+                    .expect("matched activity progress request"),
+                &request.activity_id,
+                request.version,
+                now,
+            )
+            .await
             {
                 Ok(snapshot) => ActivityProgressRes {
                     ok: true,
@@ -294,8 +333,10 @@ fn summary(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::metrics::MetricsCollector;
     use chrono::{Duration, TimeZone, Utc};
     use serde_json::json;
+    use std::collections::HashMap;
 
     fn fixture() -> (Activity, ActivityVersion) {
         let start = Utc.with_ymd_and_hms(2026, 8, 21, 0, 0, 0).unwrap();
@@ -323,6 +364,70 @@ mod tests {
         )
         .unwrap();
         (activity, version)
+    }
+
+    fn metric_value(fields: &HashMap<String, String>, key: &str) -> u64 {
+        fields
+            .get(key)
+            .unwrap_or_else(|| panic!("missing metric field {key}"))
+            .parse()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn detail_and_progress_handlers_route_to_distinct_metric_actions() {
+        let metrics = Box::leak(Box::new(MetricsCollector::new()));
+        let engine = ActivityEngine::disabled().with_metrics(metrics);
+        let context = ActivityRequestContext::character_only("character-1");
+        let now = Utc.with_ymd_and_hms(2026, 8, 21, 1, 0, 0).unwrap();
+
+        let detail_error = read_snapshot_for_message(
+            &engine,
+            &context,
+            MessageType::ActivityDetailReq,
+            "activity-1",
+            1,
+            now,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(detail_error.code, "ACTIVITY_ENGINE_UNAVAILABLE");
+        let detail_fields = metrics
+            .drain_activity_fields()
+            .into_iter()
+            .collect::<HashMap<_, _>>();
+        assert_eq!(
+            metric_value(&detail_fields, "activity_request_detail_total"),
+            1
+        );
+        assert_eq!(
+            metric_value(&detail_fields, "activity_request_progress_total"),
+            0
+        );
+
+        let progress_error = read_snapshot_for_message(
+            &engine,
+            &context,
+            MessageType::ActivityProgressReq,
+            "activity-1",
+            1,
+            now,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(progress_error.code, "ACTIVITY_ENGINE_UNAVAILABLE");
+        let progress_fields = metrics
+            .drain_activity_fields()
+            .into_iter()
+            .collect::<HashMap<_, _>>();
+        assert_eq!(
+            metric_value(&progress_fields, "activity_request_detail_total"),
+            0
+        );
+        assert_eq!(
+            metric_value(&progress_fields, "activity_request_progress_total"),
+            1
+        );
     }
 
     #[test]

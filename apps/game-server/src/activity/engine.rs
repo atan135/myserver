@@ -24,7 +24,7 @@ use crate::core::inventory::{
 };
 use crate::core::player::db_player_store::AssetCommandRecordLookup;
 use crate::core::player::player_manager::PlayerManager;
-use crate::metrics::METRICS;
+use crate::metrics::{ActivityActionMetric, ActivityCacheFailureMetric, METRICS, MetricsCollector};
 use chrono::{DateTime, Utc};
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
@@ -1036,6 +1036,7 @@ pub(crate) struct ActivityEngine {
     lottery_notifier: Arc<dyn LotteryResultNotifier>,
     cache: Option<Arc<dyn ActivityCache>>,
     rate_limit_policy: ActivityRateLimitPolicy,
+    metrics: &'static MetricsCollector,
 }
 
 pub(crate) trait LotteryResultNotifier: Send + Sync {
@@ -1088,6 +1089,7 @@ impl ActivityEngine {
             lottery_notifier: Arc::new(NoopLotteryResultNotifier),
             cache: None,
             rate_limit_policy: ActivityRateLimitPolicy::default(),
+            metrics: &METRICS,
         }
     }
 
@@ -1153,11 +1155,38 @@ impl ActivityEngine {
         self
     }
 
+    #[cfg(test)]
+    pub(crate) fn with_metrics(mut self, metrics: &'static MetricsCollector) -> Self {
+        self.metrics = metrics;
+        self
+    }
+
     /// Records a server-trusted game entry for a login-reward activity.
     ///
     /// The character identity and occurrence time come from the server entry
     /// context; no client-supplied period key is accepted here.
     pub(crate) async fn on_game_entry(
+        &self,
+        character_id: &str,
+        activity_id: &str,
+        version: u32,
+        occurred_at: DateTime<Utc>,
+    ) -> Result<LoginRewardProgressResult, ActivityEngineError> {
+        let action = ActivityActionMetric::GameEntry;
+        self.metrics.record_activity_request(action);
+        let result = self
+            .on_game_entry_inner(character_id, activity_id, version, occurred_at)
+            .await;
+        self.metrics.record_activity_response(
+            action,
+            result.is_ok(),
+            false,
+            result.as_ref().err().map(|error| error.code),
+        );
+        result
+    }
+
+    async fn on_game_entry_inner(
         &self,
         character_id: &str,
         activity_id: &str,
@@ -1512,6 +1541,23 @@ impl ActivityEngine {
         context: &ActivityRequestContext,
         now: DateTime<Utc>,
     ) -> Result<Vec<PublishedActivitySnapshot>, ActivityEngineError> {
+        let action = ActivityActionMetric::List;
+        self.metrics.record_activity_request(action);
+        let result = self.list_with_context_inner(context, now).await;
+        self.metrics.record_activity_response(
+            action,
+            result.is_ok(),
+            false,
+            result.as_ref().err().map(|error| error.code),
+        );
+        result
+    }
+
+    async fn list_with_context_inner(
+        &self,
+        context: &ActivityRequestContext,
+        now: DateTime<Utc>,
+    ) -> Result<Vec<PublishedActivitySnapshot>, ActivityEngineError> {
         if !self.enabled {
             return Err(Self::unavailable_error());
         }
@@ -1537,7 +1583,8 @@ impl ActivityEngine {
                 .map(|snapshot| snapshot.activity.id.clone())
                 .collect::<Vec<_>>();
             if cache.put_activity_list(&ids).await.is_err() {
-                METRICS.record_activity_cache_failure();
+                self.metrics
+                    .record_activity_cache_failure(ActivityCacheFailureMetric::Write);
             }
         }
         Ok(snapshots)
@@ -1560,6 +1607,48 @@ impl ActivityEngine {
     }
 
     pub(crate) async fn detail_with_context(
+        &self,
+        context: &ActivityRequestContext,
+        activity_id: &str,
+        version: u32,
+        now: DateTime<Utc>,
+    ) -> Result<PublishedActivitySnapshot, ActivityEngineError> {
+        let action = ActivityActionMetric::Detail;
+        self.metrics.record_activity_request(action);
+        let result = self
+            .detail_with_context_inner(context, activity_id, version, now)
+            .await;
+        self.metrics.record_activity_response(
+            action,
+            result.is_ok(),
+            false,
+            result.as_ref().err().map(|error| error.code),
+        );
+        result
+    }
+
+    pub(crate) async fn progress_with_context(
+        &self,
+        context: &ActivityRequestContext,
+        activity_id: &str,
+        version: u32,
+        now: DateTime<Utc>,
+    ) -> Result<PublishedActivitySnapshot, ActivityEngineError> {
+        let action = ActivityActionMetric::Progress;
+        self.metrics.record_activity_request(action);
+        let result = self
+            .detail_with_context_inner(context, activity_id, version, now)
+            .await;
+        self.metrics.record_activity_response(
+            action,
+            result.is_ok(),
+            false,
+            result.as_ref().err().map(|error| error.code),
+        );
+        result
+    }
+
+    async fn detail_with_context_inner(
         &self,
         context: &ActivityRequestContext,
         activity_id: &str,
@@ -1692,10 +1781,13 @@ impl ActivityEngine {
         {
             Ok(Some(cached)) if cached.config_digest == version.config_digest => return,
             Ok(_) => {}
-            Err(_) => METRICS.record_activity_cache_failure(),
+            Err(_) => self
+                .metrics
+                .record_activity_cache_failure(ActivityCacheFailureMetric::Read),
         }
         if cache.put_version(version).await.is_err() {
-            METRICS.record_activity_cache_failure();
+            self.metrics
+                .record_activity_cache_failure(ActivityCacheFailureMetric::Refresh);
         }
     }
 
@@ -1714,6 +1806,26 @@ impl ActivityEngine {
     }
 
     pub(crate) async fn dispatch_action_with_context(
+        &self,
+        context: &ActivityRequestContext,
+        request: ActivityActionRequest,
+        now: DateTime<Utc>,
+    ) -> ActivityActionResponse {
+        let action = ActivityActionMetric::from_action(&request.action_type);
+        self.metrics.record_activity_request(action);
+        let response = self
+            .dispatch_action_with_context_inner(context, request, now)
+            .await;
+        self.metrics.record_activity_response(
+            action,
+            response.ok,
+            response.duplicate,
+            response.error_code,
+        );
+        response
+    }
+
+    async fn dispatch_action_with_context_inner(
         &self,
         context: &ActivityRequestContext,
         request: ActivityActionRequest,
@@ -2212,7 +2324,8 @@ impl ActivityEngine {
                 Err(_) => return Self::failed(base, "ACTIVITY_RECONCILIATION_PENDING"),
             }
         }
-        let result = match self
+        let delivery_started_at = Instant::now();
+        let delivery_result = self
             .lottery_assets
             .apply_draw(
                 &record.character_id,
@@ -2221,8 +2334,11 @@ impl ActivityEngine {
                 &record.reward_order,
                 &record.selection,
             )
-            .await
-        {
+            .await;
+        self.metrics.record_activity_reward_delivery_duration(
+            u64::try_from(delivery_started_at.elapsed().as_millis()).unwrap_or(u64::MAX),
+        );
+        let result = match delivery_result {
             Ok(result) => result,
             // A transport/storage error does not prove the asset transaction rolled back.
             // Persist unknown and query the original request on retry.
@@ -3298,7 +3414,10 @@ mod tests {
     async fn lottery_draw_consumes_free_once_and_replays_same_request() {
         let now = Utc.with_ymd_and_hms(2026, 8, 21, 1, 0, 0).unwrap();
         let gateway = Arc::new(FakeLotteryGateway::free());
-        let engine = lottery_fixture(now, lottery_config(1, 2, 2), gateway.clone()).await;
+        let metrics = Box::leak(Box::new(MetricsCollector::new()));
+        let engine = lottery_fixture(now, lottery_config(1, 2, 2), gateway.clone())
+            .await
+            .with_metrics(metrics);
         let request = ActivityActionRequest {
             activity_id: "lottery-1".into(),
             version: 1,
@@ -3339,6 +3458,16 @@ mod tests {
         assert!(duplicate.ok);
         assert!(duplicate.duplicate);
         assert_eq!(*gateway.applied.lock().await, 1);
+        let metric_fields = metrics
+            .drain_activity_fields()
+            .into_iter()
+            .collect::<HashMap<_, _>>();
+        assert_eq!(
+            metric_fields
+                .get("activity_reward_delivery_count")
+                .map(String::as_str),
+            Some("1")
+        );
     }
 
     #[tokio::test]

@@ -4,6 +4,7 @@ use crate::core::inventory::{
     RewardDeliveryNotifier, RewardDeliveryPolicy, RewardDeliveryResult, RewardDeliveryService,
     RewardDeliveryStore, RewardInventoryPort, RewardOrder,
 };
+use crate::metrics::METRICS;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
@@ -11,6 +12,7 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::sync::Mutex;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -293,7 +295,12 @@ impl ActivityClaimCoordinator {
         let Some(order) = record.order.clone() else {
             return ClaimSettlement::manual_review();
         };
-        let outcome = match self.delivery.deliver(order).await {
+        let delivery_started_at = Instant::now();
+        let delivery_result = self.delivery.deliver(order).await;
+        METRICS.record_activity_reward_delivery_duration(
+            u64::try_from(delivery_started_at.elapsed().as_millis()).unwrap_or(u64::MAX),
+        );
+        let outcome = match delivery_result {
             Ok(outcome) => outcome,
             Err(error) => {
                 let status = match error {

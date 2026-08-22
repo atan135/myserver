@@ -32,6 +32,8 @@ pub(crate) enum RewardMailDispatchFailure {
 }
 
 pub(crate) trait RewardMailDispatchStore: Send + Sync {
+    fn recovery_backlog<'a>(&'a self) -> DispatchFuture<'a, Result<u64, String>>;
+
     fn claim<'a>(
         &'a self,
         lease_owner: &'a str,
@@ -78,6 +80,23 @@ impl PgRewardMailDispatchStore {
 }
 
 impl RewardMailDispatchStore for PgRewardMailDispatchStore {
+    fn recovery_backlog<'a>(&'a self) -> DispatchFuture<'a, Result<u64, String>> {
+        Box::pin(async move {
+            let count = sqlx::query_scalar::<_, i64>(
+                r#"SELECT COUNT(*)::BIGINT
+                FROM reward_mail_outbox
+                WHERE status IN ('pending', 'retryable_failure')
+                   OR (status = 'processing' AND (
+                       lease_expires_at IS NULL OR lease_expires_at <= current_timestamp
+                   ))"#,
+            )
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|error| error.to_string())?;
+            u64::try_from(count).map_err(|_| "reward mail backlog count is negative".to_string())
+        })
+    }
+
     fn claim<'a>(
         &'a self,
         lease_owner: &'a str,
@@ -423,6 +442,12 @@ where
     }
 
     pub(crate) async fn run_once(&self) -> Result<usize, String> {
+        match self.store.recovery_backlog().await {
+            Ok(backlog) => METRICS.set_activity_recovery_backlog(backlog),
+            Err(error) => {
+                tracing::warn!(error = %error, "activity recovery backlog query failed")
+            }
+        }
         let leases = self
             .store
             .claim(
@@ -482,6 +507,18 @@ mod tests {
     }
 
     impl RewardMailDispatchStore for MemoryStore {
+        fn recovery_backlog<'a>(&'a self) -> DispatchFuture<'a, Result<u64, String>> {
+            Box::pin(async move {
+                let status = self.state.lock().await.1;
+                Ok(u64::from(matches!(
+                    status,
+                    RewardMailDispatchStatus::Pending
+                        | RewardMailDispatchStatus::RetryableFailure
+                        | RewardMailDispatchStatus::Processing
+                )))
+            })
+        }
+
         fn claim<'a>(
             &'a self,
             owner: &'a str,
