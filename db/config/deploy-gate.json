@@ -33,18 +33,19 @@
       "keyTables": [
         "public.characters",
         "public.room_event_logs",
-        "public.character_inventory_grants"
+        "public.character_inventory_grants",
+        "public.activity"
       ],
       "services": [
         {
           "name": "game-server",
           "minimumMigrationVersion": "20260718161350",
-          "maximumMigrationVersion": "20260729190000"
+          "maximumMigrationVersion": "20260822150000"
         },
         {
           "name": "game-proxy",
           "minimumMigrationVersion": "20260718161350",
-          "maximumMigrationVersion": "20260729190000"
+          "maximumMigrationVersion": "20260822150000"
         }
       ],
       "readiness": [

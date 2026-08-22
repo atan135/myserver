@@ -117,17 +117,17 @@ test("version-controlled drift targets bind all five reviewed migration baseline
   });
   assert.deepEqual(targets, [
     ["auth", "20260729173000", 551],
-    ["game", "20260729190000", 316],
+    ["game", "20260822150000", 625],
     ["chat", "20260729193000", 38],
     ["announce", "20260718161350", 24],
     ["mail", "20260718161350", 150]
   ]);
 });
 
-test("PostgreSQL 16 function canonicalization is recorded for initial game and announcement schemas", () => {
+test("PostgreSQL 16 function canonicalization is recorded for reviewed game and announcement schemas", () => {
   const databases = new Map(resolveDatabases("all").map((database) => [database.key, database]));
   const expectedCatalogs = new Map([
-    ["game", "44c8bd23cb565cf2e211042613ddeffa3f61ffa948214a8a46228366c9791cb5"],
+    ["game", "10b088401fe46211633a60caec02f5160341fcfe5c54800dad4556875e600ded"],
     ["announce", "a0f0d3a49fd646efd5e102630e33d691655fd51c4619f09ceea2a20ce5df471b"]
   ]);
   for (const [databaseKey, catalogSha256] of expectedCatalogs) {

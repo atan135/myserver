@@ -10,9 +10,9 @@
     },
     "game": {
       "file": "db/schema/targets/game.json",
-      "version": "20260729190000",
-      "description": "restore character asset ledger guard",
-      "checksum": "31abd00b60ad6b70234d112046ba27102260b0974970a1c6bd1da2c0031044f83436fd83b50600e8c86c4eb6acec9068"
+      "version": "20260822150000",
+      "description": "add activity control metadata",
+      "checksum": "a6776d83854f37fdc4c67b0a74421001798f081a3b47f6685b5366c50737d09b42f95c107876613471ca5f96b8c31c88"
     },
     "chat": {
       "file": "db/schema/targets/chat.json",
