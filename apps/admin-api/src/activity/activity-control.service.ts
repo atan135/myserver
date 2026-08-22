@@ -101,12 +101,32 @@ interface StoredActivity {
   draft: Record<string, unknown>;
   currentVersion?: number;
   versions: Map<number, Record<string, unknown>>;
+  versionDigests: Map<number, string>;
   sourceSnapshot?: Record<string, unknown>;
   offlineReason?: string;
 }
 
 function clone<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
+}
+
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.keys(value as Record<string, unknown>)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${canonicalJson((value as Record<string, unknown>)[key])}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "null";
+}
+
+function activityConfigDigest(command: Record<string, unknown>): string {
+  const payload = {
+    public_config: command.publicConfig,
+    type_config: command.typeConfig
+  };
+  return `sha256:${createHash("sha256").update(canonicalJson(payload)).digest("hex")}`;
 }
 
 function etag(activity: StoredActivity): string {
@@ -184,6 +204,7 @@ export class InMemoryActivityControlRepository implements ActivityControlReposit
       draftVersion: 1,
       draft: clone(command),
       versions: new Map(),
+      versionDigests: new Map(),
     };
     this.state.set(activityId, item);
     return this.summary(item, true);
@@ -212,11 +233,13 @@ export class InMemoryActivityControlRepository implements ActivityControlReposit
     if (!expectedMatches(item, command.ifMatch)) throw new ActivityControlError("ACTIVITY_VERSION_CONFLICT", "activity was changed by another operator");
     if (item.versions.has(version)) throw new ActivityControlError("ACTIVITY_VERSION_CONFLICT", "published version is immutable");
     const snapshot = clone(item.draft);
+    const configDigest = activityConfigDigest(snapshot);
     item.versions.set(version, snapshot);
+    item.versionDigests.set(version, configDigest);
     item.currentVersion = version;
     item.status = "published";
     item.revision += 1;
-    return { ...this.summary(item, true), version, snapshot: clone(snapshot), etag: etag(item) };
+    return { ...this.summary(item, true), version, snapshot: clone(snapshot), configDigest, etag: etag(item) };
   }
 
   async offline(activityId: string, command: Record<string, unknown>): Promise<any> {
@@ -239,6 +262,9 @@ export class InMemoryActivityControlRepository implements ActivityControlReposit
       status: item.status,
       revision: item.revision,
       version: item.status === "draft" ? item.draftVersion : item.currentVersion ?? item.draftVersion,
+      configDigest: item.status === "draft"
+        ? activityConfigDigest(item.draft)
+        : item.currentVersion === undefined ? undefined : item.versionDigests.get(item.currentVersion),
       ...(item.currentVersion !== undefined && includeDraft ? { snapshot: clone(item.versions.get(item.currentVersion)) } : {}),
       ...(item.sourceSnapshot !== undefined && includeDraft ? { sourceSnapshot: clone(item.sourceSnapshot) } : {}),
       etag: etag(item),
@@ -335,7 +361,11 @@ function validateDraft(command: Record<string, unknown>): ActivityPreflightError
   if (!command.publicConfig || typeof command.publicConfig !== "object" || Array.isArray(command.publicConfig)) pushError(errors, "publicConfig", "INVALID_OBJECT", "publicConfig must be an object");
   if (!command.typeConfig || typeof command.typeConfig !== "object" || Array.isArray(command.typeConfig)) pushError(errors, "typeConfig", "INVALID_OBJECT", "typeConfig must be an object");
   if (typeof command.activityType === "string" && command.typeConfig && typeof command.typeConfig === "object") {
-    try { validateActivityTypeConfig(createActivityTypeRegistry(), command.activityType, { ...(command.typeConfig as object), schema_version: Number(command.schemaVersion) }); }
+    const typeSchemaVersion = Number((command.typeConfig as Record<string, unknown>).schema_version);
+    if (typeSchemaVersion !== Number(command.schemaVersion)) {
+      pushError(errors, "typeConfig.schema_version", "SCHEMA_VERSION_MISMATCH", "typeConfig.schema_version must match schemaVersion");
+    }
+    try { validateActivityTypeConfig(createActivityTypeRegistry(), command.activityType, command.typeConfig); }
     catch (error: any) { pushError(errors, "typeConfig", error.code || "INVALID_CONFIG", error.message || "type config is invalid"); }
   }
   const groups = Array.isArray(command.rewardGroups) ? command.rewardGroups : [];
@@ -373,7 +403,7 @@ function validateDraft(command: Record<string, unknown>): ActivityPreflightError
     const typedStages = command.typeConfig && typeof command.typeConfig === "object" && !Array.isArray(command.typeConfig)
       ? Array.isArray((command.typeConfig as any).stages) ? (command.typeConfig as any).stages : []
       : [];
-    const configuredByNo = new Map(typedStages.map((stage: any) => [Number(stage.stage_no), stage]));
+    const configuredByNo = new Map<number, any>(typedStages.map((stage: any) => [Number(stage.stage_no), stage]));
     const draftNos = stages.map((stage: any) => Number(stage.stageNo));
     if (draftNos.some((stageNo, index) => stageNo !== [...draftNos].sort((left, right) => left - right)[index])) {
       pushError(errors, "stages", "UNSORTED", "login_reward stages must be sorted by stageNo");
@@ -485,7 +515,7 @@ export class ActivityControlDomainService implements ActivityControlService {
       if (errors.length) throw new ActivityControlError("ACTIVITY_PRECHECK_FAILED", "activity cannot be published", errors);
       const result: any = await this.repository.publish(activityId, command);
       let notification: Record<string, unknown> = { status: "sent" };
-      try { await this.notifier.notify({ activityId, version: Number(result.version), action: "published" }); }
+      try { await this.notifier.notify({ activityId, version: Number(result.version), action: "published", digest: typeof result.configDigest === "string" ? result.configDigest : undefined }); }
       catch (error: any) { notification = { status: "failed", error: String(error?.message || "refresh notification failed") }; }
       return this.withAudit({ ...result, notification }, { action: "published", activityId, actorId: String(command.actorId || "admin-api"), reason: String(command.reason), version: Number(result.version) });
     } catch (error: any) {
@@ -498,7 +528,7 @@ export class ActivityControlDomainService implements ActivityControlService {
       if (typeof command.reason !== "string" || !command.reason.trim()) throw new ActivityControlError("ACTIVITY_INVALID_REQUEST", "reason is required");
       const result: any = await this.repository.offline(activityId, command);
       let notification: Record<string, unknown> = { status: "sent" };
-      try { await this.notifier.notify({ activityId, version: Number(result.version), action: "offline" }); }
+      try { await this.notifier.notify({ activityId, version: Number(result.version), action: "offline", digest: typeof result.configDigest === "string" ? result.configDigest : undefined }); }
       catch (error: any) { notification = { status: "failed", error: String(error?.message || "refresh notification failed") }; }
       return this.withAudit({ ...result, notification }, { action: "offlined", activityId, actorId: String(command.actorId || "admin-api"), reason: String(command.reason), version: Number(result.version) });
     } catch (error: any) {

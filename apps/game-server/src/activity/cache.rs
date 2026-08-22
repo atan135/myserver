@@ -21,6 +21,25 @@ impl ActivityCacheError {
     }
 }
 
+fn validate_snapshot(version: &ActivityVersion) -> Result<(), ActivityCacheError> {
+    if !version.has_valid_digest() {
+        return Err(ActivityCacheError::Serialization(
+            "activity cache snapshot digest mismatch".to_string(),
+        ));
+    }
+    if !version
+        .type_config
+        .get("schema_version")
+        .and_then(serde_json::Value::as_i64)
+        .is_some_and(|schema_version| schema_version == super::types::ACTIVITY_TYPE_SCHEMA_VERSION)
+    {
+        return Err(ActivityCacheError::Serialization(
+            "activity cache snapshot schema_version is unsupported".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct ActivityCacheKey {
     prefix: String,
@@ -118,10 +137,15 @@ impl ActivityCache for InMemoryActivityCache {
     ) -> CacheFuture<'a, Result<Option<ActivityVersion>, ActivityCacheError>> {
         Box::pin(async move {
             let key = self.keys.version(activity_id, version_no);
-            self.versions
+            let value = self
+                .versions
                 .read()
                 .map(|versions| versions.get(&key).cloned())
-                .map_err(|_| ActivityCacheError::Unavailable("cache lock poisoned".to_string()))
+                .map_err(|_| ActivityCacheError::Unavailable("cache lock poisoned".to_string()))?;
+            if let Some(version) = value.as_ref() {
+                validate_snapshot(version)?;
+            }
+            Ok(value)
         })
     }
 
@@ -130,6 +154,7 @@ impl ActivityCache for InMemoryActivityCache {
         version: &'a ActivityVersion,
     ) -> CacheFuture<'a, Result<(), ActivityCacheError>> {
         Box::pin(async move {
+            validate_snapshot(version)?;
             let key = self.keys.version(&version.activity_id, version.version_no);
             self.versions
                 .write()
@@ -222,11 +247,21 @@ impl ActivityCache for RedisActivityCache {
                 .get(self.keys.version(activity_id, version_no))
                 .await
                 .map_err(|error| ActivityCacheError::Unavailable(error.to_string()))?;
-            raw.map(|value| {
-                serde_json::from_str(&value)
-                    .map_err(|error| ActivityCacheError::Serialization(error.to_string()))
-            })
-            .transpose()
+            let version = raw
+                .map(|value| {
+                    serde_json::from_str::<ActivityVersion>(&value)
+                        .map_err(|error| ActivityCacheError::Serialization(error.to_string()))
+                })
+                .transpose()?;
+            if let Some(version) = version.as_ref() {
+                if version.activity_id != activity_id || version.version_no != version_no {
+                    return Err(ActivityCacheError::Serialization(
+                        "activity cache snapshot identity mismatch".to_string(),
+                    ));
+                }
+                validate_snapshot(version)?;
+            }
+            Ok(version)
         })
     }
 
@@ -235,6 +270,7 @@ impl ActivityCache for RedisActivityCache {
         version: &'a ActivityVersion,
     ) -> CacheFuture<'a, Result<(), ActivityCacheError>> {
         Box::pin(async move {
+            validate_snapshot(version)?;
             let mut connection = self.connection().await?;
             let value = serde_json::to_string(version)
                 .map_err(|error| ActivityCacheError::Serialization(error.to_string()))?;

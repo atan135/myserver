@@ -316,7 +316,7 @@ mod tests {
             activity.id.clone(),
             1,
             json!({"title":"demo"}),
-            json!({"kind":"fake"}),
+            json!({"schema_version": 1, "kind":"fake"}),
             start,
             end,
             end + Duration::days(1),
@@ -552,17 +552,37 @@ mod tests {
         let cache = InMemoryActivityCache::default();
         let (_, version) = fixture();
         cache.put_version(&version).await.unwrap();
-        assert!(
-            cache
-                .get_version(&version.activity_id, version.version_no)
-                .await
-                .unwrap()
-                .is_some()
-        );
+        let cached = cache
+            .get_version(&version.activity_id, version.version_no)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(cached, version);
+        assert_eq!(cached.type_config["schema_version"], 1);
         cache
             .publish_refresh(&version.activity_id, version.version_no)
             .await
             .unwrap();
         assert_eq!(cache.notifications().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn cache_rejects_tampered_digest_and_missing_schema_version() {
+        let cache = InMemoryActivityCache::default();
+        let (_, mut tampered) = fixture();
+        tampered.config_digest = format!("sha256:{}", "0".repeat(64));
+        assert!(matches!(
+            cache.put_version(&tampered).await.unwrap_err(),
+            ActivityCacheError::Serialization(_)
+        ));
+
+        let (_, mut missing_schema) = fixture();
+        missing_schema.type_config = json!({"event_source": "game_entry"});
+        missing_schema.config_digest =
+            ActivityVersion::digest(&missing_schema.public_config, &missing_schema.type_config);
+        assert!(matches!(
+            cache.put_version(&missing_schema).await.unwrap_err(),
+            ActivityCacheError::Serialization(_)
+        ));
     }
 }

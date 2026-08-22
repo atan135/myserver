@@ -59,6 +59,61 @@ test("domain service returns field-level preflight errors and refuses invalid dr
   );
 });
 
+test("draft and published snapshot keep schema version and config digest consistent", async () => {
+  const notifications = [];
+  const service = new ActivityControlDomainService(
+    new InMemoryActivityControlRepository(),
+    { async notify(event) { notifications.push(event); } }
+  );
+  await assert.rejects(
+    () => service.createDraft(draft({ typeConfig: { ...draft().typeConfig, schema_version: 2 } })),
+    (error) => error.code === "ACTIVITY_INVALID_CONFIG"
+      && error.details.some((item) => item.path === "typeConfig.schema_version" && item.code === "SCHEMA_VERSION_MISMATCH")
+      && error.details.some((item) => item.code === "ACTIVITY_SCHEMA_VERSION_UNSUPPORTED")
+  );
+
+  const created = await service.createDraft(draft({ activityId: "activity-version-digest" }));
+  const published = await service.publish("activity-version-digest", { version: created.version, reason: "publish" });
+  const detail = await service.detail("activity-version-digest");
+  assert.match(created.configDigest, /^sha256:[0-9a-f]{64}$/);
+  assert.equal(published.configDigest, created.configDigest);
+  assert.equal(detail.configDigest, published.configDigest);
+  assert.equal(published.snapshot.schemaVersion, published.snapshot.typeConfig.schema_version);
+  assert.equal(notifications[0].digest, published.configDigest);
+
+  const reorderedTypeConfig = Object.fromEntries(Object.entries(draft().typeConfig).reverse());
+  const reordered = await service.createDraft(draft({
+    activityId: "activity-version-digest-reordered",
+    key: "summer-reordered",
+    typeConfig: reorderedTypeConfig
+  }));
+  assert.equal(reordered.configDigest, created.configDigest);
+});
+
+test("publish preflight rejects unknown types, schema versions, stages and lottery pools", async () => {
+  const cases = [
+    draft({ activityId: "publish-unknown-type", activityType: "unknown" }),
+    draft({ activityId: "publish-unknown-version", schemaVersion: 2, typeConfig: { ...draft().typeConfig, schema_version: 2 } }),
+    draft({
+      activityId: "publish-invalid-stage",
+      stages: [
+        { stageId: "same", stageNo: 1, rewardGroupKey: "g1", qualification: {} },
+        { stageId: "same", stageNo: 1, rewardGroupKey: "g1", qualification: {} }
+      ]
+    }),
+    lotteryDraft({ activityId: "publish-invalid-pool", typeConfig: { ...lotteryDraft().typeConfig, pool_items: [] } })
+  ];
+  for (const invalidDraft of cases) {
+    const repository = new InMemoryActivityControlRepository();
+    await repository.createDraft(invalidDraft);
+    const service = new ActivityControlDomainService(repository);
+    await assert.rejects(
+      () => service.publish(invalidDraft.activityId, { version: 1, reason: "must fail" }),
+      (error) => error.code === "ACTIVITY_PRECHECK_FAILED" && error.details.length > 0
+    );
+  }
+});
+
 test("lottery preflight validates pool quantities and reward catalog references", async () => {
   const service = new ActivityControlDomainService();
   await assert.rejects(
