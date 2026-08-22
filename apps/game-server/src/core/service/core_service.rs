@@ -1,7 +1,8 @@
 use std::sync::atomic::Ordering;
 
+use chrono::Utc;
 use redis::AsyncCommands;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::core::context::{ConnectionContext, PlayerConnectionHandle, ServiceContext};
 use crate::core::online_route::{
@@ -401,6 +402,24 @@ pub async fn handle_auth(
                     })),
                 )
                 .await;
+            if services.config.activity_enabled {
+                match services
+                    .activity_engine
+                    .on_character_game_entry(&character_id, Utc::now())
+                    .await
+                {
+                    Ok(activity_count) => info!(
+                        character_id = %character_id,
+                        activity_count,
+                        "trusted game entry applied to login reward activities"
+                    ),
+                    Err(error) => warn!(
+                        character_id = %character_id,
+                        error_code = error.code,
+                        "trusted game entry could not update login reward activities"
+                    ),
+                }
+            }
             if let Some(old_handle) = old_handle {
                 if old_handle.session_id != connection.session.id {
                     info!(

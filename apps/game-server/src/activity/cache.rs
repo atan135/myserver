@@ -19,6 +19,13 @@ impl ActivityCacheError {
     pub(crate) fn code(&self) -> super::domain::ActivityErrorCode {
         super::domain::ActivityErrorCode::CacheUnavailable
     }
+
+    pub(crate) fn reason_code(&self) -> &'static str {
+        match self {
+            Self::Unavailable(_) => "unavailable",
+            Self::Serialization(_) => "serialization",
+        }
+    }
 }
 
 fn validate_snapshot(version: &ActivityVersion) -> Result<(), ActivityCacheError> {

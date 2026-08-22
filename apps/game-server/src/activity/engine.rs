@@ -1,11 +1,11 @@
-use super::cache::ActivityCache;
+use super::cache::{ActivityCache, ActivityCacheError};
 use super::domain::ActivityStatus;
 use super::repository::{
     ActivityRepository, InMemoryActivityRepository, PgActivityRepository, PublishedActivitySnapshot,
 };
 use super::settlement::{
     ActivityClaimCoordinator, ActivityRewardDelivery, ClaimStatus, PgActivityClaimStore,
-    build_reward_order,
+    RewardGrantLedgerEntry, build_reward_order, insert_reward_grant_ledger,
 };
 use super::types::{
     ActivityTypeRegistry, GameEntryEvent, InMemoryLoginRewardProgressRepository, LoginRewardConfig,
@@ -848,6 +848,8 @@ impl LotteryRuntimeStore for PgLotteryRuntimeStore {
                 "asset_request_id": record.asset_request_id,
                 "asset_fingerprint": record.asset_fingerprint,
             });
+            let reward_snapshot = serde_json::to_value(&record.reward_order.items)
+                .map_err(|error| error.to_string())?;
             let mut transaction = self.pool.begin().await.map_err(|error| error.to_string())?;
             let identity_key = lottery_identity_key(
                 &record.character_id,
@@ -888,7 +890,7 @@ impl LotteryRuntimeStore for PgLotteryRuntimeStore {
                 WHERE runtime_key = $1 RETURNING id"#,
             )
             .bind(record_key)
-            .bind(result_snapshot)
+            .bind(&result_snapshot)
             .bind(record.notification_failed)
             .fetch_optional(&mut *transaction)
             .await
@@ -900,6 +902,33 @@ impl LotteryRuntimeStore for PgLotteryRuntimeStore {
                 .execute(&mut *transaction)
                 .await
                 .map_err(|error| error.to_string())?;
+            let asset_ledger_id = sqlx::query_scalar::<_, i64>(
+                r#"SELECT id FROM character_asset_ledger
+                WHERE character_id = $1 AND request_id = $2 AND quantity_delta > 0
+                ORDER BY id LIMIT 1"#,
+            )
+            .bind(&record.character_id)
+            .bind(&record.asset_request_id)
+            .fetch_optional(&mut *transaction)
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| {
+                "granted lottery draw has no committed reward asset ledger".to_string()
+            })?;
+            let ledger = RewardGrantLedgerEntry {
+                claim_id,
+                character_id: record.character_id.clone(),
+                activity_id: record.activity_id.clone(),
+                version: record.version,
+                request_id: record.reward_request_id.clone(),
+                delivery_id: Some(record.asset_request_id.clone()),
+                asset_ledger_id: Some(asset_ledger_id),
+                mail_id: None,
+                delivery_method: "inventory_required".to_string(),
+                reward_snapshot,
+                result: result_snapshot,
+            };
+            insert_reward_grant_ledger(&mut transaction, &ledger).await?;
             transaction
                 .commit()
                 .await
@@ -1035,6 +1064,7 @@ pub(crate) struct ActivityEngine {
     lottery_assets: Arc<dyn LotteryAssetGateway>,
     lottery_notifier: Arc<dyn LotteryResultNotifier>,
     cache: Option<Arc<dyn ActivityCache>>,
+    cache_operation_timeout: Duration,
     rate_limit_policy: ActivityRateLimitPolicy,
     metrics: &'static MetricsCollector,
 }
@@ -1088,6 +1118,9 @@ impl ActivityEngine {
             lottery_assets: Arc::new(UnavailableLotteryAssetGateway),
             lottery_notifier: Arc::new(NoopLotteryResultNotifier),
             cache: None,
+            cache_operation_timeout: Duration::from_millis(
+                crate::config::DEFAULT_ACTIVITY_CACHE_OPERATION_TIMEOUT_MS,
+            ),
             rate_limit_policy: ActivityRateLimitPolicy::default(),
             metrics: &METRICS,
         }
@@ -1155,6 +1188,11 @@ impl ActivityEngine {
         self
     }
 
+    pub(crate) fn with_cache_operation_timeout(mut self, timeout: Duration) -> Self {
+        self.cache_operation_timeout = timeout;
+        self
+    }
+
     #[cfg(test)]
     pub(crate) fn with_metrics(mut self, metrics: &'static MetricsCollector) -> Self {
         self.metrics = metrics;
@@ -1184,6 +1222,48 @@ impl ActivityEngine {
             result.as_ref().err().map(|error| error.code),
         );
         result
+    }
+
+    /// Applies a trusted connection entry to every currently running login-reward activity.
+    ///
+    /// Activity ids and versions are resolved from published server snapshots, so the player
+    /// cannot choose which version receives login progress.
+    pub(crate) async fn on_character_game_entry(
+        &self,
+        character_id: &str,
+        occurred_at: DateTime<Utc>,
+    ) -> Result<usize, ActivityEngineError> {
+        if !self.enabled {
+            return Err(Self::unavailable_error());
+        }
+        if character_id.trim().is_empty() {
+            return Err(Self::auth_error());
+        }
+        let snapshots = self
+            .repository
+            .list_published(occurred_at)
+            .await
+            .map_err(|_| {
+                ActivityEngineError::new(
+                    "ACTIVITY_STORAGE_UNAVAILABLE",
+                    "activity storage unavailable",
+                )
+            })?;
+        let mut applied = 0;
+        for snapshot in snapshots.into_iter().filter(|snapshot| {
+            snapshot.activity.activity_type.as_str() == "login_reward"
+                && snapshot.activity.effective_status(occurred_at) == ActivityStatus::Running
+        }) {
+            self.on_game_entry(
+                character_id,
+                &snapshot.activity.id,
+                snapshot.version.version_no as u32,
+                occurred_at,
+            )
+            .await?;
+            applied += 1;
+        }
+        Ok(applied)
     }
 
     async fn on_game_entry_inner(
@@ -1575,17 +1655,18 @@ impl ActivityEngine {
         })?;
         if let Some(cache) = &self.cache {
             for snapshot in &snapshots {
-                self.refresh_cached_version(cache.as_ref(), &snapshot.version)
-                    .await;
+                if !self
+                    .refresh_cached_version(cache.as_ref(), &snapshot.version)
+                    .await
+                {
+                    return Ok(snapshots);
+                }
             }
             let ids = snapshots
                 .iter()
                 .map(|snapshot| snapshot.activity.id.clone())
                 .collect::<Vec<_>>();
-            if cache.put_activity_list(&ids).await.is_err() {
-                self.metrics
-                    .record_activity_cache_failure(ActivityCacheFailureMetric::Write);
-            }
+            self.put_cached_activity_list(cache.as_ref(), &ids).await;
         }
         Ok(snapshots)
     }
@@ -1770,25 +1851,113 @@ impl ActivityEngine {
         Ok(snapshot)
     }
 
+    fn record_cache_failure(
+        &self,
+        metric: ActivityCacheFailureMetric,
+        operation: &'static str,
+        reason: &'static str,
+    ) {
+        self.metrics.record_activity_cache_failure(metric);
+        tracing::warn!(
+            cache_operation = operation,
+            failure_reason = reason,
+            timeout_ms = self.cache_operation_timeout.as_millis() as u64,
+            "activity cache operation failed; using PostgreSQL truth"
+        );
+    }
+
+    async fn get_cached_version(
+        &self,
+        cache: &dyn ActivityCache,
+        activity_id: &str,
+        version_no: i32,
+    ) -> Result<Option<super::domain::ActivityVersion>, ()> {
+        match tokio::time::timeout(
+            self.cache_operation_timeout,
+            cache.get_version(activity_id, version_no),
+        )
+        .await
+        {
+            Ok(Ok(value)) => Ok(value),
+            Ok(Err(error)) => {
+                self.record_cache_error(ActivityCacheFailureMetric::Read, "read", &error);
+                Err(())
+            }
+            Err(_) => {
+                self.record_cache_failure(ActivityCacheFailureMetric::Read, "read", "timeout");
+                Err(())
+            }
+        }
+    }
+
+    fn record_cache_error(
+        &self,
+        metric: ActivityCacheFailureMetric,
+        operation: &'static str,
+        error: &ActivityCacheError,
+    ) {
+        self.record_cache_failure(metric, operation, error.reason_code());
+    }
+
+    async fn put_cached_version(
+        &self,
+        cache: &dyn ActivityCache,
+        version: &super::domain::ActivityVersion,
+    ) -> bool {
+        match tokio::time::timeout(self.cache_operation_timeout, cache.put_version(version)).await {
+            Ok(Ok(())) => true,
+            Ok(Err(error)) => {
+                self.record_cache_error(ActivityCacheFailureMetric::Refresh, "refresh", &error);
+                false
+            }
+            Err(_) => {
+                self.record_cache_failure(
+                    ActivityCacheFailureMetric::Refresh,
+                    "refresh",
+                    "timeout",
+                );
+                false
+            }
+        }
+    }
+
+    async fn put_cached_activity_list(
+        &self,
+        cache: &dyn ActivityCache,
+        activity_ids: &[String],
+    ) -> bool {
+        match tokio::time::timeout(
+            self.cache_operation_timeout,
+            cache.put_activity_list(activity_ids),
+        )
+        .await
+        {
+            Ok(Ok(())) => true,
+            Ok(Err(error)) => {
+                self.record_cache_error(ActivityCacheFailureMetric::Write, "write", &error);
+                false
+            }
+            Err(_) => {
+                self.record_cache_failure(ActivityCacheFailureMetric::Write, "write", "timeout");
+                false
+            }
+        }
+    }
+
     async fn refresh_cached_version(
         &self,
         cache: &dyn ActivityCache,
         version: &super::domain::ActivityVersion,
-    ) {
-        match cache
-            .get_version(&version.activity_id, version.version_no)
+    ) -> bool {
+        match self
+            .get_cached_version(cache, &version.activity_id, version.version_no)
             .await
         {
-            Ok(Some(cached)) if cached.config_digest == version.config_digest => return,
+            Ok(Some(cached)) if cached.config_digest == version.config_digest => return true,
             Ok(_) => {}
-            Err(_) => self
-                .metrics
-                .record_activity_cache_failure(ActivityCacheFailureMetric::Read),
+            Err(()) => return false,
         }
-        if cache.put_version(version).await.is_err() {
-            self.metrics
-                .record_activity_cache_failure(ActivityCacheFailureMetric::Refresh);
-        }
+        self.put_cached_version(cache, version).await
     }
 
     pub(crate) async fn dispatch_action(
@@ -2630,6 +2799,82 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Copy)]
+    enum PendingCacheOperation {
+        Read,
+        Refresh,
+        Write,
+    }
+
+    struct PendingCache {
+        operation: PendingCacheOperation,
+    }
+
+    impl PendingCache {
+        fn new(operation: PendingCacheOperation) -> Self {
+            Self { operation }
+        }
+    }
+
+    impl ActivityCache for PendingCache {
+        fn get_version<'a>(
+            &'a self,
+            _activity_id: &'a str,
+            _version_no: i32,
+        ) -> super::super::cache::CacheFuture<'a, Result<Option<ActivityVersion>, ActivityCacheError>>
+        {
+            Box::pin(async move {
+                if matches!(self.operation, PendingCacheOperation::Read) {
+                    std::future::pending().await
+                } else {
+                    Ok(None)
+                }
+            })
+        }
+
+        fn put_version<'a>(
+            &'a self,
+            _version: &'a ActivityVersion,
+        ) -> super::super::cache::CacheFuture<'a, Result<(), ActivityCacheError>> {
+            Box::pin(async move {
+                if matches!(self.operation, PendingCacheOperation::Refresh) {
+                    std::future::pending().await
+                } else {
+                    Ok(())
+                }
+            })
+        }
+
+        fn invalidate_version<'a>(
+            &'a self,
+            _activity_id: &'a str,
+            _version_no: i32,
+        ) -> super::super::cache::CacheFuture<'a, Result<(), ActivityCacheError>> {
+            Box::pin(std::future::pending())
+        }
+
+        fn put_activity_list<'a>(
+            &'a self,
+            _activity_ids: &'a [String],
+        ) -> super::super::cache::CacheFuture<'a, Result<(), ActivityCacheError>> {
+            Box::pin(async move {
+                if matches!(self.operation, PendingCacheOperation::Write) {
+                    std::future::pending().await
+                } else {
+                    Ok(())
+                }
+            })
+        }
+
+        fn publish_refresh<'a>(
+            &'a self,
+            _activity_id: &'a str,
+            _version_no: i32,
+        ) -> super::super::cache::CacheFuture<'a, Result<(), ActivityCacheError>> {
+            Box::pin(std::future::pending())
+        }
+    }
+
     #[derive(Clone)]
     struct BlockingRecordLotteryStore {
         inner: InMemoryLotteryRuntimeStore,
@@ -3411,6 +3656,138 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pending_cache_operations_time_out_and_preserve_repository_truth() {
+        let now = Utc.with_ymd_and_hms(2026, 8, 21, 1, 0, 0).unwrap();
+        for (operation, expected_field) in [
+            (
+                PendingCacheOperation::Read,
+                "activity_cache_failure_read_total",
+            ),
+            (
+                PendingCacheOperation::Refresh,
+                "activity_cache_failure_refresh_total",
+            ),
+            (
+                PendingCacheOperation::Write,
+                "activity_cache_failure_write_total",
+            ),
+        ] {
+            let metrics = Box::leak(Box::new(MetricsCollector::new()));
+            let engine = fixture(now)
+                .await
+                .with_cache_operation_timeout(Duration::from_millis(5))
+                .with_cache(Arc::new(PendingCache::new(operation)))
+                .with_metrics(metrics);
+
+            let list =
+                tokio::time::timeout(Duration::from_millis(100), engine.list("character-1", now))
+                    .await
+                    .expect("cache timeout must complete before the request deadline")
+                    .expect("PostgreSQL repository truth must remain available");
+            assert_eq!(list.len(), 1);
+
+            let fields = metrics
+                .drain_activity_fields()
+                .into_iter()
+                .collect::<HashMap<_, _>>();
+            assert_eq!(fields.get(expected_field).map(String::as_str), Some("1"));
+        }
+    }
+
+    #[tokio::test]
+    async fn pending_cache_read_does_not_block_list_detail_or_progress() {
+        let now = Utc.with_ymd_and_hms(2026, 8, 21, 1, 0, 0).unwrap();
+        let metrics = Box::leak(Box::new(MetricsCollector::new()));
+        let mut engine = fixture(now)
+            .await
+            .with_cache_operation_timeout(Duration::from_millis(5))
+            .with_cache(Arc::new(PendingCache::new(PendingCacheOperation::Read)))
+            .with_metrics(metrics);
+        engine.rate_limit_policy.action_max = 100;
+        let context = ActivityRequestContext::character_only("character-1");
+
+        tokio::time::timeout(Duration::from_millis(150), async {
+            assert_eq!(engine.list("character-1", now).await.unwrap().len(), 1);
+            assert_eq!(
+                engine
+                    .detail("character-1", "a1", 1, now)
+                    .await
+                    .unwrap()
+                    .version
+                    .version_no,
+                1
+            );
+            assert_eq!(
+                engine
+                    .progress_with_context(&context, "a1", 1, now)
+                    .await
+                    .unwrap()
+                    .activity
+                    .id,
+                "a1"
+            );
+        })
+        .await
+        .expect("activity reads must finish before the worker lease fail-stop window");
+
+        let fields = metrics
+            .drain_activity_fields()
+            .into_iter()
+            .collect::<HashMap<_, _>>();
+        assert_eq!(
+            fields
+                .get("activity_cache_failure_read_total")
+                .map(String::as_str),
+            Some("3")
+        );
+    }
+
+    #[tokio::test]
+    async fn cross_engine_replay_uses_durable_result_when_cache_read_is_pending() {
+        let now = Utc.with_ymd_and_hms(2026, 8, 21, 1, 0, 0).unwrap();
+        let repository = Arc::new(InMemoryActivityRepository::default());
+        publish_lottery(
+            repository.as_ref(),
+            "lottery-1",
+            now,
+            lottery_config(1, 1, 1),
+        )
+        .await;
+        let runtime = Arc::new(InMemoryLotteryRuntimeStore::default());
+        let gateway = Arc::new(FakeLotteryGateway::free());
+        let engine_a = ActivityEngine::new(repository.clone())
+            .with_lottery_runtime_store(runtime.clone())
+            .with_lottery_asset_gateway(gateway.clone());
+        let engine_b = ActivityEngine::new(repository)
+            .with_lottery_runtime_store(runtime)
+            .with_lottery_asset_gateway(gateway.clone())
+            .with_cache_operation_timeout(Duration::from_millis(5))
+            .with_cache(Arc::new(PendingCache::new(PendingCacheOperation::Read)));
+        let request = ActivityActionRequest {
+            activity_id: "lottery-1".into(),
+            version: 1,
+            stage_id: String::new(),
+            action_type: "draw".into(),
+            client_request_id: "pending-cache-cross-engine-replay".into(),
+        };
+
+        let first = engine_a
+            .dispatch_action("character-1", request.clone(), now)
+            .await;
+        let replay = tokio::time::timeout(
+            Duration::from_millis(100),
+            engine_b.dispatch_action("character-1", request, now),
+        )
+        .await
+        .expect("cache timeout must not block durable replay");
+
+        assert!(first.ok);
+        assert!(replay.ok);
+        assert!(replay.duplicate);
+        assert_eq!(*gateway.applied.lock().await, 1);
+    }
+
+    #[tokio::test]
     async fn lottery_draw_consumes_free_once_and_replays_same_request() {
         let now = Utc.with_ymd_and_hms(2026, 8, 21, 1, 0, 0).unwrap();
         let gateway = Arc::new(FakeLotteryGateway::free());
@@ -3958,6 +4335,69 @@ mod tests {
         assert!(duplicate.duplicate);
         assert_eq!(duplicate.state.cumulative_count, 1);
         assert_eq!(duplicate.state_revision, first.state_revision);
+    }
+
+    #[tokio::test]
+    async fn trusted_character_entry_discovers_running_login_rewards() {
+        let now = Utc.with_ymd_and_hms(2026, 8, 21, 1, 0, 0).unwrap();
+        let engine = fixture(now).await;
+
+        assert_eq!(
+            engine
+                .on_character_game_entry("character-1", now)
+                .await
+                .unwrap(),
+            1
+        );
+        let (state, revision) = engine
+            .login_progress
+            .load("character-1", "a1", 1)
+            .await
+            .unwrap();
+        assert_eq!(state.cumulative_count, 1);
+        assert_eq!(state.consecutive_count, 1);
+        assert_eq!(revision, 1);
+
+        assert_eq!(
+            engine
+                .on_character_game_entry("character-1", now + ChronoDuration::minutes(10))
+                .await
+                .unwrap(),
+            1
+        );
+        let (_, duplicate_revision) = engine
+            .login_progress
+            .load("character-1", "a1", 1)
+            .await
+            .unwrap();
+        assert_eq!(duplicate_revision, revision);
+    }
+
+    #[tokio::test]
+    async fn trusted_character_entry_ignores_login_rewards_outside_running_window() {
+        let now = Utc.with_ymd_and_hms(2026, 8, 21, 1, 0, 0).unwrap();
+        let (engine, _) = fixture_with_window(
+            now,
+            now + ChronoDuration::hours(1),
+            now + ChronoDuration::hours(2),
+        )
+        .await;
+
+        assert_eq!(
+            engine
+                .on_character_game_entry("character-1", now)
+                .await
+                .unwrap(),
+            0
+        );
+        assert!(
+            engine
+                .login_progress
+                .load_activity_state("character-1", "a1", 1)
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[tokio::test]

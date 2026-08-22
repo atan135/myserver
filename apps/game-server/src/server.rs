@@ -1037,6 +1037,9 @@ pub async fn run(
         );
         let activity_engine = crate::activity::ActivityEngine::postgres(pool.clone(), delivery)
             .with_lottery_asset_gateway(Arc::new(lottery_gateway))
+            .with_cache_operation_timeout(Duration::from_millis(
+                config.activity_cache_operation_timeout_ms,
+            ))
             .with_cache(Arc::new(crate::activity::RedisActivityCache::new(
                 redis_client.clone(),
                 config.redis_key_prefix.clone(),

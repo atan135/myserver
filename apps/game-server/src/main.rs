@@ -306,6 +306,8 @@ mod tests {
             log_dir: "logs/game-server".to_string(),
             redis_url: "redis://127.0.0.1:6379".to_string(),
             redis_key_prefix: String::new(),
+            activity_cache_operation_timeout_ms:
+                config::DEFAULT_ACTIVITY_CACHE_OPERATION_TIMEOUT_MS,
             global_id_origin_id: 0,
             global_id_worker_id: None,
             nats_url: "nats://127.0.0.1:4222".to_string(),

@@ -7,6 +7,9 @@ pub const DEFAULT_INTERNAL_TOKEN: &str = "dev-only-change-this-game-internal-tok
 pub const DEFAULT_OUTBOUND_QUEUE_CAPACITY: usize = 1024;
 pub const DEFAULT_MAX_LEARNED_DISCIPLINES: usize = 8;
 pub const DEFAULT_MAX_ACTIVE_DISCIPLINES: usize = 2;
+pub const DEFAULT_ACTIVITY_CACHE_OPERATION_TIMEOUT_MS: u64 = 250;
+pub const MIN_ACTIVITY_CACHE_OPERATION_TIMEOUT_MS: u64 = 10;
+pub const MAX_ACTIVITY_CACHE_OPERATION_TIMEOUT_MS: u64 = 2_000;
 const DISALLOW_LEGACY_DIRECT_CONFIG_ENV_NAME: &str = "DISALLOW_LEGACY_DIRECT_CONFIG";
 const DEFAULT_SOCKET_BASENAME: &str = "game-server";
 const DEFAULT_PRODUCTION_SOCKET_ROOT: &str = "/run/myserver";
@@ -45,6 +48,7 @@ pub struct Config {
     pub log_dir: String,
     pub redis_url: String,
     pub redis_key_prefix: String,
+    pub activity_cache_operation_timeout_ms: u64,
     pub global_id_origin_id: u64,
     pub global_id_worker_id: Option<u64>,
     pub nats_url: String,
@@ -276,6 +280,14 @@ impl Config {
         let redis_url =
             env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
         let redis_key_prefix = env::var("REDIS_KEY_PREFIX").unwrap_or_default();
+        let activity_cache_operation_timeout_ms = env::var("ACTIVITY_CACHE_OPERATION_TIMEOUT_MS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .filter(|value| {
+                (MIN_ACTIVITY_CACHE_OPERATION_TIMEOUT_MS..=MAX_ACTIVITY_CACHE_OPERATION_TIMEOUT_MS)
+                    .contains(value)
+            })
+            .unwrap_or(DEFAULT_ACTIVITY_CACHE_OPERATION_TIMEOUT_MS);
         let global_id_origin_id = parse_u64("GLOBAL_ID_ORIGIN_ID", 0);
         let global_id_worker_id = parse_optional_u64("GLOBAL_ID_WORKER_ID");
         let nats_url = env::var("NATS_URL").unwrap_or_else(|_| "nats://127.0.0.1:4222".to_string());
@@ -362,6 +374,7 @@ impl Config {
             log_dir,
             redis_url,
             redis_key_prefix,
+            activity_cache_operation_timeout_ms,
             global_id_origin_id,
             global_id_worker_id,
             nats_url,
@@ -850,6 +863,7 @@ mod tests {
         "REGISTRY_ENABLED",
         "REGISTRY_KEY_PREFIX",
         "REDIS_KEY_PREFIX",
+        "ACTIVITY_CACHE_OPERATION_TIMEOUT_MS",
         "OUTBOUND_QUEUE_CAPACITY",
         "GLOBAL_ID_ORIGIN_ID",
         "GLOBAL_ID_WORKER_ID",
@@ -1020,6 +1034,36 @@ mod tests {
             config.outbound_queue_capacity,
             DEFAULT_OUTBOUND_QUEUE_CAPACITY
         );
+    }
+
+    #[test]
+    fn activity_cache_operation_timeout_is_bounded_and_defaults_safely() {
+        let _guard = env_lock().lock().unwrap();
+        let _env = EnvGuard::capture(OUTBOUND_QUEUE_ENV_NAMES);
+
+        unsafe {
+            clear_production_env();
+            env::remove_var("ACTIVITY_CACHE_OPERATION_TIMEOUT_MS");
+        }
+        assert_eq!(
+            Config::from_env().activity_cache_operation_timeout_ms,
+            DEFAULT_ACTIVITY_CACHE_OPERATION_TIMEOUT_MS
+        );
+
+        unsafe {
+            env::set_var("ACTIVITY_CACHE_OPERATION_TIMEOUT_MS", "500");
+        }
+        assert_eq!(Config::from_env().activity_cache_operation_timeout_ms, 500);
+
+        for invalid in ["invalid", "0", "9", "2001"] {
+            unsafe {
+                env::set_var("ACTIVITY_CACHE_OPERATION_TIMEOUT_MS", invalid);
+            }
+            assert_eq!(
+                Config::from_env().activity_cache_operation_timeout_ms,
+                DEFAULT_ACTIVITY_CACHE_OPERATION_TIMEOUT_MS
+            );
+        }
     }
 
     #[test]

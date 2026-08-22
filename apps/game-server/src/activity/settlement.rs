@@ -1,13 +1,13 @@
 use crate::core::inventory::{
-    AssetCommandErrorCode, AssetOperator, AssetOperatorType, AssetOrigin, AssetOriginType,
-    AssetPermission, AssetResultState, NormalizedAssetItem, RewardDeliveryError,
+    AssetCommandErrorCode, AssetDeliveryMethod, AssetOperator, AssetOperatorType, AssetOrigin,
+    AssetOriginType, AssetPermission, AssetResultState, NormalizedAssetItem, RewardDeliveryError,
     RewardDeliveryNotifier, RewardDeliveryPolicy, RewardDeliveryResult, RewardDeliveryService,
     RewardDeliveryStore, RewardInventoryPort, RewardOrder,
 };
 use crate::metrics::METRICS;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use sqlx::PgPool;
+use sqlx::{PgPool, Postgres, Transaction};
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
@@ -59,6 +59,141 @@ pub(crate) struct ClaimSettlement {
 pub(crate) struct ActivityDeliveryOutcome {
     pub(crate) result: RewardDeliveryResult,
     pub(crate) notification_failed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct RewardGrantLedgerEntry {
+    pub(crate) claim_id: i64,
+    pub(crate) character_id: String,
+    pub(crate) activity_id: String,
+    pub(crate) version: i32,
+    pub(crate) request_id: String,
+    pub(crate) delivery_id: Option<String>,
+    pub(crate) asset_ledger_id: Option<i64>,
+    pub(crate) mail_id: Option<String>,
+    pub(crate) delivery_method: String,
+    pub(crate) reward_snapshot: serde_json::Value,
+    pub(crate) result: serde_json::Value,
+}
+
+impl RewardGrantLedgerEntry {
+    fn from_delivery(
+        claim_id: i64,
+        character_id: &str,
+        activity_id: &str,
+        version: i32,
+        request_id: &str,
+        reward_snapshot: serde_json::Value,
+        result: &RewardDeliveryResult,
+    ) -> Result<Self, String> {
+        if result.result_state != AssetResultState::Applied || result.request_id != request_id {
+            return Err("granted activity ledger requires the committed reward result".to_string());
+        }
+        let receipt = result
+            .delivery
+            .as_ref()
+            .ok_or_else(|| "granted activity reward result has no delivery receipt".to_string())?;
+        let (delivery_method, mail_id) = match receipt.semantics.delivery_method {
+            AssetDeliveryMethod::Direct => ("direct", None),
+            AssetDeliveryMethod::Mail => ("mail", Some(receipt.delivery_id.clone())),
+        };
+        let asset_ledger_id = result
+            .asset_ledger_ids
+            .first()
+            .map(|value| {
+                value
+                    .parse::<i64>()
+                    .map_err(|_| "activity asset ledger id is invalid".to_string())
+            })
+            .transpose()?;
+        Ok(Self {
+            claim_id,
+            character_id: character_id.to_string(),
+            activity_id: activity_id.to_string(),
+            version,
+            request_id: request_id.to_string(),
+            delivery_id: Some(receipt.delivery_id.clone()),
+            asset_ledger_id,
+            mail_id,
+            delivery_method: delivery_method.to_string(),
+            reward_snapshot,
+            result: serde_json::to_value(result).map_err(|error| error.to_string())?,
+        })
+    }
+}
+
+#[derive(sqlx::FromRow)]
+struct StoredRewardGrantLedgerEntry {
+    claim_id: Option<i64>,
+    character_id: String,
+    activity_id: String,
+    version_no: i32,
+    delivery_id: Option<String>,
+    asset_ledger_id: Option<i64>,
+    mail_id: Option<String>,
+    delivery_method: String,
+    status: String,
+    reward_snapshot_json: serde_json::Value,
+    result_json: serde_json::Value,
+}
+
+pub(crate) async fn insert_reward_grant_ledger(
+    transaction: &mut Transaction<'_, Postgres>,
+    entry: &RewardGrantLedgerEntry,
+) -> Result<(), String> {
+    let inserted = sqlx::query(
+        r#"INSERT INTO reward_grant_ledger (
+            claim_id, character_id, activity_id, version_no, request_id,
+            delivery_id, asset_ledger_id, mail_id, delivery_method, status,
+            reward_snapshot_json, result_json
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'granted', $10, $11)
+        ON CONFLICT (request_id) DO NOTHING"#,
+    )
+    .bind(entry.claim_id)
+    .bind(&entry.character_id)
+    .bind(&entry.activity_id)
+    .bind(entry.version)
+    .bind(&entry.request_id)
+    .bind(&entry.delivery_id)
+    .bind(entry.asset_ledger_id)
+    .bind(&entry.mail_id)
+    .bind(&entry.delivery_method)
+    .bind(&entry.reward_snapshot)
+    .bind(&entry.result)
+    .execute(&mut **transaction)
+    .await
+    .map_err(|error| error.to_string())?;
+    if inserted.rows_affected() == 1 {
+        return Ok(());
+    }
+
+    let existing = sqlx::query_as::<_, StoredRewardGrantLedgerEntry>(
+        r#"SELECT claim_id, character_id, activity_id, version_no, delivery_id,
+            asset_ledger_id, mail_id, delivery_method, status,
+            reward_snapshot_json, result_json
+        FROM reward_grant_ledger WHERE request_id = $1"#,
+    )
+    .bind(&entry.request_id)
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(|error| error.to_string())?
+    .ok_or_else(|| "activity reward grant ledger conflict disappeared".to_string())?;
+    let matches = existing.claim_id == Some(entry.claim_id)
+        && existing.character_id == entry.character_id
+        && existing.activity_id == entry.activity_id
+        && existing.version_no == entry.version
+        && existing.delivery_id == entry.delivery_id
+        && existing.asset_ledger_id == entry.asset_ledger_id
+        && existing.mail_id == entry.mail_id
+        && existing.delivery_method == entry.delivery_method
+        && existing.status == "granted"
+        && existing.reward_snapshot_json == entry.reward_snapshot
+        && existing.result_json == entry.result;
+    if matches {
+        Ok(())
+    } else {
+        Err("activity reward grant ledger request conflict".to_string())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -894,7 +1029,43 @@ impl ActivityClaimStore for PgActivityClaimStore {
         notification_failed: bool,
     ) -> ClaimStoreFuture<'a, Result<(), String>> {
         Box::pin(async move {
-            let result_json = serde_json::to_value(result).map_err(|error| error.to_string())?;
+            let mut transaction = self.pool.begin().await.map_err(|error| error.to_string())?;
+            let claim = sqlx::query_as::<_, (i64, Option<String>, serde_json::Value)>(
+                r#"SELECT id, reward_request_id, reward_snapshot_json
+                FROM activity_claim_record
+                WHERE character_id = $1 AND activity_id = $2 AND version_no = $3
+                  AND semantic_claim_key = $4
+                FOR UPDATE"#,
+            )
+            .bind(character_id)
+            .bind(activity_id)
+            .bind(version)
+            .bind(semantic_claim_key)
+            .fetch_optional(&mut *transaction)
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "activity claim disappeared before completion".to_string())?;
+            let result_json = serde_json::to_value(&result).map_err(|error| error.to_string())?;
+            if status == ClaimStatus::Granted {
+                let reward_request_id = claim
+                    .1
+                    .as_deref()
+                    .filter(|value| !value.is_empty())
+                    .ok_or_else(|| "granted activity claim has no reward request id".to_string())?;
+                let committed_result = result
+                    .as_ref()
+                    .ok_or_else(|| "granted activity claim has no reward result".to_string())?;
+                let ledger = RewardGrantLedgerEntry::from_delivery(
+                    claim.0,
+                    character_id,
+                    activity_id,
+                    version,
+                    reward_request_id,
+                    claim.2,
+                    committed_result,
+                )?;
+                insert_reward_grant_ledger(&mut transaction, &ledger).await?;
+            }
             let changed = sqlx::query(
                 r#"UPDATE activity_claim_record SET
                     status = $5, result_json = $6, notification_failed = $7,
@@ -910,14 +1081,16 @@ impl ActivityClaimStore for PgActivityClaimStore {
             .bind(Self::status_value(status))
             .bind(result_json)
             .bind(notification_failed)
-            .execute(&self.pool)
+            .execute(&mut *transaction)
             .await
             .map_err(|error| error.to_string())?;
-            if changed.rows_affected() == 1 {
-                Ok(())
-            } else {
-                Err("activity claim disappeared before completion".to_string())
+            if changed.rows_affected() != 1 {
+                return Err("activity claim disappeared before completion".to_string());
             }
+            transaction
+                .commit()
+                .await
+                .map_err(|error| error.to_string())
         })
     }
 
@@ -1154,7 +1327,7 @@ fn request_index(character_id: &str, request_id: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::inventory::{AssetBinding, AssetCommandResult};
+    use crate::core::inventory::{AssetBinding, AssetCommandResult, AssetDeliveryReceipt};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::sync::Barrier;
 
@@ -1241,6 +1414,104 @@ mod tests {
             RewardDeliveryPolicy::PreferInventory,
         )
         .unwrap()
+    }
+
+    fn committed_result(request_key: &str, delivery: AssetDeliveryReceipt) -> RewardDeliveryResult {
+        let reward_order = order(request_key);
+        AssetCommandResult::applied(
+            &reward_order.request_id,
+            reward_order.request_fingerprint(),
+            Vec::new(),
+            Vec::new(),
+            if delivery.semantics.delivery_method == AssetDeliveryMethod::Direct {
+                vec!["41".to_string()]
+            } else {
+                Vec::new()
+            },
+            Some(delivery),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn reward_grant_ledger_maps_direct_and_mail_receipts_after_commit() {
+        let reward_order = order("stage-1");
+        let direct = committed_result(
+            "stage-1",
+            AssetDeliveryReceipt::direct(&reward_order.request_id).unwrap(),
+        );
+        let direct_entry = RewardGrantLedgerEntry::from_delivery(
+            7,
+            "character-1",
+            "activity-1",
+            1,
+            &reward_order.request_id,
+            serde_json::to_value(&reward_order.items).unwrap(),
+            &direct,
+        )
+        .unwrap();
+        assert_eq!(direct_entry.delivery_method, "direct");
+        assert_eq!(direct_entry.asset_ledger_id, Some(41));
+        assert_eq!(direct_entry.mail_id, None);
+
+        let mail_id = "mail-activity-reward";
+        let mail = committed_result(
+            "stage-1",
+            AssetDeliveryReceipt::mail(mail_id, None).unwrap(),
+        );
+        let mail_entry = RewardGrantLedgerEntry::from_delivery(
+            7,
+            "character-1",
+            "activity-1",
+            1,
+            &reward_order.request_id,
+            serde_json::to_value(&reward_order.items).unwrap(),
+            &mail,
+        )
+        .unwrap();
+        assert_eq!(mail_entry.delivery_method, "mail");
+        assert_eq!(mail_entry.asset_ledger_id, None);
+        assert_eq!(mail_entry.mail_id.as_deref(), Some(mail_id));
+    }
+
+    #[test]
+    fn reward_grant_ledger_replay_is_stable_and_rejects_uncommitted_result() {
+        let reward_order = order("stage-1");
+        let committed = committed_result(
+            "stage-1",
+            AssetDeliveryReceipt::direct(&reward_order.request_id).unwrap(),
+        );
+        let build = || {
+            RewardGrantLedgerEntry::from_delivery(
+                7,
+                "character-1",
+                "activity-1",
+                1,
+                &reward_order.request_id,
+                serde_json::to_value(&reward_order.items).unwrap(),
+                &committed,
+            )
+            .unwrap()
+        };
+        assert_eq!(build(), build());
+
+        let unknown = AssetCommandResult::unknown(
+            &reward_order.request_id,
+            reward_order.request_fingerprint(),
+        )
+        .unwrap();
+        assert!(
+            RewardGrantLedgerEntry::from_delivery(
+                7,
+                "character-1",
+                "activity-1",
+                1,
+                &reward_order.request_id,
+                serde_json::to_value(&reward_order.items).unwrap(),
+                &unknown,
+            )
+            .is_err()
+        );
     }
 
     #[tokio::test]
