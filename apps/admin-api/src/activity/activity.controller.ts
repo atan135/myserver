@@ -3,7 +3,7 @@ import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from "@nestjs/swagg
 import { createActivityTypeRegistry, validateActivityTypeConfig } from "../activity-types.js";
 import { JwtAuthGuard } from "../auth/jwt-auth.guard.js";
 import { AdminPolicyGuard } from "../auth/admin-policy.guard.js";
-import { Permissions } from "../auth/roles.decorator.js";
+import { Permissions, PolicyScopeResolver } from "../auth/roles.decorator.js";
 import { ApiHttpException, badRequest } from "../common/http-exception.js";
 import { ADMIN_ACTIVITY_CONTROL } from "../tokens.js";
 import { assertActivityDraftShape, assertJsonObject, assertStrictJson } from "./activity.dto.js";
@@ -14,6 +14,21 @@ const DRAFT_FIELDS = ["key", "activityType", "schemaVersion", "startAt", "endAt"
 const UPDATE_DRAFT_FIELDS = [...DRAFT_FIELDS, "ifMatch"] as const;
 const NEW_DRAFT_FIELDS = ["sourceVersion", "ifMatch", "reason", "overrides"] as const;
 const VERSION_FIELDS = ["version", "ifMatch", "reason"] as const;
+
+function activityPolicyScope(request: any) {
+  const activityId = typeof request?.params?.activityId === "string" && request.params.activityId.trim()
+    ? request.params.activityId.trim()
+    : "*";
+  return {
+    worldId: "*",
+    serviceName: "*",
+    instanceId: "*",
+    fields: ["*"],
+    targetType: "activity",
+    targetIds: [activityId],
+    targetCount: 1
+  };
+}
 
 function text(value: unknown, name: string, max = 128): string {
   if (typeof value !== "string" || !value.trim() || value.length > max) throw badRequest("ACTIVITY_INVALID_REQUEST", `${name} is invalid`);
@@ -46,6 +61,7 @@ export class ActivityController {
   @ApiOperation({ summary: "List activity control-plane records" })
   @ApiResponse({ status: 503, description: "Activity persistence provider is unavailable" })
   @Permissions("activities.read")
+  @PolicyScopeResolver(activityPolicyScope)
   async list(@Query() query: any) {
     try { assertStrictJson(query ?? {}, ["status", "activityType", "key", "limit", "offset"], "query"); }
     catch (error: any) { throw this.contractError(error); }
@@ -55,6 +71,7 @@ export class ActivityController {
   @Get(":activityId")
   @ApiOperation({ summary: "Get activity detail and version summary" })
   @Permissions("activities.read")
+  @PolicyScopeResolver(activityPolicyScope)
   async detail(@Param("activityId") activityId: string) {
     return this.invoke(() => this.service.detail(text(activityId, "activityId")));
   }
@@ -63,6 +80,7 @@ export class ActivityController {
   @ApiOperation({ summary: "Create an activity draft" })
   @ApiResponse({ status: 422, description: "Draft preflight failed" })
   @Permissions("activities.write")
+  @PolicyScopeResolver(activityPolicyScope)
   async createDraft(@Body() body: any, @Req() request?: any) {
     const command = this.draft(body, DRAFT_FIELDS);
     return this.invoke(() => this.service.createDraft(actorCommand(command, request)));
@@ -72,6 +90,7 @@ export class ActivityController {
   @ApiOperation({ summary: "Fork a published immutable version into a new draft" })
   @ApiResponse({ status: 409, description: "Source version CAS or lifecycle conflict" })
   @Permissions("activities.write")
+  @PolicyScopeResolver(activityPolicyScope)
   async createDraftFromPublished(@Param("activityId") activityId: string, @Body() body: any, @Req() request?: any) {
     return this.invoke(() => this.service.createDraftFromPublished(text(activityId, "activityId"), actorCommand(this.newDraftCommand(body), request)));
   }
@@ -80,6 +99,7 @@ export class ActivityController {
   @ApiOperation({ summary: "Update an unpublished activity draft" })
   @ApiResponse({ status: 409, description: "Stale draft or published version is immutable" })
   @Permissions("activities.write")
+  @PolicyScopeResolver(activityPolicyScope)
   async updateDraft(@Param("activityId") activityId: string, @Body() body: any, @Req() request?: any) {
     const command = this.draft(body, UPDATE_DRAFT_FIELDS);
     return this.invoke(() => this.service.updateDraft(text(activityId, "activityId"), actorCommand(command, request)));
@@ -89,6 +109,7 @@ export class ActivityController {
   @ApiOperation({ summary: "Run field-level publish preflight" })
   @ApiResponse({ status: 422, description: "Preflight failed" })
   @Permissions("activities.publish")
+  @PolicyScopeResolver(activityPolicyScope)
   async preflight(@Param("activityId") activityId: string, @Body() body: any, @Req() request?: any) {
     return this.invoke(() => this.service.preflight(text(activityId, "activityId"), actorCommand(this.versionCommand(body), request)));
   }
@@ -97,6 +118,7 @@ export class ActivityController {
   @ApiOperation({ summary: "Publish an immutable activity version" })
   @ApiResponse({ status: 409, description: "CAS or repeated publish conflict" })
   @Permissions("activities.publish")
+  @PolicyScopeResolver(activityPolicyScope)
   async publish(@Param("activityId") activityId: string, @Body() body: any, @Req() request?: any) {
     return this.invoke(() => this.service.publish(text(activityId, "activityId"), actorCommand(this.versionCommand(body), request)));
   }
@@ -105,6 +127,7 @@ export class ActivityController {
   @ApiOperation({ summary: "Take a published activity offline" })
   @ApiResponse({ status: 409, description: "CAS or repeated offline conflict" })
   @Permissions("activities.offline")
+  @PolicyScopeResolver(activityPolicyScope)
   async offline(@Param("activityId") activityId: string, @Body() body: any, @Req() request?: any) {
     return this.invoke(() => this.service.offline(text(activityId, "activityId"), actorCommand(this.versionCommand(body), request)));
   }
@@ -113,6 +136,7 @@ export class ActivityController {
   @ApiOperation({ summary: "Read append-only claims, draws and reward grant records" })
   @ApiResponse({ status: 503, description: "Activity persistence provider is unavailable" })
   @Permissions("activities.records.read")
+  @PolicyScopeResolver(activityPolicyScope)
   async records(@Param("activityId") activityId: string, @Query() query: any, @Req() request?: any) {
     try {
       assertStrictJson(query ?? {}, ["status", "characterId", "version", "from", "to", "requestId", "limit", "offset"], "query");

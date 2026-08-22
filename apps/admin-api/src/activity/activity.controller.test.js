@@ -9,6 +9,8 @@ register("ts-node/esm", pathToFileURL("./"));
 
 const { ActivityController } = await import("./activity.controller.ts");
 const { ActivityControlError } = await import("./activity-control.service.ts");
+const { AdminPolicyGuard } = await import("../auth/admin-policy.guard.ts");
+const { Reflector } = await import("@nestjs/core");
 
 function service() {
   return {
@@ -124,4 +126,72 @@ test("activity controller maps domain conflicts, preflight failures and missing 
   await assert.rejects(() => controller.preflight("activity-1", { version: 1, reason: "check" }), (error) => error.getStatus() === 422 && error.getResponse().error === "ACTIVITY_PRECHECK_FAILED");
   await assert.rejects(() => controller.publish("activity-1", { version: 1, reason: "publish" }), (error) => error.getStatus() === 409 && error.getResponse().error === "ACTIVITY_VERSION_CONFLICT");
   await assert.rejects(() => controller.offline("activity-1", { version: 1, reason: "repeat" }), (error) => error.getStatus() === 409 && error.getResponse().error === "ACTIVITY_ALREADY_OFFLINE");
+});
+
+test("activity policy denies scoped write, publish, offline and record access with redacted audit evidence", async () => {
+  const cases = [
+    ["updateDraft", "activities.write", "PATCH"],
+    ["publish", "activities.publish", "POST"],
+    ["offline", "activities.offline", "POST"],
+    ["records", "activities.records.read", "GET"]
+  ];
+
+  for (const [methodName, expectedPermission, httpMethod] of cases) {
+    const decisions = [];
+    const audits = [];
+    const request = {
+      method: httpMethod,
+      url: "/api/v1/activities/activity-7/records?requestId=sensitive-request",
+      headers: {},
+      params: { activityId: "activity-7" },
+      query: { requestId: "sensitive-request" },
+      body: {
+        targetType: "forged-target",
+        activityId: "forged-activity",
+        typeConfig: { private_pool_seed: "must-not-enter-audit" },
+        rewardGroups: [{ items: [{ item_id: 9001, weight: 999999 }] }]
+      },
+      admin: { sub: 7, username: "limited-admin", role: "super_admin" }
+    };
+    const context = {
+      getHandler: () => ActivityController.prototype[methodName],
+      getClass: () => ActivityController,
+      switchToHttp: () => ({ getRequest: () => request })
+    };
+    const guard = new AdminPolicyGuard(
+      new Reflector(),
+      {
+        async authorize(adminId, permission, scope) {
+          decisions.push({ adminId, permission, scope });
+          return { allowed: false, code: "PERMISSION_DENIED" };
+        }
+      },
+      { async appendSecurityAuditLog(event) { audits.push(event); } },
+      {}
+    );
+
+    await assert.rejects(
+      () => guard.canActivate(context),
+      (error) => error.getStatus() === 403 && error.getResponse().error === "ADMIN_PERMISSION_DENIED"
+    );
+    assert.deepEqual(decisions, [{
+      adminId: 7,
+      permission: expectedPermission,
+      scope: {
+        worldId: "*",
+        serviceName: "*",
+        instanceId: "*",
+        fields: ["*"],
+        targetType: "activity",
+        targetIds: ["activity-7"],
+        targetCount: 1
+      }
+    }]);
+    assert.equal(audits.length, 1);
+    assert.equal(audits[0].eventType, "admin_policy_denied");
+    assert.equal(audits[0].details.permission, expectedPermission);
+    assert.equal(audits[0].details.handler, methodName);
+    const auditJson = JSON.stringify(audits[0]);
+    assert.doesNotMatch(auditJson, /must-not-enter-audit|999999|sensitive-request|forged-target|forged-activity/);
+  }
 });

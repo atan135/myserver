@@ -16,6 +16,7 @@ use crate::core::inventory::{
 };
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
@@ -201,6 +202,83 @@ pub(crate) struct ActivityActionResponse {
     pub(crate) state_revision: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ActivityRequestContext {
+    pub(crate) character_id: String,
+    pub(crate) account_player_id: Option<String>,
+    pub(crate) source_ip: Option<String>,
+    pub(crate) credential_id: Option<String>,
+    pub(crate) device_subject: Option<String>,
+}
+
+impl ActivityRequestContext {
+    pub(crate) fn character_only(character_id: &str) -> Self {
+        Self {
+            character_id: character_id.to_string(),
+            account_player_id: None,
+            source_ip: None,
+            credential_id: None,
+            device_subject: None,
+        }
+    }
+
+    pub(crate) fn authenticated(
+        character_id: &str,
+        account_player_id: &str,
+        peer_addr: &str,
+        credential_id: Option<&str>,
+        device_subject: Option<&str>,
+    ) -> Self {
+        let source_ip = peer_addr
+            .parse::<SocketAddr>()
+            .map(|address| address.ip().to_string())
+            .unwrap_or_else(|_| peer_addr.trim().to_string());
+        Self {
+            character_id: character_id.to_string(),
+            account_player_id: Some(account_player_id.to_string()),
+            source_ip: (!source_ip.is_empty()).then_some(source_ip),
+            credential_id: credential_id
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string),
+            device_subject: device_subject
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ActivityRateLimitPolicy {
+    window: Duration,
+    character_max: u64,
+    account_max: u64,
+    source_max: u64,
+    credential_max: u64,
+    device_max: u64,
+    activity_max: u64,
+    action_max: u64,
+}
+
+impl Default for ActivityRateLimitPolicy {
+    fn default() -> Self {
+        Self {
+            window: Duration::from_millis(100),
+            character_max: 16,
+            account_max: 16,
+            // game-server commonly sees the proxy/local-socket source rather than
+            // the real client IP. Keep this dimension available but disabled here;
+            // the public proxy owns the enforceable IP boundary.
+            source_max: 0,
+            credential_max: 16,
+            device_max: 16,
+            activity_max: 8,
+            action_max: 1,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct ActivityEngine {
     repository: Arc<InMemoryActivityRepository>,
@@ -212,6 +290,7 @@ pub(crate) struct ActivityEngine {
     lottery_states: LotteryStateStore,
     lottery_assets: Arc<dyn LotteryAssetGateway>,
     lottery_notifier: Arc<dyn LotteryResultNotifier>,
+    rate_limit_policy: ActivityRateLimitPolicy,
 }
 
 pub(crate) trait LotteryResultNotifier: Send + Sync {
@@ -232,10 +311,21 @@ impl LotteryResultNotifier for NoopLotteryResultNotifier {
     }
 }
 
+#[derive(Clone)]
+struct SeenRequest {
+    fingerprint: String,
+    response: Option<ActivityActionResponse>,
+}
+
+struct RateLimitWindow {
+    started_at: Instant,
+    count: u64,
+}
+
 #[derive(Default)]
 struct RequestState {
-    seen: HashMap<String, ActivityActionResponse>,
-    rate_limits: HashMap<String, Instant>,
+    seen: HashMap<String, SeenRequest>,
+    rate_limits: HashMap<String, RateLimitWindow>,
 }
 
 impl ActivityEngine {
@@ -250,6 +340,7 @@ impl ActivityEngine {
             lottery_states: LotteryStateStore::default(),
             lottery_assets: Arc::new(UnavailableLotteryAssetGateway),
             lottery_notifier: Arc::new(NoopLotteryResultNotifier),
+            rate_limit_policy: ActivityRateLimitPolicy::default(),
         }
     }
 
@@ -630,13 +721,22 @@ impl ActivityEngine {
         character_id: &str,
         now: DateTime<Utc>,
     ) -> Result<Vec<PublishedActivitySnapshot>, ActivityEngineError> {
+        self.list_with_context(&ActivityRequestContext::character_only(character_id), now)
+            .await
+    }
+
+    pub(crate) async fn list_with_context(
+        &self,
+        context: &ActivityRequestContext,
+        now: DateTime<Utc>,
+    ) -> Result<Vec<PublishedActivitySnapshot>, ActivityEngineError> {
         if !self.enabled {
             return Err(Self::unavailable_error());
         }
-        if character_id.trim().is_empty() {
+        if context.character_id.trim().is_empty() {
             return Err(Self::auth_error());
         }
-        if self.check_rate_limit(character_id, "*", "list").await {
+        if self.check_rate_limit(context, "*", "read:list").await {
             return Err(Self::rate_limited_error());
         }
         self.repository.list_published(now).await.map_err(|_| {
@@ -654,14 +754,30 @@ impl ActivityEngine {
         version: u32,
         now: DateTime<Utc>,
     ) -> Result<PublishedActivitySnapshot, ActivityEngineError> {
+        self.detail_with_context(
+            &ActivityRequestContext::character_only(character_id),
+            activity_id,
+            version,
+            now,
+        )
+        .await
+    }
+
+    pub(crate) async fn detail_with_context(
+        &self,
+        context: &ActivityRequestContext,
+        activity_id: &str,
+        version: u32,
+        now: DateTime<Utc>,
+    ) -> Result<PublishedActivitySnapshot, ActivityEngineError> {
         if !self.enabled {
             return Err(Self::unavailable_error());
         }
-        if character_id.trim().is_empty() {
+        if context.character_id.trim().is_empty() {
             return Err(Self::auth_error());
         }
         if self
-            .check_rate_limit(character_id, activity_id, "detail")
+            .check_rate_limit(context, activity_id, "read:detail")
             .await
         {
             return Err(Self::rate_limited_error());
@@ -759,6 +875,21 @@ impl ActivityEngine {
         request: ActivityActionRequest,
         now: DateTime<Utc>,
     ) -> ActivityActionResponse {
+        self.dispatch_action_with_context(
+            &ActivityRequestContext::character_only(character_id),
+            request,
+            now,
+        )
+        .await
+    }
+
+    pub(crate) async fn dispatch_action_with_context(
+        &self,
+        context: &ActivityRequestContext,
+        request: ActivityActionRequest,
+        now: DateTime<Utc>,
+    ) -> ActivityActionResponse {
+        let character_id = context.character_id.as_str();
         let base = ActivityActionResponse {
             ok: false,
             error_code: None,
@@ -780,44 +911,73 @@ impl ActivityEngine {
         if request.client_request_id.trim().is_empty() || request.client_request_id.len() > 128 {
             return Self::failed(base, "ACTIVITY_INVALID_REQUEST");
         }
-        let request_key = format!(
+        let request_key = format!("{character_id}:{}", request.client_request_id);
+        let lottery_record_key = format!(
             "{character_id}:{}:{}:{}",
             request.activity_id, request.version, request.client_request_id
         );
+        let request_fingerprint = format!(
+            "{}\0{}\0{}\0{}",
+            request.activity_id, request.version, request.action_type, request.stage_id
+        );
         let mut state = self.request_state.lock().await;
         if let Some(previous) = state.seen.get(&request_key).cloned() {
-            let lottery_record_exists =
-                request.action_type == "draw" && self.lottery_states.record(&request_key).is_some();
+            if previous.fingerprint != request_fingerprint {
+                return Self::failed(base, "REQUEST_FINGERPRINT_CONFLICT");
+            }
+            let lottery_record_exists = request.action_type == "draw"
+                && self.lottery_states.record(&lottery_record_key).is_some();
             if !lottery_record_exists {
-                let mut response = previous;
+                if let Some(mut response) = previous.response {
+                    response.duplicate = true;
+                    return response;
+                }
+                let mut response = Self::failed(base, "ACTIVITY_PROCESSING");
+                response.processing = true;
                 response.duplicate = true;
                 return response;
             }
+        } else {
+            state.seen.insert(
+                request_key.clone(),
+                SeenRequest {
+                    fingerprint: request_fingerprint.clone(),
+                    response: None,
+                },
+            );
         }
-        let lottery_record_exists =
-            request.action_type == "draw" && self.lottery_states.record(&request_key).is_some();
-        let limit_key = format!(
-            "action:{character_id}:{}:{}",
-            request.activity_id, request.action_type
-        );
+        let lottery_record_exists = request.action_type == "draw"
+            && self.lottery_states.record(&lottery_record_key).is_some();
         if !lottery_record_exists {
-            if state
-                .rate_limits
-                .get(&limit_key)
-                .is_some_and(|at| at.elapsed() < Duration::from_millis(100))
+            drop(state);
+            let action_limit_key = format!("write:{}", request.action_type);
+            if self
+                .check_rate_limit(context, &request.activity_id, &action_limit_key)
+                .await
             {
-                return Self::failed(base, "ACTIVITY_RATE_LIMITED");
+                let response = Self::failed(base, "ACTIVITY_RATE_LIMITED");
+                return self
+                    .finish_request(&request_key, &request_fingerprint, response)
+                    .await;
             }
-            state.rate_limits.insert(limit_key, Instant::now());
+        } else {
+            drop(state);
         }
-        drop(state);
 
         let snapshot = match self.load_detail(&request.activity_id, now).await {
             Ok(snapshot) => snapshot,
-            Err(error) => return Self::failed(base, error.code),
+            Err(error) => {
+                let response = Self::failed(base, error.code);
+                return self
+                    .finish_request(&request_key, &request_fingerprint, response)
+                    .await;
+            }
         };
         if request.version != 0 && snapshot.version.version_no != request.version as i32 {
-            return Self::failed(base, "ACTIVITY_INVALID_VERSION");
+            let response = Self::failed(base, "ACTIVITY_INVALID_VERSION");
+            return self
+                .finish_request(&request_key, &request_fingerprint, response)
+                .await;
         }
         if let Err(error) = Self::validate_read_status(&snapshot, now) {
             let ended_claim_window = snapshot.activity.activity_type.as_str() == "login_reward"
@@ -834,11 +994,17 @@ impl ActivityEngine {
                     .ok()
                     .is_some_and(|(state, _)| state.last_period_key.is_some());
             if !ended_claim_window {
-                return Self::failed(base, error.code);
+                let response = Self::failed(base, error.code);
+                return self
+                    .finish_request(&request_key, &request_fingerprint, response)
+                    .await;
             }
         }
         if request.action_type == "claim" && request.stage_id.trim().is_empty() {
-            return Self::failed(base, "ACTIVITY_INVALID_REQUEST");
+            let response = Self::failed(base, "ACTIVITY_INVALID_REQUEST");
+            return self
+                .finish_request(&request_key, &request_fingerprint, response)
+                .await;
         }
         if snapshot.activity.activity_type.as_str() == "login_reward"
             && request.action_type == "claim"
@@ -846,23 +1012,17 @@ impl ActivityEngine {
             let response = self
                 .claim_login_reward(character_id, &request, &snapshot, base.clone(), false)
                 .await;
-            self.request_state
-                .lock()
-                .await
-                .seen
-                .insert(request_key, response.clone());
-            return response;
+            return self
+                .finish_request(&request_key, &request_fingerprint, response)
+                .await;
         }
         if snapshot.activity.activity_type.as_str() == "lottery" && request.action_type == "draw" {
             let response = self
                 .draw_lottery(character_id, &request, &snapshot, base.clone(), now)
                 .await;
-            self.request_state
-                .lock()
-                .await
-                .seen
-                .insert(request_key, response.clone());
-            return response;
+            return self
+                .finish_request(&request_key, &request_fingerprint, response)
+                .await;
         }
         let mut transaction = TransactionContext {
             request_id: request.client_request_id.clone(),
@@ -887,7 +1047,10 @@ impl ActivityEngine {
                             .and_then(|items| serde_json::from_value(items.clone()).ok())
                             .unwrap_or_default();
                         if items.is_empty() {
-                            return Self::failed(base, "ACTIVITY_MANUAL_REVIEW");
+                            let response = Self::failed(base, "ACTIVITY_MANUAL_REVIEW");
+                            return self
+                                .finish_request(&request_key, &request_fingerprint, response)
+                                .await;
                         }
                         let semantic_claim_key = request.stage_id.clone();
                         let order = match build_reward_order(
@@ -899,7 +1062,12 @@ impl ActivityEngine {
                             RewardDeliveryPolicy::PreferInventory,
                         ) {
                             Ok(order) => order,
-                            Err(_) => return Self::failed(base, "ACTIVITY_MANUAL_REVIEW"),
+                            Err(_) => {
+                                let response = Self::failed(base, "ACTIVITY_MANUAL_REVIEW");
+                                return self
+                                    .finish_request(&request_key, &request_fingerprint, response)
+                                    .await;
+                            }
                         };
                         let settlement = coordinator
                             .settle(
@@ -951,12 +1119,8 @@ impl ActivityEngine {
             Ok(_) => Self::failed(base, "ACTIVITY_QUALIFICATION_NOT_MET"),
             Err(error) => Self::failed(base, error.code.as_str()),
         };
-        self.request_state
-            .lock()
+        self.finish_request(&request_key, &request_fingerprint, response)
             .await
-            .seen
-            .insert(request_key, response.clone());
-        response
     }
 
     async fn draw_lottery(
@@ -1278,18 +1442,88 @@ impl ActivityEngine {
         ActivityEngineError::new("ACTIVITY_RATE_LIMITED", "activity request rate limited")
     }
 
-    async fn check_rate_limit(&self, character_id: &str, activity_id: &str, action: &str) -> bool {
-        let key = format!("read:{character_id}:{activity_id}:{action}");
+    async fn check_rate_limit(
+        &self,
+        context: &ActivityRequestContext,
+        activity_id: &str,
+        action: &str,
+    ) -> bool {
+        let policy = self.rate_limit_policy;
+        let character_id = context.character_id.as_str();
+        let mut keys = vec![
+            (format!("character:{character_id}"), policy.character_max),
+            (
+                format!("activity:{character_id}:{activity_id}"),
+                policy.activity_max,
+            ),
+            (
+                format!("action:{character_id}:{activity_id}:{action}"),
+                policy.action_max,
+            ),
+        ];
+        if let Some(account_player_id) = context.account_player_id.as_deref() {
+            keys.push((format!("account:{account_player_id}"), policy.account_max));
+        }
+        if let Some(source_ip) = context.source_ip.as_deref() {
+            keys.push((format!("source:{source_ip}"), policy.source_max));
+        }
+        if let Some(credential_id) = context.credential_id.as_deref() {
+            keys.push((format!("credential:{credential_id}"), policy.credential_max));
+        }
+        if let Some(device_subject) = context.device_subject.as_deref() {
+            keys.push((format!("device:{device_subject}"), policy.device_max));
+        }
+
+        let now = Instant::now();
         let mut state = self.request_state.lock().await;
-        if state
+        state
             .rate_limits
-            .get(&key)
-            .is_some_and(|at| at.elapsed() < Duration::from_millis(100))
-        {
+            .retain(|_, window| now.saturating_duration_since(window.started_at) < policy.window);
+        if keys.iter().any(|(key, maximum)| {
+            *maximum > 0
+                && state
+                    .rate_limits
+                    .get(key)
+                    .is_some_and(|window| window.count >= *maximum)
+        }) {
             return true;
         }
-        state.rate_limits.insert(key, Instant::now());
+        for (key, maximum) in keys {
+            if maximum == 0 {
+                continue;
+            }
+            let window = state.rate_limits.entry(key).or_insert(RateLimitWindow {
+                started_at: now,
+                count: 0,
+            });
+            window.count = window.count.saturating_add(1);
+        }
         false
+    }
+
+    async fn finish_request(
+        &self,
+        request_key: &str,
+        request_fingerprint: &str,
+        response: ActivityActionResponse,
+    ) -> ActivityActionResponse {
+        let mut state = self.request_state.lock().await;
+        match state.seen.get_mut(request_key) {
+            Some(seen) if seen.fingerprint == request_fingerprint => {
+                seen.response = Some(response.clone());
+            }
+            Some(_) => {}
+            None => {
+                state.seen.insert(
+                    request_key.to_string(),
+                    SeenRequest {
+                        fingerprint: request_fingerprint.to_string(),
+                        response: Some(response.clone()),
+                    },
+                );
+            }
+        }
+        response
     }
 
     fn failed(mut response: ActivityActionResponse, code: &'static str) -> ActivityActionResponse {
@@ -1435,9 +1669,19 @@ mod tests {
         gateway: Arc<dyn LotteryAssetGateway>,
     ) -> ActivityEngine {
         let repo = Arc::new(InMemoryActivityRepository::default());
+        publish_lottery(&repo, "lottery-1", now, config).await;
+        ActivityEngine::new(repo).with_lottery_asset_gateway(gateway)
+    }
+
+    async fn publish_lottery(
+        repo: &Arc<InMemoryActivityRepository>,
+        activity_id: &str,
+        now: DateTime<Utc>,
+        config: serde_json::Value,
+    ) {
         let activity = Activity::new(
-            "lottery-1",
-            "lottery-1",
+            activity_id,
+            activity_id,
             ActivityType::new("lottery").unwrap(),
             ActivityScope::Character,
             now - ChronoDuration::hours(1),
@@ -1459,7 +1703,6 @@ mod tests {
         .unwrap();
         repo.save_draft(activity.clone(), version).await.unwrap();
         repo.publish(&activity.id, 1, None).await.unwrap();
-        ActivityEngine::new(repo).with_lottery_asset_gateway(gateway)
     }
 
     fn lottery_config(free: u32, daily: u32, total: u32) -> serde_json::Value {
@@ -1546,6 +1789,52 @@ mod tests {
         assert_eq!(first.error_code, Some("ACTIVITY_QUALIFICATION_NOT_MET"));
         let second = engine.dispatch_action("character-1", request, now).await;
         assert!(second.duplicate);
+    }
+
+    #[tokio::test]
+    async fn identical_action_replay_bypasses_action_rate_limit() {
+        let now = Utc.with_ymd_and_hms(2026, 8, 21, 1, 0, 0).unwrap();
+        let mut engine = fixture(now).await;
+        engine.rate_limit_policy = ActivityRateLimitPolicy {
+            window: Duration::from_secs(1),
+            character_max: 100,
+            account_max: 100,
+            source_max: 100,
+            credential_max: 100,
+            device_max: 100,
+            activity_max: 100,
+            action_max: 1,
+        };
+        let request = ActivityActionRequest {
+            activity_id: "a1".into(),
+            version: 1,
+            stage_id: "stage-1".into(),
+            action_type: "detail".into(),
+            client_request_id: "idempotent-replay".into(),
+        };
+
+        let first = engine
+            .dispatch_action("character-1", request.clone(), now)
+            .await;
+        assert_eq!(first.error_code, Some("ACTIVITY_QUALIFICATION_NOT_MET"));
+
+        let replay = engine
+            .dispatch_action("character-1", request.clone(), now)
+            .await;
+        assert!(replay.duplicate);
+        assert_eq!(replay.error_code, first.error_code);
+
+        let different_request = engine
+            .dispatch_action(
+                "character-1",
+                ActivityActionRequest {
+                    client_request_id: "new-request".into(),
+                    ..request
+                },
+                now,
+            )
+            .await;
+        assert_eq!(different_request.error_code, Some("ACTIVITY_RATE_LIMITED"));
     }
 
     #[tokio::test]
@@ -1719,6 +2008,41 @@ mod tests {
             )
             .await;
         assert_eq!(invalid_version.error_code, Some("ACTIVITY_INVALID_VERSION"));
+        let invalid_version_replay = engine
+            .dispatch_action(
+                "character-1",
+                ActivityActionRequest {
+                    activity_id: "a1".into(),
+                    version: 9,
+                    stage_id: "stage-1".into(),
+                    action_type: "version-check".into(),
+                    client_request_id: "invalid-version-action".into(),
+                },
+                now,
+            )
+            .await;
+        assert!(invalid_version_replay.duplicate);
+        assert_eq!(
+            invalid_version_replay.error_code,
+            Some("ACTIVITY_INVALID_VERSION")
+        );
+        let corrected_with_same_request_id = engine
+            .dispatch_action(
+                "character-1",
+                ActivityActionRequest {
+                    activity_id: "a1".into(),
+                    version: 1,
+                    stage_id: "stage-1".into(),
+                    action_type: "version-check".into(),
+                    client_request_id: "invalid-version-action".into(),
+                },
+                now,
+            )
+            .await;
+        assert_eq!(
+            corrected_with_same_request_id.error_code,
+            Some("REQUEST_FINGERPRINT_CONFLICT")
+        );
         let first = engine
             .dispatch_action("character-1", request.clone(), now)
             .await;
@@ -1729,6 +2053,153 @@ mod tests {
         assert!(!first.duplicate);
         assert!(!other_character.duplicate);
         assert!(duplicate.duplicate);
+
+        let fingerprint_conflict = engine
+            .dispatch_action(
+                "character-1",
+                ActivityActionRequest {
+                    activity_id: "a1".into(),
+                    version: 1,
+                    stage_id: "forged-stage".into(),
+                    action_type: "claim".into(),
+                    client_request_id: "same-request".into(),
+                },
+                now,
+            )
+            .await;
+        assert_eq!(
+            fingerprint_conflict.error_code,
+            Some("REQUEST_FINGERPRINT_CONFLICT")
+        );
+    }
+
+    #[tokio::test]
+    async fn activity_rate_limit_covers_identity_source_credential_activity_and_action_keys() {
+        fn context(
+            character: &str,
+            account: &str,
+            source: &str,
+            credential: &str,
+            device: &str,
+        ) -> ActivityRequestContext {
+            ActivityRequestContext::authenticated(
+                character,
+                account,
+                source,
+                Some(credential),
+                Some(device),
+            )
+        }
+
+        fn policy() -> ActivityRateLimitPolicy {
+            ActivityRateLimitPolicy {
+                window: Duration::from_secs(1),
+                character_max: 100,
+                account_max: 100,
+                source_max: 100,
+                credential_max: 100,
+                device_max: 100,
+                activity_max: 100,
+                action_max: 100,
+            }
+        }
+
+        let dimensions = [
+            (
+                "character",
+                ActivityRateLimitPolicy {
+                    character_max: 1,
+                    ..policy()
+                },
+                context("c1", "a1", "127.0.0.1:1001", "t1", "d1"),
+                context("c1", "a2", "127.0.0.2:1002", "t2", "d2"),
+                ("activity-1", "list"),
+                ("activity-2", "detail"),
+            ),
+            (
+                "account",
+                ActivityRateLimitPolicy {
+                    account_max: 1,
+                    ..policy()
+                },
+                context("c1", "account", "127.0.0.1:1001", "t1", "d1"),
+                context("c2", "account", "127.0.0.2:1002", "t2", "d2"),
+                ("activity-1", "list"),
+                ("activity-2", "detail"),
+            ),
+            (
+                "source",
+                ActivityRateLimitPolicy {
+                    source_max: 1,
+                    ..policy()
+                },
+                context("c1", "a1", "127.0.0.1:1001", "t1", "d1"),
+                context("c2", "a2", "127.0.0.1:2002", "t2", "d2"),
+                ("activity-1", "list"),
+                ("activity-2", "detail"),
+            ),
+            (
+                "credential",
+                ActivityRateLimitPolicy {
+                    credential_max: 1,
+                    ..policy()
+                },
+                context("c1", "a1", "127.0.0.1:1001", "ticket", "d1"),
+                context("c2", "a2", "127.0.0.2:1002", "ticket", "d2"),
+                ("activity-1", "list"),
+                ("activity-2", "detail"),
+            ),
+            (
+                "device",
+                ActivityRateLimitPolicy {
+                    device_max: 1,
+                    ..policy()
+                },
+                context("c1", "a1", "127.0.0.1:1001", "t1", "device"),
+                context("c2", "a2", "127.0.0.2:1002", "t2", "device"),
+                ("activity-1", "list"),
+                ("activity-2", "detail"),
+            ),
+            (
+                "activity",
+                ActivityRateLimitPolicy {
+                    activity_max: 1,
+                    ..policy()
+                },
+                context("c1", "a1", "127.0.0.1:1001", "t1", "d1"),
+                context("c1", "a2", "127.0.0.2:1002", "t2", "d2"),
+                ("activity-1", "list"),
+                ("activity-1", "detail"),
+            ),
+            (
+                "action",
+                ActivityRateLimitPolicy {
+                    action_max: 1,
+                    ..policy()
+                },
+                context("c1", "a1", "127.0.0.1:1001", "t1", "d1"),
+                context("c1", "a2", "127.0.0.2:1002", "t2", "d2"),
+                ("activity-1", "claim"),
+                ("activity-1", "claim"),
+            ),
+        ];
+
+        for (dimension, rate_limit_policy, first, second, first_key, second_key) in dimensions {
+            let mut engine = ActivityEngine::in_memory();
+            engine.rate_limit_policy = rate_limit_policy;
+            assert!(
+                !engine
+                    .check_rate_limit(&first, first_key.0, first_key.1)
+                    .await,
+                "first {dimension} request must be admitted"
+            );
+            assert!(
+                engine
+                    .check_rate_limit(&second, second_key.0, second_key.1)
+                    .await,
+                "second {dimension} request must be limited"
+            );
+        }
     }
 
     #[tokio::test]
@@ -1794,6 +2265,47 @@ mod tests {
         assert!(duplicate.ok);
         assert!(duplicate.duplicate);
         assert_eq!(*gateway.applied.lock().await, 1);
+    }
+
+    #[tokio::test]
+    async fn lottery_request_id_is_character_scoped_across_activities() {
+        let now = Utc.with_ymd_and_hms(2026, 8, 21, 1, 0, 0).unwrap();
+        let gateway = Arc::new(FakeLotteryGateway::free());
+        let engine = lottery_fixture(now, lottery_config(1, 2, 2), gateway.clone()).await;
+        publish_lottery(
+            &engine.repository,
+            "lottery-2",
+            now,
+            lottery_config(1, 2, 2),
+        )
+        .await;
+        let request = |activity_id: &str| ActivityActionRequest {
+            activity_id: activity_id.into(),
+            version: 1,
+            stage_id: String::new(),
+            action_type: "draw".into(),
+            client_request_id: "shared-request-id".into(),
+        };
+
+        let first = engine
+            .dispatch_action("character-1", request("lottery-1"), now)
+            .await;
+        assert!(first.ok);
+
+        let cross_activity = engine
+            .dispatch_action("character-1", request("lottery-2"), now)
+            .await;
+        assert_eq!(
+            cross_activity.error_code,
+            Some("REQUEST_FINGERPRINT_CONFLICT")
+        );
+
+        let other_character = engine
+            .dispatch_action("character-2", request("lottery-2"), now)
+            .await;
+        assert!(other_character.ok);
+        assert!(!other_character.duplicate);
+        assert_eq!(*gateway.applied.lock().await, 2);
     }
 
     #[tokio::test]
@@ -1964,6 +2476,23 @@ mod tests {
         assert!(duplicate.duplicate);
         assert_eq!(duplicate.state.cumulative_count, 1);
         assert_eq!(duplicate.state_revision, first.state_revision);
+    }
+
+    #[tokio::test]
+    async fn concurrent_trusted_game_entry_advances_progress_once() {
+        let now = Utc.with_ymd_and_hms(2026, 8, 21, 1, 0, 0).unwrap();
+        let engine = fixture(now).await;
+        let (left, right) = tokio::join!(
+            engine.on_game_entry("character-1", "a1", 1, now),
+            engine.on_game_entry("character-1", "a1", 1, now + ChronoDuration::minutes(1))
+        );
+        let left = left.unwrap();
+        let right = right.unwrap();
+        assert_eq!((left.duplicate as u8) + (right.duplicate as u8), 1);
+        let (state, revision) = engine.login_progress.load("character-1", "a1", 1).unwrap();
+        assert_eq!(state.cumulative_count, 1);
+        assert_eq!(state.consecutive_count, 1);
+        assert_eq!(revision, 1);
     }
 
     #[tokio::test]

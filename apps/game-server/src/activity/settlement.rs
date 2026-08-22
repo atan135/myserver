@@ -526,6 +526,27 @@ mod tests {
             ClaimStatus::ManualReview
         );
 
+        let cross_activity_order = build_reward_order(
+            "character-1",
+            "activity-2",
+            1,
+            "stage-1",
+            &[NormalizedAssetItem::new(1001, 1, AssetBinding::Unbound).unwrap()],
+            RewardDeliveryPolicy::PreferInventory,
+        )
+        .unwrap();
+        let cross_activity = coordinator
+            .settle(
+                "character-1",
+                "activity-2",
+                1,
+                "stage-1",
+                "req-1",
+                cross_activity_order,
+            )
+            .await;
+        assert_eq!(cross_activity.status, ClaimStatus::ManualReview);
+
         let mut invalid_order = order("stage-invalid");
         invalid_order.request_id = "client-supplied-id".into();
         let manual = coordinator
@@ -610,8 +631,23 @@ mod tests {
                 )
                 .await
         };
-        let _ = tokio::join!(left, right);
+        let (left, right) = tokio::join!(left, right);
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(matches!(
+            left.status,
+            ClaimStatus::Granted | ClaimStatus::Processing
+        ));
+        assert!(matches!(
+            right.status,
+            ClaimStatus::Granted | ClaimStatus::Processing
+        ));
+        assert!(left.duplicate || right.duplicate);
+        assert_eq!(
+            coordinator
+                .state_revision("character-1", "activity-1")
+                .await,
+            Some(1)
+        );
     }
 
     #[tokio::test]

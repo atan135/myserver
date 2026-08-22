@@ -36,8 +36,9 @@ test("activity request encoders do not include client identity or reward fields"
   assert.equal(list.length, 0);
   assert.ok(detail.length > 0);
   assert.ok(claim.length > detail.length);
-  assert.equal(claim.includes(Buffer.from("character-1")), false);
-  assert.equal(claim.includes(Buffer.from("reward")), false);
+  for (const forbidden of ["character-1", "account-1", "reward", "weight", "probability", "progress"]) {
+    assert.equal(claim.includes(Buffer.from(forbidden)), false, `${forbidden} must remain server-owned`);
+  }
 });
 
 test("activity response decoder preserves disabled and duplicate/processing contracts", () => {

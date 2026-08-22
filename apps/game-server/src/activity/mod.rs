@@ -30,7 +30,9 @@ pub(crate) use domain::{
     ActivityType, ActivityVersion, ClaimRecord, PlayerActivityState, RewardGroup, RewardItem,
 };
 #[allow(unused_imports)]
-pub(crate) use engine::{ActivityActionRequest, ActivityActionResponse, ActivityEngine};
+pub(crate) use engine::{
+    ActivityActionRequest, ActivityActionResponse, ActivityEngine, ActivityRequestContext,
+};
 #[allow(unused_imports)]
 pub(crate) use types::{
     GameEntryEvent, LoginRewardProgressError, LoginRewardProgressResult,
@@ -60,6 +62,13 @@ pub(crate) async fn handle_packet(
     let Some(identity) = connection.ensure_authenticated_identity(packet.header.seq)? else {
         return Ok(());
     };
+    let request_context = ActivityRequestContext::authenticated(
+        identity.character_id(),
+        identity.account_player_id(),
+        &connection.peer_addr,
+        connection.session.credential_id.as_deref(),
+        connection.session.device_subject.as_deref(),
+    );
     let now = Utc::now();
     match packet.message_type() {
         Some(MessageType::ActivityListReq) => {
@@ -73,7 +82,7 @@ pub(crate) async fn handle_packet(
                 )?;
                 return Ok(());
             }
-            let response = match engine.list(identity.character_id(), now).await {
+            let response = match engine.list_with_context(&request_context, now).await {
                 Ok(snapshots) => ActivityListRes {
                     ok: true,
                     error_code: String::new(),
@@ -106,12 +115,7 @@ pub(crate) async fn handle_packet(
                 }
             };
             let response = match engine
-                .detail(
-                    identity.character_id(),
-                    &request.activity_id,
-                    request.version,
-                    now,
-                )
+                .detail_with_context(&request_context, &request.activity_id, request.version, now)
                 .await
             {
                 Ok(snapshot) => ActivityDetailRes {
@@ -149,12 +153,7 @@ pub(crate) async fn handle_packet(
                     }
                 };
             let response = match engine
-                .detail(
-                    identity.character_id(),
-                    &request.activity_id,
-                    request.version,
-                    now,
-                )
+                .detail_with_context(&request_context, &request.activity_id, request.version, now)
                 .await
             {
                 Ok(snapshot) => ActivityProgressRes {
@@ -193,8 +192,8 @@ pub(crate) async fn handle_packet(
                 }
             };
             let response = engine
-                .dispatch_action(
-                    identity.character_id(),
+                .dispatch_action_with_context(
+                    &request_context,
                     ActivityActionRequest {
                         activity_id: request.activity_id,
                         version: request.version,
@@ -235,8 +234,8 @@ pub(crate) async fn handle_packet(
                 }
             };
             let response = engine
-                .dispatch_action(
-                    identity.character_id(),
+                .dispatch_action_with_context(
+                    &request_context,
                     ActivityActionRequest {
                         activity_id: request.activity_id,
                         version: request.version,
