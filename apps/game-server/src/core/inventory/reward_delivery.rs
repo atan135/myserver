@@ -25,18 +25,20 @@ use super::{
 /// The only input trusted reward sources may submit. They never choose item UIDs, JSONB
 /// snapshots, a direct inventory mutation, or a concrete mail id.
 pub trait RewardInventoryPort: Send + Sync {
-    async fn execute_reward(
+    fn execute_reward(
         &self,
         order: &RewardOrder,
-    ) -> Result<AssetCommandResult, RewardInventoryPortError>;
+    ) -> impl std::future::Future<Output = Result<AssetCommandResult, RewardInventoryPortError>> + Send;
 
     /// Query the original inventory request after an uncertain execution result. Returning
     /// `None` means it is still not safe to infer a delivery result.
-    async fn query_reward(
+    fn query_reward(
         &self,
         request_id: &str,
         request_fingerprint: &AssetRequestFingerprint,
-    ) -> Result<Option<AssetCommandResult>, RewardInventoryPortError>;
+    ) -> impl std::future::Future<
+        Output = Result<Option<AssetCommandResult>, RewardInventoryPortError>,
+    > + Send;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -347,6 +349,18 @@ pub struct RewardMailOutboxEntry {
     pub character_id: String,
     pub request_fingerprint: AssetRequestFingerprint,
     pub order: RewardOrder,
+    pub dispatch_status: RewardMailDispatchStatus,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RewardMailDispatchStatus {
+    Pending,
+    Processing,
+    RetryableFailure,
+    Delivered,
+    PermanentFailure,
+    ManualReview,
 }
 
 impl RewardMailOutboxEntry {
@@ -363,6 +377,7 @@ impl RewardMailOutboxEntry {
             character_id: order.character_id.clone(),
             request_fingerprint: order.request_fingerprint(),
             order: order.clone(),
+            dispatch_status: RewardMailDispatchStatus::Pending,
         }
     }
 }
@@ -406,29 +421,36 @@ pub enum RewardMailOutboxWrite {
 /// The outbox and delivery record must survive process restarts. A real implementation backs
 /// this port with PostgreSQL; the in-memory implementation exists only for offline tests.
 pub trait RewardDeliveryStore: Send + Sync {
-    async fn find_delivery(&self, request_id: &str)
-    -> Result<Option<RewardDeliveryRecord>, String>;
+    fn find_delivery(
+        &self,
+        request_id: &str,
+    ) -> impl std::future::Future<Output = Result<Option<RewardDeliveryRecord>, String>> + Send;
 
-    async fn persist_delivery(
+    fn persist_delivery(
         &self,
         record: RewardDeliveryRecord,
-    ) -> Result<RewardDeliveryRecordWrite, String>;
+    ) -> impl std::future::Future<Output = Result<RewardDeliveryRecordWrite, String>> + Send;
 
-    async fn persist_reward_mail(
+    fn persist_reward_mail(
         &self,
         entry: RewardMailOutboxEntry,
-    ) -> Result<RewardMailOutboxWrite, String>;
+    ) -> impl std::future::Future<Output = Result<RewardMailOutboxWrite, String>> + Send;
+
+    fn find_reward_mail(
+        &self,
+        request_id: &str,
+    ) -> impl std::future::Future<Output = Result<Option<RewardMailOutboxEntry>, String>> + Send;
 }
 
 /// Notification is deliberately outside every durable transaction. It may send inventory and
 /// item-obtain pushes for direct delivery, or a new-mail hint for mail delivery; failure never
 /// rolls back an already committed record.
 pub trait RewardDeliveryNotifier: Send + Sync {
-    async fn notify_committed(
+    fn notify_committed(
         &self,
         order: &RewardOrder,
         result: &RewardDeliveryResult,
-    ) -> Result<(), String>;
+    ) -> impl std::future::Future<Output = Result<(), String>> + Send;
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -512,6 +534,19 @@ where
             .map_err(RewardDeliveryError::DeliveryRecordUnavailable)?
         {
             return self.replay_delivery(&order, existing).await;
+        }
+
+        if let Some(existing) = self
+            .store
+            .find_reward_mail(&order.request_id)
+            .await
+            .map_err(RewardDeliveryError::RewardMailOutboxUnavailable)?
+        {
+            let fallback_reason = (order.delivery_policy == RewardDeliveryPolicy::PreferInventory)
+                .then_some(AssetFallbackReason::InventoryCapacityFull);
+            return self
+                .resolve_reward_mail(&order, existing, fallback_reason)
+                .await;
         }
 
         match order.delivery_policy {
@@ -648,6 +683,38 @@ where
             }
         };
 
+        self.resolve_reward_mail(order, entry, fallback_reason)
+            .await
+    }
+
+    async fn resolve_reward_mail(
+        &self,
+        order: &RewardOrder,
+        entry: RewardMailOutboxEntry,
+        fallback_reason: Option<AssetFallbackReason>,
+    ) -> Result<RewardDeliveryResult, RewardDeliveryError> {
+        if entry.character_id != order.character_id
+            || entry.request_fingerprint != order.request_fingerprint()
+        {
+            return self.request_conflict(order);
+        }
+        match entry.dispatch_status {
+            RewardMailDispatchStatus::Pending
+            | RewardMailDispatchStatus::Processing
+            | RewardMailDispatchStatus::RetryableFailure => {
+                return AssetCommandResult::unknown(&order.request_id, order.request_fingerprint())
+                    .map_err(RewardDeliveryError::InvalidInventoryResult);
+            }
+            RewardMailDispatchStatus::PermanentFailure | RewardMailDispatchStatus::ManualReview => {
+                return AssetCommandResult::not_applied(
+                    &order.request_id,
+                    order.request_fingerprint(),
+                    AssetCommandErrorCode::InvalidResultContract,
+                )
+                .map_err(RewardDeliveryError::InvalidInventoryResult);
+            }
+            RewardMailDispatchStatus::Delivered => {}
+        }
         let result = AssetCommandResult::applied(
             &order.request_id,
             order.request_fingerprint(),
@@ -686,7 +753,12 @@ where
 
         // A failed push is intentionally ignored. The persisted direct delivery / reward mail is
         // still the source of truth and a replay can issue another best-effort notification.
-        if self.notifier.notify_committed(order, &result).await.is_err() {
+        if self
+            .notifier
+            .notify_committed(order, &result)
+            .await
+            .is_err()
+        {
             METRICS.record_inventory_grant_push_failure();
         }
         Ok(result)
@@ -755,6 +827,23 @@ impl InMemoryRewardDeliveryStore {
     async fn delivery_count(&self) -> usize {
         self.state.lock().await.deliveries.len()
     }
+
+    #[cfg(test)]
+    pub(crate) async fn mark_mail_delivered(&self, request_id: &str) {
+        self.set_mail_status(request_id, RewardMailDispatchStatus::Delivered)
+            .await;
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn set_mail_status(&self, request_id: &str, status: RewardMailDispatchStatus) {
+        self.state
+            .lock()
+            .await
+            .mails
+            .get_mut(request_id)
+            .expect("reward mail should exist")
+            .dispatch_status = status;
+    }
 }
 
 impl RewardDeliveryStore for InMemoryRewardDeliveryStore {
@@ -797,6 +886,13 @@ impl RewardDeliveryStore for InMemoryRewardDeliveryStore {
         }
         state.mails.insert(entry.request_id.clone(), entry.clone());
         Ok(RewardMailOutboxWrite::Created(entry))
+    }
+
+    async fn find_reward_mail(
+        &self,
+        request_id: &str,
+    ) -> Result<Option<RewardMailOutboxEntry>, String> {
+        Ok(self.state.lock().await.mails.get(request_id).cloned())
     }
 }
 
@@ -903,10 +999,20 @@ impl RewardDeliveryStore for PgRewardDeliveryStore {
             .ok_or_else(|| "reward mail outbox row disappeared after conflict".to_string())?;
         Ok(RewardMailOutboxWrite::Existing(existing))
     }
+
+    async fn find_reward_mail(
+        &self,
+        request_id: &str,
+    ) -> Result<Option<RewardMailOutboxEntry>, String> {
+        self.find_mail(request_id).await
+    }
 }
 
 impl PgRewardDeliveryStore {
-    async fn find_mail(&self, request_id: &str) -> Result<Option<RewardMailOutboxEntry>, String> {
+    pub(crate) async fn find_mail(
+        &self,
+        request_id: &str,
+    ) -> Result<Option<RewardMailOutboxEntry>, String> {
         let row = sqlx::query_as::<_, RewardMailOutboxRow>(
             r#"SELECT
                 delivery_request_id,
@@ -920,6 +1026,7 @@ impl PgRewardDeliveryStore {
                 items_json,
                 reason,
                 operator_json
+                , status
             FROM reward_mail_outbox
             WHERE reward_request_id = $1"#,
         )
@@ -970,6 +1077,7 @@ struct RewardMailOutboxRow {
     items_json: serde_json::Value,
     reason: String,
     operator_json: serde_json::Value,
+    status: String,
 }
 
 impl RewardMailOutboxRow {
@@ -1022,6 +1130,15 @@ impl RewardMailOutboxRow {
             character_id: self.character_id,
             request_fingerprint,
             order,
+            dispatch_status: match self.status.as_str() {
+                "pending" => RewardMailDispatchStatus::Pending,
+                "processing" => RewardMailDispatchStatus::Processing,
+                "retryable_failure" => RewardMailDispatchStatus::RetryableFailure,
+                "delivered" => RewardMailDispatchStatus::Delivered,
+                "permanent_failure" => RewardMailDispatchStatus::PermanentFailure,
+                "manual_review" => RewardMailDispatchStatus::ManualReview,
+                _ => return Err("invalid stored reward mail dispatch status".to_string()),
+            },
         })
     }
 }
@@ -1187,7 +1304,11 @@ mod tests {
         let service = RewardDeliveryService::new(inventory, store.clone(), notifier);
 
         let result = service.deliver(reward.clone()).await.unwrap();
-        let receipt = result.delivery.unwrap();
+        assert_eq!(result.result_state, AssetResultState::Unknown);
+        assert_eq!(store.delivery_count().await, 0);
+        store.mark_mail_delivered(&reward.request_id).await;
+        let delivered = service.deliver(reward).await.unwrap();
+        let receipt = delivered.delivery.unwrap();
 
         assert_eq!(receipt.semantics.delivery_method, AssetDeliveryMethod::Mail);
         assert_eq!(
@@ -1221,7 +1342,7 @@ mod tests {
         assert_eq!(store.delivery_count().await, 0);
 
         let second = service.deliver(reward).await.unwrap();
-        assert_eq!(second.result_state, AssetResultState::Applied);
+        assert_eq!(second.result_state, AssetResultState::Unknown);
         assert_eq!(store.mail_count().await, 1);
         assert_eq!(inventory.execute_count.load(Ordering::Relaxed), 2);
     }
@@ -1257,13 +1378,45 @@ mod tests {
             RewardDeliveryService::new(inventory.clone(), store.clone(), notifier.clone());
 
         let first = service.deliver(reward.clone()).await.unwrap();
-        let second = service.deliver(reward).await.unwrap();
+        assert_eq!(first.result_state, AssetResultState::Unknown);
+        store.mark_mail_delivered(&reward.request_id).await;
+        let second = service.deliver(reward.clone()).await.unwrap();
+        let replay = service.deliver(reward).await.unwrap();
 
-        assert_eq!(first, second);
+        assert_eq!(second, replay);
         assert_eq!(store.mail_count().await, 1);
         assert_eq!(store.delivery_count().await, 1);
         assert_eq!(inventory.execute_count.load(Ordering::Relaxed), 0);
         assert_eq!(notifier.calls.lock().await.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn terminal_mail_dispatch_statuses_return_a_definite_manual_review_result() {
+        for status in [
+            RewardMailDispatchStatus::PermanentFailure,
+            RewardMailDispatchStatus::ManualReview,
+        ] {
+            let reward = order(RewardDeliveryPolicy::MailOnly);
+            let store = InMemoryRewardDeliveryStore::default();
+            let service = RewardDeliveryService::new(
+                FakeInventory::default(),
+                store.clone(),
+                NoopRewardDeliveryNotifier,
+            );
+
+            let pending = service.deliver(reward.clone()).await.unwrap();
+            assert_eq!(pending.result_state, AssetResultState::Unknown);
+            store.set_mail_status(&reward.request_id, status).await;
+
+            let terminal = service.deliver(reward).await.unwrap();
+            assert_eq!(terminal.result_state, AssetResultState::NotApplied);
+            assert_eq!(
+                terminal.error_code,
+                Some(AssetCommandErrorCode::InvalidResultContract)
+            );
+            assert_eq!(store.mail_count().await, 1);
+            assert_eq!(store.delivery_count().await, 0);
+        }
     }
 
     #[tokio::test]

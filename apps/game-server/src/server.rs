@@ -1004,9 +1004,70 @@ pub async fn run(
     );
     let character_push_service = crate::core::character_push::CharacterPushService::new();
     let player_registry: PlayerRegistry = PlayerRegistry::default();
+    let player_manager = PlayerManager::new(db_player_store);
+    let (activity_engine, reward_mail_dispatcher) = if config.activity_enabled {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(config.db_pool_size.max(1))
+            .connect(&config.database_url)
+            .await
+            .map_err(|error| {
+                std::io::Error::other(format!("activity database connection failed: {error}"))
+            })?;
+        let inventory = crate::core::inventory::PlayerManagerRewardInventoryPort::new(
+            player_manager.clone(),
+            config_tables.clone(),
+            item_uid_generator.clone(),
+        );
+        let delivery_store = crate::core::inventory::PgRewardDeliveryStore::from_pool(pool.clone())
+            .await
+            .map_err(|error| {
+                std::io::Error::other(format!("activity reward store failed: {error}"))
+            })?;
+        let delivery = Arc::new(crate::core::inventory::RewardDeliveryService::new(
+            inventory.clone(),
+            delivery_store,
+            crate::core::inventory::NoopRewardDeliveryNotifier,
+        ));
+        let lottery_gateway = crate::activity::PlayerManagerLotteryAssetGateway::new(
+            player_manager.clone(),
+            inventory,
+            config_tables.clone(),
+            item_uid_generator.clone(),
+            delivery.clone(),
+        );
+        let activity_engine = crate::activity::ActivityEngine::postgres(pool.clone(), delivery)
+            .with_lottery_asset_gateway(Arc::new(lottery_gateway))
+            .with_cache(Arc::new(crate::activity::RedisActivityCache::new(
+                redis_client.clone(),
+                config.redis_key_prefix.clone(),
+            )));
+        let dispatcher = if config.reward_mail_dispatch_enabled {
+            let registry = registry_client.clone().ok_or_else(|| {
+                std::io::Error::other(
+                    "reward mail dispatch requires service registry endpoint discovery",
+                )
+            })?;
+            let store = crate::core::inventory::PgRewardMailDispatchStore::new(pool).await?;
+            let client = crate::core::inventory::RegistryRewardMailClient::new(
+                registry,
+                config.mail_service_token.clone(),
+            )
+            .map_err(std::io::Error::other)?;
+            Some(crate::core::inventory::RewardMailDispatcher::new(
+                store,
+                client,
+                config.service_instance_id.clone(),
+            ))
+        } else {
+            None
+        };
+        (activity_engine, dispatcher)
+    } else {
+        (crate::activity::ActivityEngine::disabled(), None)
+    };
 
-        let hot_reload_runtime = config_tables.clone();
-        let services = ServiceContext {
+    let hot_reload_runtime = config_tables.clone();
+    let services = ServiceContext {
         config: config.clone(),
         db_store: db_store.clone(),
         room_manager: shared_state.room_manager.clone(),
@@ -1015,14 +1076,14 @@ pub async fn run(
         connection_count: shared_state.connection_count.clone(),
         config_tables,
         item_uid_generator,
-        player_manager: PlayerManager::new(db_player_store),
+        player_manager,
         character_element_facade,
         discipline_service,
         title_service,
         character_progress_service,
         title_unlock_service,
         character_push_service,
-            activity_engine: crate::activity::ActivityEngine::disabled(),
+        activity_engine,
         online_player_count: shared_state.online_player_count.clone(),
         player_registry: player_registry.clone(),
         online_route_coordinator: Default::default(),
@@ -1040,9 +1101,15 @@ pub async fn run(
         "game server listening"
     );
 
-        let health_task = service_registry::readiness::spawn_health_from_env(health_state.clone())
-            .await?
-            .into_iter();
+    if let Some(dispatcher) = reward_mail_dispatcher {
+        resources
+            .tasks
+            .push(tokio::spawn(dispatcher.run(Duration::from_secs(1))));
+    }
+
+    let health_task = service_registry::readiness::spawn_health_from_env(health_state.clone())
+        .await?
+        .into_iter();
         resources.tasks.extend(health_task);
 
         if let Some(client) = registry_client {

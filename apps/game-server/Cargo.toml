@@ -21,13 +21,14 @@ hmac = "0.12"
 deadpool-redis = "0.17"
 prost = "0.13"
 redis = { version = "0.32", features = ["tokio-comp"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 service-registry = { path = "../../packages/service-registry" }
 sim-core = { path = "../../packages/sim-core" }
 global-id = { path = "../../packages/global-id", features = ["redis"] }
 sha2 = "0.10"
-sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "postgres", "json", "derive"] }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "postgres", "json", "derive", "chrono"] }
 tokio = { version = "1", features = ["full"] }
 tonic = "0.12"
 tracing = "0.1"

@@ -49,6 +49,9 @@ pub struct Config {
     pub global_id_worker_id: Option<u64>,
     pub nats_url: String,
     pub db_enabled: bool,
+    pub activity_enabled: bool,
+    pub reward_mail_dispatch_enabled: bool,
+    pub mail_service_token: String,
     pub database_url: String,
     pub db_pool_size: u32,
     pub ticket_secret: String,
@@ -277,6 +280,10 @@ impl Config {
         let global_id_worker_id = parse_optional_u64("GLOBAL_ID_WORKER_ID");
         let nats_url = env::var("NATS_URL").unwrap_or_else(|_| "nats://127.0.0.1:4222".to_string());
         let db_enabled = parse_bool("DB_ENABLED", false);
+        let activity_enabled = parse_bool("ACTIVITY_ENABLED", false);
+        let reward_mail_dispatch_enabled = parse_bool("REWARD_MAIL_DISPATCH_ENABLED", false);
+        let mail_service_token = env::var("MAIL_SERVICE_TOKEN")
+            .unwrap_or_else(|_| "dev-only-change-this-mail-service-token".to_string());
         let database_url = env::var("DATABASE_URL").unwrap_or_else(|_| {
             "postgres://postgres:password@127.0.0.1:5432/myserver_game".to_string()
         });
@@ -359,6 +366,9 @@ impl Config {
             global_id_worker_id,
             nats_url,
             db_enabled,
+            activity_enabled,
+            reward_mail_dispatch_enabled,
+            mail_service_token,
             database_url,
             db_pool_size,
             ticket_secret,
@@ -389,6 +399,16 @@ impl Config {
         };
 
         emit_legacy_direct_config_warnings("game-server", &config.legacy_direct_config_warnings);
+        if config.activity_enabled && !config.db_enabled {
+            panic!(
+                "invalid game-server activity config: ACTIVITY_ENABLED=true requires DB_ENABLED=true"
+            );
+        }
+        if config.reward_mail_dispatch_enabled && (!config.activity_enabled || !config.db_enabled) {
+            panic!(
+                "invalid game-server reward mail config: REWARD_MAIL_DISPATCH_ENABLED=true requires ACTIVITY_ENABLED=true and DB_ENABLED=true"
+            );
+        }
         validate_production_config(&config);
         validate_discovery_config(&config);
 
@@ -640,6 +660,18 @@ fn validate_production_config(config: &Config) {
         errors.push("DB_ENABLED must be true in production");
     }
 
+    if !config.activity_enabled {
+        errors.push("ACTIVITY_ENABLED must be true in production");
+    }
+    if !config.reward_mail_dispatch_enabled {
+        errors.push("REWARD_MAIL_DISPATCH_ENABLED must be true in production");
+    }
+    if config.mail_service_token == "dev-only-change-this-mail-service-token"
+        || config.mail_service_token.trim().len() < 16
+    {
+        errors.push("MAIL_SERVICE_TOKEN must be a non-default secret in production");
+    }
+
     if config.global_id_origin_id == 0 || config.global_id_origin_id > 1023 {
         errors.push("GLOBAL_ID_ORIGIN_ID must be set to 1-1023 in production");
     }
@@ -803,6 +835,9 @@ mod tests {
         "ADMIN_ASSERTION_PUBLIC_KEYS_JSON",
         "MAIL_GRANT_ASSERTION_PUBLIC_KEYS_JSON",
         "DB_ENABLED",
+        "ACTIVITY_ENABLED",
+        "REWARD_MAIL_DISPATCH_ENABLED",
+        "MAIL_SERVICE_TOKEN",
         "GLOBAL_ID_ORIGIN_ID",
         "GLOBAL_ID_WORKER_ID",
     ];
@@ -883,6 +918,9 @@ mod tests {
         unsafe {
             env::set_var("REGISTRY_ENABLED", "true");
             env::set_var("DB_ENABLED", "true");
+            env::set_var("ACTIVITY_ENABLED", "true");
+            env::set_var("REWARD_MAIL_DISPATCH_ENABLED", "true");
+            env::set_var("MAIL_SERVICE_TOKEN", "mail-service-test-token-123456");
             env::set_var("GLOBAL_ID_ORIGIN_ID", "1");
             env::set_var("GLOBAL_ID_WORKER_ID", "1");
             env::set_var(
@@ -1636,6 +1674,53 @@ mod tests {
         let error = panic_message(catch_config_from_env());
 
         assert!(error.contains("DB_ENABLED"));
+    }
+
+    #[test]
+    fn activity_is_disabled_by_default_outside_production() {
+        let _guard = env_lock().lock().unwrap();
+        let _env = EnvGuard::capture(SECURITY_ENV_NAMES);
+
+        unsafe {
+            clear_production_env();
+            env::remove_var("ACTIVITY_ENABLED");
+        }
+
+        assert!(!Config::from_env().activity_enabled);
+    }
+
+    #[test]
+    fn activity_requires_database() {
+        let _guard = env_lock().lock().unwrap();
+        let _env = EnvGuard::capture(SECURITY_ENV_NAMES);
+
+        unsafe {
+            clear_production_env();
+            env::set_var("ACTIVITY_ENABLED", "true");
+            env::set_var("DB_ENABLED", "false");
+        }
+
+        let error = panic_message(catch_config_from_env());
+        assert!(error.contains("ACTIVITY_ENABLED=true requires DB_ENABLED=true"));
+    }
+
+    #[test]
+    fn production_requires_activity_engine() {
+        let _guard = env_lock().lock().unwrap();
+        let _env = EnvGuard::capture(SECURITY_ENV_NAMES);
+
+        unsafe {
+            env::set_var("NODE_ENV", "production");
+            env::remove_var("APP_ENV");
+        }
+        set_custom_production_tokens();
+        set_valid_production_infra();
+        unsafe {
+            env::set_var("ACTIVITY_ENABLED", "false");
+        }
+
+        let error = panic_message(catch_config_from_env());
+        assert!(error.contains("ACTIVITY_ENABLED"));
     }
 
     #[test]

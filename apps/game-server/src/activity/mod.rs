@@ -32,10 +32,7 @@ pub(crate) use domain::{
 #[allow(unused_imports)]
 pub(crate) use engine::{
     ActivityActionRequest, ActivityActionResponse, ActivityEngine, ActivityRequestContext,
-};
-#[allow(unused_imports)]
-pub(crate) use types::{
-    GameEntryEvent, LoginRewardProgressError, LoginRewardProgressResult,
+    PlayerManagerLotteryAssetGateway,
 };
 #[allow(unused_imports)]
 pub(crate) use repository::{
@@ -53,6 +50,8 @@ pub(crate) use types::{
     ActivityTypeErrorCode, ActivityTypeHandler, ActivityTypeRegistry, ConfigValidator,
     PlayerContext, PlayerViewBuilder, TransactionContext,
 };
+#[allow(unused_imports)]
+pub(crate) use types::{GameEntryEvent, LoginRewardProgressError, LoginRewardProgressResult};
 
 pub(crate) async fn handle_packet(
     engine: &ActivityEngine,
@@ -124,6 +123,7 @@ pub(crate) async fn handle_packet(
                     activity: Some(summary(&snapshot, now)),
                     progress_json: engine
                         .player_view_json(identity.character_id(), &snapshot, now)
+                        .await
                         .ok()
                         .and_then(|view| serde_json::to_string(&view).ok())
                         .unwrap_or_else(|| "{}".into()),

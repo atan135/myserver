@@ -7,8 +7,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::config::Config;
-use crate::core::inventory::Item;
 use crate::core::inventory::player_data::PlayerData;
+use crate::core::inventory::{AssetCommandResult, Item};
 use crate::core::inventory::{
     AttrPanel, Buff, EquipmentSlots, ItemContainer, PlayerAttr, PlayerVisual,
 };
@@ -100,6 +100,22 @@ pub enum GrantRecordLookup {
 pub enum SaveGrantRecordOutcome {
     Applied(GrantRecord),
     Existing(GrantRecordLookup),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AssetCommandRecordLookup {
+    NotFound,
+    Succeeded(AssetCommandResult),
+    ResultUnavailable,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SaveAssetCommandOutcome {
+    Applied {
+        revision: u64,
+        result: AssetCommandResult,
+    },
+    Existing(AssetCommandRecordLookup),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -478,6 +494,98 @@ impl PgPlayerStore {
         Ok(SavePlayerOutcome { revision })
     }
 
+    /// Persists an idempotent all-or-nothing asset command, its player snapshot, and every
+    /// resulting quantity delta in one transaction. The stored result is the recovery contract:
+    /// after a lost response callers query this exact request instead of executing it again.
+    pub async fn save_with_asset_command_result(
+        &self,
+        character_id: &str,
+        before: &PlayerData,
+        after: &PlayerData,
+        source: &str,
+        reason: &str,
+        ledger_context: AssetLedgerContext,
+        result: AssetCommandResult,
+    ) -> Result<SaveAssetCommandOutcome, SavePlayerError> {
+        let Some(pool) = &self.pool else {
+            return Err(SavePlayerError::NotApplied(
+                "database not enabled".to_string(),
+            ));
+        };
+        let request_id = result.request_id.clone();
+        let request_fingerprint = result.request_fingerprint.as_str().to_string();
+        let result_json = serde_json::to_value(&result)
+            .map_err(|error| SavePlayerError::NotApplied(error.to_string()))?;
+        let snapshot_json = serialize_player_data(after).map_err(SavePlayerError::NotApplied)?;
+        let mut tx = pool
+            .begin()
+            .await
+            .map_err(|error| SavePlayerError::NotApplied(error.to_string()))?;
+
+        let inserted = sqlx::query_scalar::<_, i64>(
+            r#"INSERT INTO character_asset_requests (
+                request_id, character_id, request_fingerprint, result_json
+            ) VALUES ($1, $2, $3, $4)
+            ON CONFLICT (request_id) DO NOTHING
+            RETURNING id"#,
+        )
+        .bind(&request_id)
+        .bind(character_id)
+        .bind(&request_fingerprint)
+        .bind(result_json)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|error| SavePlayerError::NotApplied(error.to_string()))?;
+        if inserted.is_none() {
+            let existing = find_asset_command_with_executor(&mut *tx, &request_id)
+                .await
+                .map_err(SavePlayerError::ResultUnknown)?;
+            tx.rollback()
+                .await
+                .map_err(|error| SavePlayerError::ResultUnknown(error.to_string()))?;
+            return Ok(SaveAssetCommandOutcome::Existing(existing));
+        }
+
+        let revision = match save_snapshot_with_revision(
+            &mut tx,
+            character_id,
+            after.persistence_revision(),
+            after.get_hp(),
+            &snapshot_json,
+        )
+        .await
+        {
+            Ok(Some(revision)) => revision,
+            Ok(None) => {
+                let _ = tx.rollback().await;
+                return Err(SavePlayerError::VersionConflict);
+            }
+            Err(error) => {
+                let _ = tx.rollback().await;
+                return Err(SavePlayerError::NotApplied(error.to_string()));
+            }
+        };
+
+        insert_player_mutation_ledger_entries(
+            &mut tx,
+            character_id,
+            &request_id,
+            source,
+            reason,
+            revision,
+            before,
+            after,
+            &ledger_context.normalized(source, &request_id),
+        )
+        .await
+        .map_err(|error| SavePlayerError::NotApplied(error.to_string()))?;
+
+        tx.commit()
+            .await
+            .map_err(|error| SavePlayerError::ResultUnknown(error.to_string()))?;
+        Ok(SaveAssetCommandOutcome::Applied { revision, result })
+    }
+
     pub async fn save_with_grant_record_and_ledger_context(
         &self,
         character_id: &str,
@@ -640,6 +748,16 @@ impl PgPlayerStore {
             GrantRecordLookup::NotFound => find_asset_request_with_executor(pool, request_id).await,
             existing => Ok(existing),
         }
+    }
+
+    pub async fn find_asset_command_record(
+        &self,
+        request_id: &str,
+    ) -> Result<AssetCommandRecordLookup, String> {
+        let Some(pool) = &self.pool else {
+            return Err("database not enabled".to_string());
+        };
+        find_asset_command_with_executor(pool, request_id).await
     }
 
     pub async fn load(&self, character_id: &str) -> Result<Option<PlayerData>, String> {
@@ -887,8 +1005,7 @@ async fn insert_grant_ledger_entries(
 }
 
 fn ledger_rule_version(item: &Item) -> String {
-    serde_json::to_string(&item.config_version)
-        .unwrap_or_else(|_| "\"unavailable\"".to_string())
+    serde_json::to_string(&item.config_version).unwrap_or_else(|_| "\"unavailable\"".to_string())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -900,7 +1017,9 @@ struct PlayerAssetQuantityKey {
     rule_version: String,
 }
 
-fn player_asset_quantities(data: &PlayerData) -> std::collections::BTreeMap<PlayerAssetQuantityKey, i64> {
+fn player_asset_quantities(
+    data: &PlayerData,
+) -> std::collections::BTreeMap<PlayerAssetQuantityKey, i64> {
     let mut quantities = std::collections::BTreeMap::new();
     record_player_asset_quantities(&mut quantities, "inventory", data.get_inventory_items());
     record_player_asset_quantities(&mut quantities, "warehouse", data.get_warehouse_items());
@@ -1146,6 +1265,39 @@ where
     Ok(row.map_or(GrantRecordLookup::NotFound, GrantRecordRow::into_lookup))
 }
 
+#[derive(sqlx::FromRow)]
+struct AssetCommandRecordRow {
+    result_json: Option<serde_json::Value>,
+}
+
+async fn find_asset_command_with_executor<'e, E>(
+    executor: E,
+    request_id: &str,
+) -> Result<AssetCommandRecordLookup, String>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    let row = sqlx::query_as::<_, AssetCommandRecordRow>(
+        r#"SELECT result_json
+        FROM character_asset_requests
+        WHERE request_id = $1"#,
+    )
+    .bind(request_id)
+    .fetch_optional(executor)
+    .await
+    .map_err(|error| error.to_string())?;
+
+    Ok(match row {
+        None => AssetCommandRecordLookup::NotFound,
+        Some(AssetCommandRecordRow {
+            result_json: Some(value),
+        }) => serde_json::from_value(value)
+            .map(AssetCommandRecordLookup::Succeeded)
+            .unwrap_or(AssetCommandRecordLookup::ResultUnavailable),
+        Some(_) => AssetCommandRecordLookup::ResultUnavailable,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1153,7 +1305,10 @@ mod tests {
     #[test]
     fn player_asset_quantity_snapshot_preserves_container_before_after_for_moves() {
         let mut before = PlayerData::new("chr_ledger".to_string());
-        before.inventory.add_item(Item::new(1, 1001, 2, false)).unwrap();
+        before
+            .inventory
+            .add_item(Item::new(1, 1001, 2, false))
+            .unwrap();
         let mut after = before.clone();
         let moved = after.inventory.remove_item(1, 2).unwrap();
         after.warehouse.add_item(moved).unwrap();
@@ -1170,8 +1325,20 @@ mod tests {
             .unwrap();
 
         assert_eq!(*inventory.1, 2);
-        assert_eq!(after_quantities.get(inventory.0).copied().unwrap_or_default(), 0);
-        assert_eq!(before_quantities.get(warehouse.0).copied().unwrap_or_default(), 0);
+        assert_eq!(
+            after_quantities
+                .get(inventory.0)
+                .copied()
+                .unwrap_or_default(),
+            0
+        );
+        assert_eq!(
+            before_quantities
+                .get(warehouse.0)
+                .copied()
+                .unwrap_or_default(),
+            0
+        );
         assert_eq!(*warehouse.1, 2);
     }
 }

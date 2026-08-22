@@ -193,7 +193,11 @@ pub(crate) fn build_lottery_voucher_exchange(
     .map_err(|_| AssetCommandErrorCode::InvalidItemCount)?;
     // The configured item ID is retained in the origin for audit/fingerprint
     // context; the authoritative stack identity is the server-resolved UID.
-    let exchange_key = format!("{exchange_id}:voucher:{voucher_item_id}");
+    let exchange_digest = format!(
+        "{:x}",
+        Sha256::digest(format!("lottery-voucher\0{exchange_id}\0{voucher_item_id}").as_bytes())
+    );
+    let exchange_key = format!("lottery:{}", &exchange_digest[..48]);
     InventoryRequiredExchange::new(
         AssetExchangeKind::Redemption,
         exchange_key,
@@ -738,6 +742,18 @@ mod tests {
             exchange.command.operations[1],
             crate::core::inventory::AssetOperation::Grant { .. }
         ));
+    }
+
+    #[test]
+    fn voucher_exchange_identifiers_are_bounded_for_long_draw_ids() {
+        let parsed: LotteryConfig = serde_json::from_value(config()).unwrap();
+        let selection = select_lottery_item_with_random_word(&parsed, 0).unwrap();
+        let exchange =
+            build_lottery_voucher_exchange("c1", &"draw:".repeat(256), 42, 9001, &selection)
+                .unwrap();
+
+        assert!(exchange.command.request_id.len() <= 128);
+        assert!(exchange.command.origin.origin_id.len() <= 128);
     }
 }
 

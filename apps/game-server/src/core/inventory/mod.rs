@@ -1,13 +1,14 @@
 pub mod asset;
 pub mod attr;
 pub mod buff;
-pub mod container;
 pub mod compatibility;
+pub mod container;
 pub mod contract;
 pub mod equipment;
 pub mod item;
 pub mod player_data;
 pub mod reward_delivery;
+pub mod reward_mail_dispatch;
 pub mod visual;
 
 pub use asset::{
@@ -19,8 +20,7 @@ pub use asset::{
 pub use attr::{AttrPanel, AttrRecord, AttrSource, AttrType, PlayerAttr};
 pub use buff::Buff;
 pub use compatibility::{
-    scan_jsonb_containers, scan_player_assets, AssetCompatibilityIssue,
-    AssetCompatibilityIssueCode,
+    AssetCompatibilityIssue, AssetCompatibilityIssueCode, scan_jsonb_containers, scan_player_assets,
 };
 pub use container::{ItemContainer, ItemContainerAdditionPlan};
 pub use contract::{
@@ -39,6 +39,10 @@ pub use reward_delivery::{
     InMemoryRewardDeliveryStore, NoopRewardDeliveryNotifier, PgRewardDeliveryStore,
     PlayerManagerRewardInventoryPort, RewardDeliveryError, RewardDeliveryNotifier,
     RewardDeliveryRecord, RewardDeliveryService, RewardDeliveryStore, RewardInventoryPort,
-    RewardInventoryPortError, RewardMailOutboxEntry, RewardMailOutboxWrite,
+    RewardInventoryPortError, RewardMailDispatchStatus, RewardMailOutboxEntry,
+    RewardMailOutboxWrite,
+};
+pub(crate) use reward_mail_dispatch::{
+    PgRewardMailDispatchStore, RegistryRewardMailClient, RewardMailDispatcher,
 };
 pub use visual::PlayerVisual;

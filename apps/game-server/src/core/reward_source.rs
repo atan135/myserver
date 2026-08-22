@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 
@@ -604,7 +605,7 @@ impl AssetExchangeKind {
 /// Contract for future shop/crafting/redemption modules. Currency settlement has not been
 /// implemented in this repository, so this presently expresses item material consumption and
 /// output grant as one `AssetCommand` batch. It has no mail fallback path.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InventoryRequiredExchange {
     pub command: AssetCommand,
     pub delivery_policy: RewardDeliveryPolicy,
@@ -1020,9 +1021,10 @@ mod tests {
             let claim =
                 RewardSourceClaim::new("chr_1", source, vec![item()], "source fixture").unwrap();
             let inventory = DeterministicInventory::direct();
+            let store = crate::core::inventory::InMemoryRewardDeliveryStore::default();
             let shared_delivery = RewardDeliveryService::new(
                 inventory.clone(),
-                crate::core::inventory::InMemoryRewardDeliveryStore::default(),
+                store.clone(),
                 crate::core::inventory::NoopRewardDeliveryNotifier,
             );
             let source_service = RewardSourceService::new(
@@ -1031,24 +1033,43 @@ mod tests {
             );
 
             let first = source_service.deliver_claim(claim.clone()).await.unwrap();
-            let duplicate = source_service.deliver_claim(claim).await.unwrap();
-
-            assert!(
-                first.source_completed,
-                "{kind:?} should complete after delivery"
-            );
-            assert!(
-                duplicate.replayed_source_completion,
-                "{kind:?} duplicate must replay source state"
-            );
             if kind == RewardSourceKind::Ranking {
+                assert!(!first.source_completed);
+                assert_eq!(first.delivery.result_state, AssetResultState::Unknown);
+                assert!(first.delivery.delivery.is_none());
+                let pending_replay = source_service.deliver_claim(claim.clone()).await.unwrap();
+                assert!(!pending_replay.source_completed);
                 assert_eq!(
-                    first.delivery.delivery.unwrap().semantics.delivery_method,
+                    pending_replay.delivery.result_state,
+                    AssetResultState::Unknown
+                );
+                let request_id = claim.clone().into_reward_order().unwrap().request_id;
+                store.mark_mail_delivered(&request_id).await;
+                let completed = source_service.deliver_claim(claim.clone()).await.unwrap();
+                let duplicate = source_service.deliver_claim(claim).await.unwrap();
+                assert_eq!(
+                    completed
+                        .delivery
+                        .delivery
+                        .unwrap()
+                        .semantics
+                        .delivery_method,
                     AssetDeliveryMethod::Mail,
                     "ranking is intentionally MAIL_ONLY"
                 );
+                assert!(completed.source_completed);
+                assert!(duplicate.replayed_source_completion);
                 assert_eq!(inventory.execute_calls.load(Ordering::Relaxed), 0);
             } else {
+                let duplicate = source_service.deliver_claim(claim).await.unwrap();
+                assert!(
+                    first.source_completed,
+                    "{kind:?} should complete after delivery"
+                );
+                assert!(
+                    duplicate.replayed_source_completion,
+                    "{kind:?} duplicate must replay source state"
+                );
                 assert_eq!(
                     first.delivery.delivery.unwrap().semantics.delivery_method,
                     AssetDeliveryMethod::Direct,
@@ -1075,9 +1096,10 @@ mod tests {
             let claim =
                 RewardSourceClaim::new("chr_1", source, vec![item()], "capacity fixture").unwrap();
             let inventory = DeterministicInventory::capacity_full();
+            let store = crate::core::inventory::InMemoryRewardDeliveryStore::default();
             let shared_delivery = RewardDeliveryService::new(
                 inventory.clone(),
-                crate::core::inventory::InMemoryRewardDeliveryStore::default(),
+                store.clone(),
                 crate::core::inventory::NoopRewardDeliveryNotifier,
             );
             let source_service = RewardSourceService::new(
@@ -1086,8 +1108,21 @@ mod tests {
             );
 
             let first = source_service.deliver_claim(claim.clone()).await.unwrap();
+            let pending_replay = source_service.deliver_claim(claim.clone()).await.unwrap();
+            assert!(!first.source_completed);
+            assert_eq!(first.delivery.result_state, AssetResultState::Unknown);
+            assert!(!pending_replay.source_completed);
+            assert_eq!(
+                pending_replay.delivery.result_state,
+                AssetResultState::Unknown
+            );
+            assert_eq!(inventory.execute_calls.load(Ordering::Relaxed), 1);
+
+            let request_id = claim.clone().into_reward_order().unwrap().request_id;
+            store.mark_mail_delivered(&request_id).await;
+            let completed = source_service.deliver_claim(claim.clone()).await.unwrap();
             let duplicate = source_service.deliver_claim(claim).await.unwrap();
-            let receipt = first
+            let receipt = completed
                 .delivery
                 .delivery
                 .expect("capacity fallback must be mail-backed");
@@ -1097,6 +1132,7 @@ mod tests {
                 receipt.fallback_reason,
                 Some(AssetFallbackReason::InventoryCapacityFull)
             );
+            assert!(completed.source_completed);
             assert!(duplicate.replayed_source_completion);
             assert_eq!(inventory.execute_calls.load(Ordering::Relaxed), 1);
         }

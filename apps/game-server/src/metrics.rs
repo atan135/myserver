@@ -94,6 +94,10 @@ pub struct MetricsCollector {
     asset_version_conflict: AtomicU64,
     asset_capacity_fallback: AtomicU64,
     reward_mail_created: AtomicU64,
+    reward_mail_dispatched: AtomicU64,
+    reward_mail_dispatch_retry: AtomicU64,
+    reward_mail_dispatch_manual_review: AtomicU64,
+    activity_cache_failure: AtomicU64,
     client_protocol_auth_accepted_legacy: AtomicU64,
     client_protocol_auth_accepted_current: AtomicU64,
     client_protocol_auth_accepted_supported_older: AtomicU64,
@@ -122,6 +126,10 @@ impl MetricsCollector {
             asset_version_conflict: AtomicU64::new(0),
             asset_capacity_fallback: AtomicU64::new(0),
             reward_mail_created: AtomicU64::new(0),
+            reward_mail_dispatched: AtomicU64::new(0),
+            reward_mail_dispatch_retry: AtomicU64::new(0),
+            reward_mail_dispatch_manual_review: AtomicU64::new(0),
+            activity_cache_failure: AtomicU64::new(0),
             client_protocol_auth_accepted_legacy: AtomicU64::new(0),
             client_protocol_auth_accepted_current: AtomicU64::new(0),
             client_protocol_auth_accepted_supported_older: AtomicU64::new(0),
@@ -193,6 +201,24 @@ impl MetricsCollector {
 
     pub fn record_reward_mail_created(&self) {
         self.reward_mail_created.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_reward_mail_dispatched(&self) {
+        self.reward_mail_dispatched.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_reward_mail_dispatch_retry(&self) {
+        self.reward_mail_dispatch_retry
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_reward_mail_dispatch_manual_review(&self) {
+        self.reward_mail_dispatch_manual_review
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_activity_cache_failure(&self) {
+        self.activity_cache_failure.fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn record_client_protocol_version(&self, metric: ClientProtocolVersionMetric) {
@@ -276,6 +302,13 @@ impl MetricsCollector {
             let asset_version_conflict = self.asset_version_conflict.swap(0, Ordering::Relaxed);
             let asset_capacity_fallback = self.asset_capacity_fallback.swap(0, Ordering::Relaxed);
             let reward_mail_created = self.reward_mail_created.swap(0, Ordering::Relaxed);
+            let reward_mail_dispatched = self.reward_mail_dispatched.swap(0, Ordering::Relaxed);
+            let reward_mail_dispatch_retry =
+                self.reward_mail_dispatch_retry.swap(0, Ordering::Relaxed);
+            let reward_mail_dispatch_manual_review = self
+                .reward_mail_dispatch_manual_review
+                .swap(0, Ordering::Relaxed);
+            let activity_cache_failure = self.activity_cache_failure.swap(0, Ordering::Relaxed);
             let client_protocol_auth_accepted_legacy = self
                 .client_protocol_auth_accepted_legacy
                 .swap(0, Ordering::Relaxed);
@@ -355,6 +388,22 @@ impl MetricsCollector {
                 (
                     "reward_mail_created_total".to_string(),
                     reward_mail_created.to_string(),
+                ),
+                (
+                    "reward_mail_dispatched_total".to_string(),
+                    reward_mail_dispatched.to_string(),
+                ),
+                (
+                    "reward_mail_dispatch_retry_total".to_string(),
+                    reward_mail_dispatch_retry.to_string(),
+                ),
+                (
+                    "reward_mail_dispatch_manual_review_total".to_string(),
+                    reward_mail_dispatch_manual_review.to_string(),
+                ),
+                (
+                    "activity_cache_failure_total".to_string(),
+                    activity_cache_failure.to_string(),
                 ),
                 (
                     "client_protocol_auth_accepted_legacy_total".to_string(),

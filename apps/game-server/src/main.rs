@@ -1,5 +1,5 @@
-mod adapters;
 mod activity;
+mod adapters;
 mod admin_server;
 mod authority_bridge;
 mod business;
@@ -310,6 +310,9 @@ mod tests {
             global_id_worker_id: None,
             nats_url: "nats://127.0.0.1:4222".to_string(),
             db_enabled: false,
+            activity_enabled: false,
+            reward_mail_dispatch_enabled: false,
+            mail_service_token: "dev-only-change-this-mail-service-token".to_string(),
             database_url: "postgres://postgres:password@127.0.0.1:5432/myserver_game".to_string(),
             db_pool_size: 10,
             ticket_secret: config::DEFAULT_TICKET_SECRET.to_string(),

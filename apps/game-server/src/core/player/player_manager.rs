@@ -7,11 +7,16 @@ use tokio::sync::{Mutex, RwLock};
 use tracing::{info, warn};
 
 use super::db_player_store::{
-    AssetLedgerContext, GrantRecord, GrantRecordLookup, PgPlayerStore, SaveGrantRecordError,
-    SaveGrantRecordOutcome, SavePlayerError as StoreSavePlayerError,
+    AssetCommandRecordLookup, AssetLedgerContext, GrantRecord, GrantRecordLookup, PgPlayerStore,
+    SaveAssetCommandOutcome, SaveGrantRecordError, SaveGrantRecordOutcome,
+    SavePlayerError as StoreSavePlayerError,
 };
 use super::grant_contract::GrantResultSummary;
-use crate::core::inventory::{EquipSlot, Item, ItemError, PlayerData};
+use crate::core::inventory::{
+    AssetBinding, AssetCommandErrorCode, AssetCommandResult, AssetContainer, AssetContainerVersion,
+    AssetOperation, AssetQuantityDelta, AssetType, EquipSlot, Item, ItemError, PlayerData,
+};
+use crate::core::reward_source::InventoryRequiredExchange;
 use crate::csv_code::itemtable::ItemTable;
 use crate::metrics::METRICS;
 
@@ -158,6 +163,7 @@ pub struct PlayerManager {
     players: Arc<RwLock<HashMap<String, PlayerData>>>,
     store: PgPlayerStore,
     grant_records: Arc<RwLock<HashMap<String, GrantRecord>>>,
+    asset_command_records: Arc<RwLock<HashMap<String, AssetCommandResult>>>,
     grant_request_locks: Arc<Mutex<HashMap<String, Weak<Mutex<()>>>>>,
     asset_character_locks: Arc<Mutex<HashMap<String, Weak<Mutex<()>>>>>,
 }
@@ -169,6 +175,7 @@ impl PlayerManager {
             players: Arc::new(RwLock::new(HashMap::new())),
             store,
             grant_records: Arc::new(RwLock::new(HashMap::new())),
+            asset_command_records: Arc::new(RwLock::new(HashMap::new())),
             grant_request_locks: Arc::new(Mutex::new(HashMap::new())),
             asset_character_locks: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -735,6 +742,229 @@ impl PlayerManager {
         }
     }
 
+    pub async fn find_inventory_item_by_config(
+        &self,
+        character_id: &str,
+        item_id: i32,
+    ) -> Result<Option<Item>, GrantItemsError> {
+        let character_lock = keyed_lock(&self.asset_character_locks, character_id).await;
+        let _character_guard = character_lock.lock().await;
+        let player_data = self.load_or_create_player_for_grant(character_id).await?;
+        Ok(player_data
+            .get_inventory_items()
+            .into_iter()
+            .find(|item| item.item_id == item_id && !item.is_frozen() && item.count > 0)
+            .cloned())
+    }
+
+    pub async fn query_asset_command(
+        &self,
+        request_id: &str,
+    ) -> Result<AssetCommandRecordLookup, String> {
+        if self.store.enabled() {
+            self.store.find_asset_command_record(request_id).await
+        } else {
+            Ok(self
+                .asset_command_records
+                .read()
+                .await
+                .get(request_id)
+                .cloned()
+                .map_or(
+                    AssetCommandRecordLookup::NotFound,
+                    AssetCommandRecordLookup::Succeeded,
+                ))
+        }
+    }
+
+    /// Executes a server-built consume+grant command under one character lock and one durable
+    /// snapshot transaction. The caller materializes the configured output items, but the
+    /// operation list, request fingerprint, consumption and capacity checks remain authoritative.
+    pub async fn execute_inventory_required_exchange<G>(
+        &self,
+        exchange: &InventoryRequiredExchange,
+        produced_items: Vec<Item>,
+        item_table: &ItemTable,
+        mut next_uid: G,
+    ) -> Result<AssetCommandResult, GrantItemsError>
+    where
+        G: FnMut() -> Result<u64, ItemError>,
+    {
+        exchange
+            .command
+            .validate()
+            .map_err(|_| GrantItemsError::item_failure(&ItemError::Unknown))?;
+        let request_id = exchange.command.request_id.as_str();
+        let character_id = exchange.command.character_id.as_str();
+        let request_fingerprint = exchange.command.request_fingerprint();
+        let request_lock = keyed_lock(&self.grant_request_locks, request_id).await;
+        let _request_guard = request_lock.lock().await;
+        let character_lock = keyed_lock(&self.asset_character_locks, character_id).await;
+        let _character_guard = character_lock.lock().await;
+
+        match self
+            .query_asset_command(request_id)
+            .await
+            .map_err(|_| GrantItemsError::result_query_failed())?
+        {
+            AssetCommandRecordLookup::NotFound => {}
+            AssetCommandRecordLookup::Succeeded(result) => {
+                if result.request_fingerprint != request_fingerprint {
+                    return AssetCommandResult::not_applied(
+                        request_id,
+                        request_fingerprint,
+                        AssetCommandErrorCode::RequestFingerprintConflict,
+                    )
+                    .map_err(|_| GrantItemsError::fingerprint_conflict());
+                }
+                return Ok(result);
+            }
+            AssetCommandRecordLookup::ResultUnavailable => {
+                return AssetCommandResult::unknown(request_id, request_fingerprint)
+                    .map_err(|_| GrantItemsError::result_unavailable());
+            }
+        }
+
+        let (consumptions, grants) = match exchange.command.operations.as_slice() {
+            [
+                AssetOperation::Consume { assets },
+                AssetOperation::Grant { items },
+            ] => (assets.as_slice(), items.as_slice()),
+            _ => return Err(GrantItemsError::item_failure(&ItemError::Unknown)),
+        };
+        if produced_items.len() != grants.len()
+            || produced_items.iter().zip(grants).any(|(item, intent)| {
+                item.item_id != intent.item_id
+                    || item.count != intent.count
+                    || AssetBinding::from_item(item) != intent.binding
+            })
+        {
+            return Err(GrantItemsError::item_failure(&ItemError::InvalidItemConfig));
+        }
+
+        let mut player_data = self.load_or_create_player_for_grant(character_id).await?;
+        if let Some(current) = self.players.read().await.get(character_id)
+            && current.persistence_revision() != player_data.persistence_revision()
+        {
+            METRICS.record_asset_version_conflict();
+            return Err(GrantItemsError::transaction_failed());
+        }
+        let before = player_data.clone();
+        let mut actual_deltas = Vec::with_capacity(consumptions.len() + grants.len());
+        for consumption in consumptions {
+            let consumed = player_data
+                .remove_item(consumption.asset_uid, consumption.count)
+                .map_err(|error| GrantItemsError::item_failure(&error))?;
+            actual_deltas.push(AssetQuantityDelta {
+                asset_type: AssetType::Item,
+                item_id: consumed.item_id,
+                binding: AssetBinding::from_item(&consumed),
+                delta: -i64::from(consumption.count),
+            });
+        }
+        let plan = player_data
+            .inventory
+            .plan_add_items(&produced_items, item_table)
+            .map_err(|error| GrantItemsError::item_failure(&error))?;
+        player_data
+            .inventory
+            .apply_addition_plan(plan, &mut next_uid)
+            .map_err(|error| GrantItemsError::item_failure(&error))?;
+        player_data.set_data_dirty();
+        actual_deltas.extend(grants.iter().map(|item| AssetQuantityDelta {
+            asset_type: AssetType::Item,
+            item_id: item.item_id,
+            binding: item.binding.clone(),
+            delta: i64::from(item.count),
+        }));
+        let result = AssetCommandResult::applied(
+            request_id,
+            request_fingerprint,
+            actual_deltas,
+            Vec::new(),
+            Vec::new(),
+            None,
+        )
+        .map_err(|_| GrantItemsError::item_failure(&ItemError::Unknown))?;
+
+        if self.store.enabled() {
+            let ledger_context = AssetLedgerContext {
+                origin_type: exchange.command.origin.origin_type.as_str().to_string(),
+                origin_id: exchange.command.origin.origin_id.clone(),
+                delivery_method: "direct".to_string(),
+                delivery_id: Some(request_id.to_string()),
+                mail_id: None,
+                fallback_reason: None,
+                operator_id: Some(exchange.command.operator.operator_id.clone()),
+            };
+            match self
+                .store
+                .save_with_asset_command_result(
+                    character_id,
+                    &before,
+                    &player_data,
+                    exchange.command.origin.origin_type.as_str(),
+                    &exchange.command.reason,
+                    ledger_context,
+                    result.clone(),
+                )
+                .await
+                .map_err(|error| match error {
+                    StoreSavePlayerError::NotApplied(_) | StoreSavePlayerError::VersionConflict => {
+                        GrantItemsError::transaction_failed()
+                    }
+                    StoreSavePlayerError::ResultUnknown(_) => {
+                        GrantItemsError::commit_result_unknown()
+                    }
+                })? {
+                SaveAssetCommandOutcome::Applied { revision, result } => {
+                    player_data.set_persistence_revision(revision);
+                    self.players
+                        .write()
+                        .await
+                        .insert(character_id.to_string(), player_data);
+                    Ok(result)
+                }
+                SaveAssetCommandOutcome::Existing(AssetCommandRecordLookup::Succeeded(result)) => {
+                    if result.request_fingerprint == exchange.command.request_fingerprint() {
+                        Ok(result)
+                    } else {
+                        AssetCommandResult::not_applied(
+                            request_id,
+                            exchange.command.request_fingerprint(),
+                            AssetCommandErrorCode::RequestFingerprintConflict,
+                        )
+                        .map_err(|_| GrantItemsError::fingerprint_conflict())
+                    }
+                }
+                SaveAssetCommandOutcome::Existing(AssetCommandRecordLookup::ResultUnavailable) => {
+                    AssetCommandResult::unknown(request_id, exchange.command.request_fingerprint())
+                        .map_err(|_| GrantItemsError::result_unavailable())
+                }
+                SaveAssetCommandOutcome::Existing(AssetCommandRecordLookup::NotFound) => {
+                    Err(GrantItemsError::transaction_failed())
+                }
+            }
+        } else {
+            player_data
+                .set_persistence_revision(player_data.persistence_revision().saturating_add(1));
+            let mut result = result;
+            result.container_versions = vec![AssetContainerVersion {
+                container: AssetContainer::Inventory,
+                version: player_data.persistence_revision(),
+            }];
+            self.asset_command_records
+                .write()
+                .await
+                .insert(request_id.to_string(), result.clone());
+            self.players
+                .write()
+                .await
+                .insert(character_id.to_string(), player_data);
+            Ok(result)
+        }
+    }
+
     /// 移除角色数据（离线）
     pub async fn remove_player(&self, character_id: &str) -> Option<PlayerData> {
         let mut players = self.players.write().await;
@@ -884,8 +1114,11 @@ impl Default for PlayerManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::inventory::{Buff, EquipSlot};
+    use crate::core::config_table::CsvTableLoader;
+    use crate::core::inventory::AssetResultState;
+    use crate::core::inventory::{AssetConsumption, Buff, EquipSlot, NormalizedAssetItem};
     use crate::core::player::grant_contract::GrantItemIntent;
+    use crate::core::reward_source::{AssetExchangeKind, InventoryRequiredExchange};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn create_disabled_store() -> PgPlayerStore {
@@ -954,6 +1187,55 @@ mod tests {
             published.inventory.find_item(90).map(|item| item.count),
             Some(1)
         );
+    }
+
+    #[tokio::test]
+    async fn inventory_required_exchange_consumes_and_grants_once() {
+        let manager = PlayerManager::new(create_disabled_store());
+        let mut initial = manager.get_or_create_player("chr_exchange").await;
+        initial.add_item(Item::new(90, 5001, 2, false)).unwrap();
+        manager.save_player("chr_exchange", initial).await.unwrap();
+        let item_table = ItemTable::load_from_csv(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("csv/ItemTable.csv"),
+        )
+        .unwrap();
+        let exchange = InventoryRequiredExchange::new(
+            AssetExchangeKind::Redemption,
+            "activity:test-draw:voucher:5001",
+            "chr_exchange",
+            vec![AssetConsumption {
+                asset_uid: 90,
+                count: 1,
+            }],
+            vec![NormalizedAssetItem::new(1001, 1, AssetBinding::Unbound).unwrap()],
+        )
+        .unwrap();
+
+        let first = manager
+            .execute_inventory_required_exchange(
+                &exchange,
+                vec![Item::new(91, 1001, 1, false)],
+                &item_table,
+                || Ok(92),
+            )
+            .await
+            .unwrap();
+        let replay = manager
+            .execute_inventory_required_exchange(
+                &exchange,
+                vec![Item::new(93, 1001, 1, false)],
+                &item_table,
+                || panic!("replay must not allocate split item ids"),
+            )
+            .await
+            .unwrap();
+        let player = manager.get_player("chr_exchange").await.unwrap();
+
+        assert_eq!(first.result_state, AssetResultState::Applied);
+        assert_eq!(replay, first);
+        assert_eq!(player.inventory.find_item(90).unwrap().count, 1);
+        assert!(player.inventory.find_item(91).is_some());
+        assert!(player.inventory.find_item(93).is_none());
     }
 
     fn grant_summary(character_id: &str, count: u32) -> GrantResultSummary {
