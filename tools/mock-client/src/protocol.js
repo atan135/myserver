@@ -192,6 +192,10 @@ export function readInt64(fields, fieldNumber) {
   return Number(fields.get(fieldNumber) || 0n);
 }
 
+export function readUInt64(fields, fieldNumber) {
+  return Number(fields.get(fieldNumber) || 0n);
+}
+
 export function readUInt32(fields, fieldNumber) {
   return Number(fields.get(fieldNumber) || 0n);
 }

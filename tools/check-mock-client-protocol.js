@@ -42,6 +42,7 @@ const FIELD_HELPERS = {
   readStringList: "repeated_string",
   readBool: "bool",
   readInt64: "varint64",
+  readUInt64: "varint64",
   readUInt32: "varint32",
   readInt32List: "repeated_varint32",
   readFloat: "float"

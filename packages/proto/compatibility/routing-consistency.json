@@ -67,11 +67,6 @@
         "reason": "Message id 1408 is permanently retained for the retired ItemAdd response and is intentionally never produced; retired requests receive ErrorRes instead."
       },
       {
-        "messageType": "RoomMemberOfflinePush",
-        "owner": "game-server",
-        "reason": "The packet id and protobuf shape are retained for the room offline lifecycle, but current disconnect handling has no client delivery producer."
-      },
-      {
         "messageType": "AuthorityMigrationStartPush",
         "owner": "game-server",
         "reason": "The packet shape is reserved for the planned authority-migration lifecycle; no runtime producer is implemented yet."
@@ -166,6 +161,7 @@
       "MISSING_CHARACTER_ID",
       "MISSING_TRANSFER_CHECKSUM",
       "MOVEMENT_BLOCKED",
+      "MOVEMENT_INVALID_INPUT",
       "MOVE_DIRECTION_ZERO",
       "MOVE_INPUT_TYPE_UNKNOWN",
       "MSG_RATE_EXCEEDED",
@@ -207,6 +203,7 @@
       "ROOM_TRANSFER_EPOCH_MISMATCH",
       "ROOM_TRANSFER_FROZEN",
       "ROOM_TRANSFER_HAS_ONLINE_MEMBERS",
+      "ROOM_TRANSFER_INCOMPATIBLE_MOVEMENT_STATE",
       "ROOM_TRANSFER_IMPORTING",
       "ROOM_TRANSFER_INVALID_COMBAT_STATE",
       "ROOM_TRANSFER_INVALID_LOGIC_STATE",

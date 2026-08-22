@@ -12,6 +12,7 @@ import {
   readStringList,
   readBool,
   readInt64,
+  readUInt64,
   readInt32,
   readInt32List,
   readUInt32,
@@ -924,7 +925,7 @@ export function decodeByMessageType(messageType, body) {
         errorCode: readString(fields, 2),
         activity: fields.get(3) ? decodeActivitySummary(fields.get(3)) : null,
         progressJson: readString(fields, 4),
-        stateRevision: readUInt32(fields, 5)
+        stateRevision: readUInt64(fields, 5)
       };
     case MESSAGE_TYPE.ACTIVITY_CLAIM_RES:
       return {
@@ -936,7 +937,7 @@ export function decodeByMessageType(messageType, body) {
         clientRequestId: readString(fields, 6),
         processing: readBool(fields, 7),
         duplicate: readBool(fields, 8),
-        stateRevision: readUInt32(fields, 9)
+        stateRevision: readUInt64(fields, 9)
       };
     case MESSAGE_TYPE.DEBUG_CHARACTER_TITLE_RES:
       return {
