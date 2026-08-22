@@ -1,6 +1,6 @@
 # admin-api 运营控制面 API
 
-本文记录活动模块当前已落地的公共控制面契约。它不代表 PostgreSQL provider 已启用；生产环境在 provider 未装配时统一返回 `503 ACTIVITY_CONTROL_UNAVAILABLE`。活动控制面不处理玩家领奖、抽奖算法或资产写入。
+本文记录活动模块当前已落地的公共控制面契约。`admin-api` 已装配 PostgreSQL provider、活动审计和 Redis 刷新通知；数据库初始化或 provider 装配失败时仍以 `503 ACTIVITY_CONTROL_UNAVAILABLE` 安全拒绝。活动控制面不处理玩家领奖、抽奖算法或资产写入，这些行为属于 `game-server` 权威运行时。
 
 ## 路由与权限
 
@@ -40,7 +40,7 @@
 }
 ```
 
-常见 HTTP 状态：`400` 请求契约错误，`404` 活动不存在，`409` CAS/状态冲突，`422` 发布预检失败，`503` 生产控制面 provider 未启用。
+常见 HTTP 状态：`400` 请求契约错误，`404` 活动不存在，`409` CAS/状态冲突，`422` 发布预检失败，`503` PostgreSQL provider 初始化失败或不可用。
 
 ## 事实查询
 
@@ -50,4 +50,4 @@
 
 ## OpenAPI
 
-Nest 应用通过 `/api/docs` 暴露 OpenAPI 文档。DTO 和 controller 的字段白名单是运行时契约；不要把 `ActivityControlUnavailableService` 的 503 当作业务成功。
+Nest 应用通过 `/api/docs` 暴露 OpenAPI 文档。DTO 和 controller 的字段白名单是运行时契约；不要把 fallback `ActivityControlUnavailableService` 的 503 当作业务成功。真实联调需要游戏 PostgreSQL 与 Redis，玩家闭环还需要 NATS、service registry、auth-http、game-server 和 mock-client；当前离线契约测试不替代空库 migration、多实例或外部客户端验收。
