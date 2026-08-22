@@ -15,6 +15,8 @@ pub struct TicketPayload {
     pub character_id: String,
     #[serde(rename = "worldId")]
     pub world_id: Option<u64>,
+    #[serde(default, rename = "deviceSubject")]
+    pub device_subject: Option<String>,
     pub ver: Option<u64>,
     pub exp: String,
 }
@@ -64,7 +66,24 @@ pub fn verify_ticket(secret: &str, ticket: &str) -> Result<TicketPayload, &'stat
         return Err("INVALID_CHARACTER_ID");
     }
 
+    if payload
+        .device_subject
+        .as_deref()
+        .is_some_and(|subject| !is_valid_device_subject(subject))
+    {
+        return Err("INVALID_DEVICE_SUBJECT");
+    }
+
     Ok(payload)
+}
+
+fn is_valid_device_subject(subject: &str) -> bool {
+    subject.strip_prefix("dvc_").is_some_and(|suffix| {
+        suffix.len() == 32
+            && suffix
+                .bytes()
+                .all(|value| value.is_ascii_alphanumeric() || matches!(value, b'_' | b'-'))
+    })
 }
 
 pub fn validate_ticket_owner(
@@ -119,6 +138,7 @@ mod tests {
                 "playerId": "player-001",
                 "characterId": "chr_0000000000001",
                 "worldId": 9,
+                "deviceSubject": "dvc_0123456789abcdefghijklmnopqrstuv",
                 "ver": 1,
                 "exp": (Utc::now() + chrono::Duration::minutes(5)).to_rfc3339()
             }),
@@ -130,7 +150,45 @@ mod tests {
         assert_eq!(payload.account_player_id, "player-001");
         assert_eq!(payload.character_id, "chr_0000000000001");
         assert_eq!(payload.world_id, Some(9));
+        assert_eq!(
+            payload.device_subject.as_deref(),
+            Some("dvc_0123456789abcdefghijklmnopqrstuv")
+        );
         assert_eq!(payload.ver, Some(1));
+    }
+
+    #[test]
+    fn verify_ticket_accepts_legacy_payload_and_rejects_invalid_device_subject() {
+        let legacy = create_ticket(
+            json!({
+                "playerId": "player-001",
+                "characterId": "chr_0000000000001",
+                "ver": 1,
+                "exp": (Utc::now() + chrono::Duration::minutes(5)).to_rfc3339()
+            }),
+            "test-secret",
+        );
+        assert_eq!(
+            verify_ticket("test-secret", &legacy)
+                .unwrap()
+                .device_subject,
+            None
+        );
+
+        let invalid = create_ticket(
+            json!({
+                "playerId": "player-001",
+                "characterId": "chr_0000000000001",
+                "deviceSubject": "client-device",
+                "ver": 1,
+                "exp": (Utc::now() + chrono::Duration::minutes(5)).to_rfc3339()
+            }),
+            "test-secret",
+        );
+        assert_eq!(
+            verify_ticket("test-secret", &invalid).unwrap_err(),
+            "INVALID_DEVICE_SUBJECT"
+        );
     }
 
     #[test]

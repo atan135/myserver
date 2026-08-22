@@ -496,6 +496,8 @@ mod tests {
             proxy_max_preauth_failures: 3,
             proxy_msg_rate_window_ms: 1000,
             proxy_msg_rate_max: 0,
+            proxy_ip_msg_rate_window_ms: 1000,
+            proxy_ip_msg_rate_max: 0,
             maintenance_cache_ttl_ms: 2000,
             redis_blocklist_enabled: false,
             redis_blocklist_cache_ttl_ms: 2000,

@@ -44,6 +44,19 @@ function playerTicketVersionKey(playerId) {
 export const GAME_TICKET_INVALIDATION_SCOPE = "account";
 export const GAME_TICKET_REDIS_OWNER_SCOPE = "account_player";
 
+const DEVICE_SUBJECT_PATTERN = /^dvc_[A-Za-z0-9_-]{32}$/;
+
+function createDeviceSubject() {
+  return `dvc_${crypto.randomBytes(24).toString("base64url")}`;
+}
+
+function requireDeviceSubject(deviceSubject) {
+  if (typeof deviceSubject !== "string" || !DEVICE_SUBJECT_PATTERN.test(deviceSubject)) {
+    throw createAuthError("INVALID_DEVICE_SUBJECT");
+  }
+  return deviceSubject;
+}
+
 function createAuthError(code, message = code) {
   const error = new Error(message);
   error.code = code;
@@ -106,6 +119,10 @@ export function verifyGameTicketPayload(secret, ticket, { nowMs = Date.now() } =
   }
 
   requireTicketCharacterId(payload.characterId);
+
+  if (payload.deviceSubject !== undefined) {
+    payload.deviceSubject = requireDeviceSubject(payload.deviceSubject);
+  }
 
   const expiresAtMs = Date.parse(payload.exp);
   if (!Number.isFinite(expiresAtMs)) {
@@ -409,6 +426,7 @@ export class AuthStore {
       playerId: account.playerId,
       guestId: account.guestId || null,
       loginName: account.loginName || null,
+      deviceSubject: createDeviceSubject(),
       createdAt: new Date().toISOString()
     };
 
@@ -551,6 +569,9 @@ export class AuthStore {
     };
     if (options.worldId !== undefined && options.worldId !== null) {
       payload.worldId = options.worldId;
+    }
+    if (options.deviceSubject !== undefined && options.deviceSubject !== null) {
+      payload.deviceSubject = requireDeviceSubject(options.deviceSubject);
     }
     const payloadB64 = base64UrlEncode(JSON.stringify(payload));
     const signature = signTicketPayload(payloadB64, this.config.ticketSecret);

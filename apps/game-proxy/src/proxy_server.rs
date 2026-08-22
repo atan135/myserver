@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+use std::net::IpAddr;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -184,6 +186,73 @@ impl MsgRateLimiter {
     }
 }
 
+#[derive(Clone)]
+struct IpMsgRateLimiter {
+    config: MsgRateLimitConfig,
+    state: Arc<Mutex<IpMsgRateState>>,
+}
+
+#[derive(Debug, Default)]
+struct IpMsgRateState {
+    windows: HashMap<IpAddr, IpMsgRateWindow>,
+    last_cleanup_at: Option<Instant>,
+}
+
+#[derive(Debug)]
+struct IpMsgRateWindow {
+    started_at: Instant,
+    count: u64,
+}
+
+impl IpMsgRateLimiter {
+    fn new(config: MsgRateLimitConfig) -> Self {
+        Self {
+            config,
+            state: Arc::new(Mutex::new(IpMsgRateState::default())),
+        }
+    }
+
+    fn is_disabled(&self) -> bool {
+        self.config.max == 0
+    }
+
+    async fn check(&self, ip: IpAddr, now: Instant) -> MsgRateDecision {
+        if self.is_disabled() {
+            return MsgRateDecision::Allowed;
+        }
+
+        let mut state = self.state.lock().await;
+        let cleanup_due = state.last_cleanup_at.map_or(true, |last_cleanup_at| {
+            now.saturating_duration_since(last_cleanup_at) >= self.config.window
+        });
+        if cleanup_due {
+            state.windows.retain(|_, window| {
+                now.saturating_duration_since(window.started_at) < self.config.window
+            });
+            state.last_cleanup_at = Some(now);
+        }
+        let window = state.windows.entry(ip).or_insert(IpMsgRateWindow {
+            started_at: now,
+            count: 0,
+        });
+        if now.saturating_duration_since(window.started_at) >= self.config.window {
+            window.started_at = now;
+            window.count = 0;
+        }
+        window.count = window.count.saturating_add(1);
+        if window.count > self.config.max {
+            MsgRateDecision::Exceeded
+        } else {
+            MsgRateDecision::Allowed
+        }
+    }
+
+    #[cfg(test)]
+    async fn tracked_ip_count(&self) -> usize {
+        self.state.lock().await.windows.len()
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum MsgRateDecision {
     Allowed,
@@ -295,6 +364,10 @@ pub async fn run(
 
     let mut next_session_id = 1u64;
     let connection_limiter = ConnectionLimiter::new(config.connection_limits.clone());
+    let ip_msg_rate_limiter = IpMsgRateLimiter::new(MsgRateLimitConfig::new(
+        config.proxy_ip_msg_rate_window_ms,
+        config.proxy_ip_msg_rate_max,
+    ));
 
     loop {
         tokio::select! {
@@ -315,6 +388,7 @@ pub async fn run(
                             config.proxy_msg_rate_max,
                         );
                         let connection_limiter = connection_limiter.clone();
+                        let ip_msg_rate_limiter = ip_msg_rate_limiter.clone();
                         next_session_id = next_session_id.saturating_add(1);
 
                         tokio::spawn(async move {
@@ -326,6 +400,7 @@ pub async fn run(
                                 max_connections,
                                 max_preauth_failures,
                                 msg_rate_config,
+                                ip_msg_rate_limiter,
                                 route_store,
                                 auth_service,
                                 global_maintenance,
@@ -360,6 +435,7 @@ pub async fn run(
                             config.proxy_msg_rate_max,
                         );
                         let connection_limiter = connection_limiter.clone();
+                        let ip_msg_rate_limiter = ip_msg_rate_limiter.clone();
                         next_session_id = next_session_id.saturating_add(1);
 
                         tokio::spawn(async move {
@@ -371,6 +447,7 @@ pub async fn run(
                                 max_connections,
                                 max_preauth_failures,
                                 msg_rate_config,
+                                ip_msg_rate_limiter,
                                 route_store,
                                 auth_service,
                                 global_maintenance,
@@ -601,6 +678,7 @@ async fn handle_session<S: AsyncRead + AsyncWrite + Send + Unpin + 'static>(
     max_connections: u64,
     max_preauth_failures: u32,
     msg_rate_config: MsgRateLimitConfig,
+    ip_msg_rate_limiter: IpMsgRateLimiter,
     route_store: ProxyRouteStore,
     auth_service: Arc<ProxyAuthService>,
     global_maintenance: Arc<GlobalMaintenanceChecker>,
@@ -688,8 +766,18 @@ async fn handle_session<S: AsyncRead + AsyncWrite + Send + Unpin + 'static>(
             return Ok(());
         };
 
-        if msg_rate_limiter.check(Instant::now()) == MsgRateDecision::Exceeded {
+        let rate_now = Instant::now();
+        let connection_rate_exceeded =
+            msg_rate_limiter.check(rate_now) == MsgRateDecision::Exceeded;
+        let ip_rate_exceeded =
+            ip_msg_rate_limiter.check(client_ip, rate_now).await == MsgRateDecision::Exceeded;
+        if connection_rate_exceeded || ip_rate_exceeded {
             write_msg_rate_exceeded(&mut client_stream, packet.header.seq).await?;
+            let (rate_scope, rate_config) = if ip_rate_exceeded {
+                ("ip", ip_msg_rate_limiter.config)
+            } else {
+                ("connection", msg_rate_config)
+            };
             warn!(
                 session_id = session.id,
                 client_addr = %client_addr,
@@ -697,8 +785,9 @@ async fn handle_session<S: AsyncRead + AsyncWrite + Send + Unpin + 'static>(
                 account_player_id = session.account_player_id.as_deref().or(deferred_auth.account_player_id.as_deref()).unwrap_or_default(),
                 character_id = session.character_id.as_deref().or(deferred_auth.character_id.as_deref()).unwrap_or_default(),
                 msg_type = packet.header.msg_type,
-                window_ms = msg_rate_config.window.as_millis() as u64,
-                max = msg_rate_config.max,
+                rate_scope,
+                window_ms = rate_config.window.as_millis() as u64,
+                max = rate_config.max,
                 "proxy inbound message rate exceeded before preauth decision"
             );
             continue;
@@ -869,7 +958,7 @@ async fn handle_session<S: AsyncRead + AsyncWrite + Send + Unpin + 'static>(
                     }
                 }
 
-                let result = if msg_rate_config.max == 0 {
+                let result = if msg_rate_config.max == 0 && ip_msg_rate_limiter.is_disabled() {
                     copy_bidirectional(&mut client_stream, &mut upstream).await
                 } else {
                     proxy_bound_streams(
@@ -877,6 +966,7 @@ async fn handle_session<S: AsyncRead + AsyncWrite + Send + Unpin + 'static>(
                         upstream,
                         msg_rate_limiter,
                         msg_rate_config,
+                        ip_msg_rate_limiter,
                         session.id,
                         client_addr,
                         session.account_player_id.clone().unwrap_or_default(),
@@ -1379,6 +1469,7 @@ async fn proxy_bound_streams<S>(
     upstream: LocalSocketStream,
     msg_rate_limiter: MsgRateLimiter,
     msg_rate_config: MsgRateLimitConfig,
+    ip_msg_rate_limiter: IpMsgRateLimiter,
     session_id: u64,
     client_addr: std::net::SocketAddr,
     account_player_id: String,
@@ -1397,6 +1488,7 @@ where
     let client_writer_for_rate_limit = Arc::clone(&client_writer);
     let client_bytes = Arc::clone(&bytes_from_client);
     let mut msg_rate_limiter = msg_rate_limiter;
+    let client_ip = client_addr.ip();
     let account_player_id_for_rate_limit = account_player_id.clone();
     let character_id_for_rate_limit = character_id.clone();
     let mut client_to_upstream = tokio::spawn(async move {
@@ -1406,7 +1498,12 @@ where
                 return Ok::<(), std::io::Error>(());
             };
 
-            if msg_rate_limiter.check(Instant::now()) == MsgRateDecision::Exceeded {
+            let rate_now = Instant::now();
+            let connection_rate_exceeded =
+                msg_rate_limiter.check(rate_now) == MsgRateDecision::Exceeded;
+            let ip_rate_exceeded =
+                ip_msg_rate_limiter.check(client_ip, rate_now).await == MsgRateDecision::Exceeded;
+            if connection_rate_exceeded || ip_rate_exceeded {
                 {
                     let mut writer = client_writer_for_rate_limit.lock().await;
                     write_msg_rate_exceeded(&mut *writer, packet.header.seq).await?;
@@ -1418,8 +1515,9 @@ where
                     account_player_id = %account_player_id_for_rate_limit,
                     character_id = %character_id_for_rate_limit,
                     msg_type = packet.header.msg_type,
-                    window_ms = msg_rate_config.window.as_millis() as u64,
-                    max = msg_rate_config.max,
+                    rate_scope = if ip_rate_exceeded { "ip" } else { "connection" },
+                    window_ms = if ip_rate_exceeded { ip_msg_rate_limiter.config.window } else { msg_rate_config.window }.as_millis() as u64,
+                    max = if ip_rate_exceeded { ip_msg_rate_limiter.config.max } else { msg_rate_config.max },
                     "proxy inbound message rate exceeded during upstream forwarding"
                 );
                 continue;
@@ -1528,9 +1626,9 @@ fn current_unix_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        MsgRateDecision, MsgRateLimitConfig, MsgRateLimiter, PREAUTH_MESSAGE_NOT_ALLOWED,
-        PreauthDecision, discover_proxy_local_routes, preauth_decision,
-        refresh_routes_from_discovery_snapshot, replay_auth_to_upstream,
+        IpMsgRateLimiter, MsgRateDecision, MsgRateLimitConfig, MsgRateLimiter,
+        PREAUTH_MESSAGE_NOT_ALLOWED, PreauthDecision, discover_proxy_local_routes,
+        preauth_decision, refresh_routes_from_discovery_snapshot, replay_auth_to_upstream,
         restore_authenticated_after_local_routing_error, select_route_for_packet,
         upstream_discovery_convergence_config,
     };
@@ -1545,6 +1643,7 @@ mod tests {
     use crate::session::{ProxySession, ProxySessionState};
     use prost::Message;
     use service_registry::{DiscoverySnapshot, ServiceEndpoint, ServiceInstance};
+    use std::net::IpAddr;
     use std::time::{Duration, Instant};
     use tokio::io::{AsyncWriteExt, duplex};
 
@@ -1841,6 +1940,81 @@ mod tests {
         assert_eq!(limiter.check(now), MsgRateDecision::Exceeded);
         assert_eq!(
             limiter.check(now + Duration::from_millis(1000)),
+            MsgRateDecision::Allowed
+        );
+    }
+
+    #[tokio::test]
+    async fn ip_msg_rate_limiter_is_shared_across_connections_and_isolates_ips() {
+        let now = Instant::now();
+        let limiter = IpMsgRateLimiter::new(MsgRateLimitConfig::new(1000, 2));
+        let other_connection = limiter.clone();
+        let first_ip: IpAddr = "203.0.113.10".parse().unwrap();
+        let second_ip: IpAddr = "203.0.113.11".parse().unwrap();
+
+        assert_eq!(limiter.check(first_ip, now).await, MsgRateDecision::Allowed);
+        assert_eq!(
+            other_connection.check(first_ip, now).await,
+            MsgRateDecision::Allowed
+        );
+        assert_eq!(
+            limiter.check(first_ip, now).await,
+            MsgRateDecision::Exceeded
+        );
+        assert_eq!(
+            limiter.check(second_ip, now).await,
+            MsgRateDecision::Allowed
+        );
+    }
+
+    #[tokio::test]
+    async fn ip_msg_rate_limiter_disabled_mode_tracks_nothing_and_expired_keys_are_cleaned() {
+        let now = Instant::now();
+        let first_ip: IpAddr = "203.0.113.10".parse().unwrap();
+        let second_ip: IpAddr = "203.0.113.11".parse().unwrap();
+        let disabled = IpMsgRateLimiter::new(MsgRateLimitConfig::new(100, 0));
+        assert_eq!(
+            disabled.check(first_ip, now).await,
+            MsgRateDecision::Allowed
+        );
+        assert_eq!(disabled.tracked_ip_count().await, 0);
+
+        let limiter = IpMsgRateLimiter::new(MsgRateLimitConfig::new(100, 1));
+        assert_eq!(limiter.check(first_ip, now).await, MsgRateDecision::Allowed);
+        assert_eq!(limiter.tracked_ip_count().await, 1);
+        assert_eq!(
+            limiter
+                .check(second_ip, now + Duration::from_millis(100))
+                .await,
+            MsgRateDecision::Allowed
+        );
+        assert_eq!(limiter.tracked_ip_count().await, 1);
+    }
+
+    #[tokio::test]
+    async fn ip_msg_rate_limiter_resets_each_ip_on_its_own_window_boundary() {
+        let now = Instant::now();
+        let limiter = IpMsgRateLimiter::new(MsgRateLimitConfig::new(100, 1));
+        let first_ip: IpAddr = "203.0.113.10".parse().unwrap();
+        let staggered_ip: IpAddr = "203.0.113.11".parse().unwrap();
+
+        assert_eq!(limiter.check(first_ip, now).await, MsgRateDecision::Allowed);
+        assert_eq!(
+            limiter
+                .check(staggered_ip, now + Duration::from_millis(90))
+                .await,
+            MsgRateDecision::Allowed
+        );
+        assert_eq!(
+            limiter
+                .check(first_ip, now + Duration::from_millis(100))
+                .await,
+            MsgRateDecision::Allowed
+        );
+        assert_eq!(
+            limiter
+                .check(staggered_ip, now + Duration::from_millis(190))
+                .await,
             MsgRateDecision::Allowed
         );
     }

@@ -35,6 +35,12 @@ pub struct Session {
     pub account_player_id: Option<String>,
     pub character_id: Option<String>,
     pub world_id: Option<u64>,
+    /// SHA-256 fingerprint of the authenticated game ticket. This is safe to
+    /// use as a credential-scoped abuse-control key and never exposes the raw ticket.
+    pub credential_id: Option<String>,
+    /// Server-generated opaque subject carried only by a signed game ticket.
+    /// Legacy tickets leave this unset and do not participate in device buckets.
+    pub device_subject: Option<String>,
     pub room_id: Option<String>,
     pub online_authority: Option<OnlineAuthority>,
 }
@@ -47,6 +53,8 @@ impl Session {
             account_player_id: None,
             character_id: None,
             world_id: None,
+            credential_id: None,
+            device_subject: None,
             room_id: None,
             online_authority: None,
         }
@@ -54,6 +62,14 @@ impl Session {
 
     pub fn set_online_authority(&mut self, authority: OnlineAuthority) {
         self.online_authority = Some(authority);
+    }
+
+    pub fn set_credential_id(&mut self, credential_id: String) {
+        self.credential_id = Some(credential_id);
+    }
+
+    pub fn set_device_subject(&mut self, device_subject: Option<String>) {
+        self.device_subject = device_subject;
     }
 
     pub fn set_authenticated_identity(
@@ -97,6 +113,8 @@ mod tests {
             "chr_0000000000001".to_string(),
             Some(7),
         );
+        session.set_credential_id("ticket-sha256".to_string());
+        session.set_device_subject(Some("dvc_0123456789abcdefghijklmnopqrstuv".to_string()));
 
         assert_eq!(session.state, SessionState::Authenticated);
         assert_eq!(
@@ -105,6 +123,11 @@ mod tests {
         );
         assert_eq!(session.character_id.as_deref(), Some("chr_0000000000001"));
         assert_eq!(session.world_id, Some(7));
+        assert_eq!(session.credential_id.as_deref(), Some("ticket-sha256"));
+        assert_eq!(
+            session.device_subject.as_deref(),
+            Some("dvc_0123456789abcdefghijklmnopqrstuv")
+        );
 
         let identity = session.authenticated_identity().unwrap();
         assert_eq!(identity.account_player_id, "plr_0000000000001");

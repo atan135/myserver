@@ -12,6 +12,7 @@ pub const DEFAULT_ADMIN_READ_TOKEN: &str = "dev-only-change-this-proxy-admin-rea
 const DEFAULT_MAINTENANCE_CACHE_TTL_MS: u64 = 2000;
 const DEFAULT_BLOCKLIST_CACHE_TTL_MS: u64 = 2000;
 const DEFAULT_PROXY_MSG_RATE_WINDOW_MS: u64 = 1000;
+const DEFAULT_PROXY_IP_MSG_RATE_WINDOW_MS: u64 = 1000;
 const DEFAULT_PROXY_ADMIN_AUDIT_PATH: &str = "logs/game-proxy/admin-audit.jsonl";
 const DISALLOW_LEGACY_DIRECT_CONFIG_ENV_NAME: &str = "DISALLOW_LEGACY_DIRECT_CONFIG";
 
@@ -154,6 +155,8 @@ pub struct Config {
     pub proxy_max_preauth_failures: u32,
     pub proxy_msg_rate_window_ms: u64,
     pub proxy_msg_rate_max: u64,
+    pub proxy_ip_msg_rate_window_ms: u64,
+    pub proxy_ip_msg_rate_max: u64,
     pub maintenance_cache_ttl_ms: u64,
     pub redis_blocklist_enabled: bool,
     pub redis_blocklist_cache_ttl_ms: u64,
@@ -289,6 +292,11 @@ impl Config {
         let proxy_msg_rate_window_ms =
             parse_u64("PROXY_MSG_RATE_WINDOW_MS", DEFAULT_PROXY_MSG_RATE_WINDOW_MS);
         let proxy_msg_rate_max = parse_u64("PROXY_MSG_RATE_MAX", 0);
+        let proxy_ip_msg_rate_window_ms = parse_u64(
+            "PROXY_IP_MSG_RATE_WINDOW_MS",
+            DEFAULT_PROXY_IP_MSG_RATE_WINDOW_MS,
+        );
+        let proxy_ip_msg_rate_max = parse_u64("PROXY_IP_MSG_RATE_MAX", 0);
         let maintenance_cache_ttl_ms = parse_u64(
             "PROXY_MAINTENANCE_CACHE_TTL_MS",
             DEFAULT_MAINTENANCE_CACHE_TTL_MS,
@@ -413,6 +421,8 @@ impl Config {
             proxy_max_preauth_failures,
             proxy_msg_rate_window_ms,
             proxy_msg_rate_max,
+            proxy_ip_msg_rate_window_ms,
+            proxy_ip_msg_rate_max,
             maintenance_cache_ttl_ms,
             redis_blocklist_enabled,
             redis_blocklist_cache_ttl_ms,
@@ -907,6 +917,8 @@ mod tests {
             "PROXY_MAX_PREAUTH_FAILURES",
             "PROXY_MSG_RATE_WINDOW_MS",
             "PROXY_MSG_RATE_MAX",
+            "PROXY_IP_MSG_RATE_WINDOW_MS",
+            "PROXY_IP_MSG_RATE_MAX",
             "PROXY_IP_DENYLIST",
             "PROXY_MAX_CONNECTIONS_PER_IP",
             "PROXY_MAX_CONNECTIONS_PER_PLAYER",
@@ -927,6 +939,8 @@ mod tests {
             env::set_var("PROXY_MAX_PREAUTH_FAILURES", "5");
             env::set_var("PROXY_MSG_RATE_WINDOW_MS", "250");
             env::set_var("PROXY_MSG_RATE_MAX", "30");
+            env::set_var("PROXY_IP_MSG_RATE_WINDOW_MS", "500");
+            env::set_var("PROXY_IP_MSG_RATE_MAX", "60");
             env::set_var("PROXY_IP_DENYLIST", "203.0.113.10,198.51.100.0/24");
             env::set_var("PROXY_MAX_CONNECTIONS_PER_IP", "20");
             env::set_var("PROXY_MAX_CONNECTIONS_PER_PLAYER", "2");
@@ -945,6 +959,8 @@ mod tests {
         assert_eq!(config.proxy_max_preauth_failures, 5);
         assert_eq!(config.proxy_msg_rate_window_ms, 250);
         assert_eq!(config.proxy_msg_rate_max, 30);
+        assert_eq!(config.proxy_ip_msg_rate_window_ms, 500);
+        assert_eq!(config.proxy_ip_msg_rate_max, 60);
         assert!(
             config
                 .connection_limits
@@ -971,6 +987,8 @@ mod tests {
             "PROXY_MAX_PREAUTH_FAILURES",
             "PROXY_MSG_RATE_WINDOW_MS",
             "PROXY_MSG_RATE_MAX",
+            "PROXY_IP_MSG_RATE_WINDOW_MS",
+            "PROXY_IP_MSG_RATE_MAX",
             "PROXY_IP_DENYLIST",
             "PROXY_MAX_CONNECTIONS_PER_IP",
             "PROXY_MAX_CONNECTIONS_PER_PLAYER",
@@ -988,6 +1006,8 @@ mod tests {
             env::set_var("PROXY_MAX_PREAUTH_FAILURES", "not-a-number");
             env::set_var("PROXY_MSG_RATE_WINDOW_MS", "not-a-number");
             env::set_var("PROXY_MSG_RATE_MAX", "not-a-number");
+            env::set_var("PROXY_IP_MSG_RATE_WINDOW_MS", "not-a-number");
+            env::set_var("PROXY_IP_MSG_RATE_MAX", "not-a-number");
             env::remove_var("PROXY_IP_DENYLIST");
             env::set_var("PROXY_MAX_CONNECTIONS_PER_IP", "not-a-number");
             env::set_var("PROXY_MAX_CONNECTIONS_PER_PLAYER", "not-a-number");
@@ -1003,6 +1023,8 @@ mod tests {
         assert_eq!(config.proxy_max_preauth_failures, 3);
         assert_eq!(config.proxy_msg_rate_window_ms, 1000);
         assert_eq!(config.proxy_msg_rate_max, 0);
+        assert_eq!(config.proxy_ip_msg_rate_window_ms, 1000);
+        assert_eq!(config.proxy_ip_msg_rate_max, 0);
         assert_eq!(config.connection_limits.max_connections_per_ip, 0);
         assert_eq!(config.connection_limits.max_connections_per_player, 0);
         assert!(!config.redis_blocklist_enabled);

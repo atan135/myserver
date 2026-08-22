@@ -410,7 +410,8 @@ export class CharactersService {
     const refreshedCharacter = await this.characterStore.getByCharacterId(character.characterId) || character;
     const ticket = await this.authStore.issueGameTicket(session.playerId, clientIp, {
       characterId: refreshedCharacter.characterId,
-      worldId: refreshedCharacter.worldId
+      worldId: refreshedCharacter.worldId,
+      deviceSubject: session.deviceSubject
     });
     const services = await this.authService.buildServicePayload();
     const gameProxy = this.authService.getGameProxyDescriptor(services);

@@ -66,10 +66,11 @@ pub async fn handle_auth(
             let account_player_id = ticket_payload.account_player_id;
             let character_id = ticket_payload.character_id;
             let world_id = ticket_payload.world_id;
+            let device_subject = ticket_payload.device_subject;
+            let credential_id = crate::ticket::hash_ticket(&request.ticket);
             let ticket_key = format!(
                 "{}ticket:{}",
-                services.config.redis_key_prefix,
-                crate::ticket::hash_ticket(&request.ticket)
+                services.config.redis_key_prefix, credential_id
             );
             let ticket_version_key = format!(
                 "{}player-ticket-version:{}",
@@ -310,6 +311,8 @@ pub async fn handle_auth(
                 character_id.clone(),
                 world_id,
             );
+            connection.session.set_credential_id(credential_id);
+            connection.session.set_device_subject(device_subject);
             connection.session.set_online_authority(authority.clone());
             let old_handle =
                 services
