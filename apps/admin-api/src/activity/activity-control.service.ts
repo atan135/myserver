@@ -1,6 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
 
 import { createActivityTypeRegistry, validateActivityTypeConfig } from "../activity-types.js";
+import type { ActivityRewardCatalog } from "./activity-reward-catalog.js";
+import { catalogAcceptsBinding, defaultActivityRewardCatalog } from "./activity-reward-catalog.js";
 
 export interface ActivityControlService {
   list(query: Record<string, unknown>): Promise<unknown>;
@@ -345,7 +347,7 @@ function lotteryPoolFreezeErrors(previous: Record<string, unknown> | undefined, 
   return errors;
 }
 
-function validateDraft(command: Record<string, unknown>): ActivityPreflightError[] {
+function validateDraft(command: Record<string, unknown>, rewardCatalog: ActivityRewardCatalog): ActivityPreflightError[] {
   const errors: ActivityPreflightError[] = [];
   for (const field of ["key", "activityType", "startAt", "endAt", "claimDeadline", "timezone", "reason"]) {
     if (typeof command[field] !== "string" || !String(command[field]).trim()) pushError(errors, field, "REQUIRED", `${field} is required`);
@@ -412,6 +414,15 @@ function validateDraft(command: Record<string, unknown>): ActivityPreflightError
       }
       if (rewardItem.binding !== undefined && (typeof rewardItem.binding !== "string" || !REWARD_BINDINGS.has(rewardItem.binding))) {
         pushError(errors, `${itemPath}.binding`, "INVALID", "binding must be unbound or character_bound");
+      }
+      if (Number.isInteger(rewardItem.item_id) && Number(rewardItem.item_id) > 0 && Number(rewardItem.item_id) <= REWARD_ITEM_I32_MAX) {
+        const catalogEntry = rewardCatalog.find(Number(rewardItem.item_id));
+        const binding = rewardItem.binding === "character_bound" ? "character_bound" : "unbound";
+        if (!catalogEntry) {
+          pushError(errors, `${itemPath}.item_id`, "UNKNOWN_REWARD_ITEM", "item_id must exist in the authoritative reward catalog");
+        } else if (REWARD_BINDINGS.has(binding) && !catalogAcceptsBinding(catalogEntry, binding)) {
+          pushError(errors, `${itemPath}.binding`, "REWARD_BINDING_MISMATCH", `binding must be character_bound for ItemTable BindType=${catalogEntry.bindType}`);
+        }
       }
     }
   });
@@ -480,12 +491,17 @@ function validateDraft(command: Record<string, unknown>): ActivityPreflightError
 }
 
 export class ActivityControlDomainService implements ActivityControlService {
-  constructor(private readonly repository: ActivityControlRepository = new InMemoryActivityControlRepository(), private readonly notifier: ActivityRefreshNotifier = new NoopActivityRefreshNotifier(), private readonly audit: ActivityAuditSink = new NoopActivityAuditSink()) {}
+  constructor(
+    private readonly repository: ActivityControlRepository = new InMemoryActivityControlRepository(),
+    private readonly notifier: ActivityRefreshNotifier = new NoopActivityRefreshNotifier(),
+    private readonly audit: ActivityAuditSink = new NoopActivityAuditSink(),
+    private readonly rewardCatalog: ActivityRewardCatalog = defaultActivityRewardCatalog()
+  ) {}
   list(query: Record<string, unknown>): Promise<unknown> { return this.repository.list(query); }
   detail(activityId: string): Promise<unknown> { return this.repository.detail(activityId); }
   async createDraft(command: Record<string, unknown>): Promise<unknown> {
     try {
-      const errors = validateDraft(command);
+      const errors = validateDraft(command, this.rewardCatalog);
       if (errors.length) throw new ActivityControlError("ACTIVITY_INVALID_CONFIG", "draft failed preflight", errors);
       const result = await this.repository.createDraft(command);
       return this.withAudit(result, { action: "draft_created", activityId: String((result as any).activityId), actorId: String(command.actorId || "admin-api"), reason: String(command.reason), version: Number((result as any).version) });
@@ -502,7 +518,7 @@ export class ActivityControlDomainService implements ActivityControlService {
       if (!source) throw new ActivityControlError("ACTIVITY_NOT_FOUND", "published source version was not found");
       const overrides = command.overrides && typeof command.overrides === "object" && !Array.isArray(command.overrides) ? command.overrides as Record<string, unknown> : {};
       const candidate = { ...clone(source), ...clone(overrides), reason: command.reason };
-      const errors = validateDraft(candidate);
+      const errors = validateDraft(candidate, this.rewardCatalog);
       if (errors.length) throw new ActivityControlError("ACTIVITY_INVALID_CONFIG", "new draft failed preflight", errors);
       const result = await this.repository.createDraftFromPublished(activityId, command);
       return this.withAudit(result, { action: "draft_forked", activityId, actorId: String(command.actorId || "admin-api"), reason: String(command.reason), version: Number((result as any).version) });
@@ -513,7 +529,7 @@ export class ActivityControlDomainService implements ActivityControlService {
   }
   async updateDraft(activityId: string, command: Record<string, unknown>): Promise<unknown> {
     try {
-      const errors = validateDraft(command);
+      const errors = validateDraft(command, this.rewardCatalog);
       if (errors.length) throw new ActivityControlError("ACTIVITY_INVALID_CONFIG", "draft failed preflight", errors);
       const result = await this.repository.updateDraft(activityId, command);
       return this.withAudit(result, { action: "draft_updated", activityId, actorId: String(command.actorId || "admin-api"), reason: String(command.reason), version: Number((result as any).version) });
@@ -528,7 +544,7 @@ export class ActivityControlDomainService implements ActivityControlService {
       const draft = detail?.draft as Record<string, unknown> | undefined;
       if (!draft) throw new ActivityControlError("ACTIVITY_NOT_FOUND", "activity draft was not found");
       const requestedVersion = command.version === undefined ? detail.version : Number(command.version);
-      const errors = requestedVersion !== detail.version ? [{ path: "version", code: "ACTIVITY_VERSION_CONFLICT", message: "draft version is stale" }] : validateDraft(draft);
+      const errors = requestedVersion !== detail.version ? [{ path: "version", code: "ACTIVITY_VERSION_CONFLICT", message: "draft version is stale" }] : validateDraft(draft, this.rewardCatalog);
       const result = { activityId, version: requestedVersion, valid: errors.length === 0, errors };
       return this.withAudit(result, { action: "preflight", activityId, actorId: String(command.actorId || "admin-api"), reason: String(command.reason || "preflight"), version: requestedVersion });
     } catch (error: any) {
@@ -542,7 +558,7 @@ export class ActivityControlDomainService implements ActivityControlService {
       const detail: any = await this.repository.detail(activityId);
       const draft = detail?.draft as Record<string, unknown> | undefined;
       if (!draft) throw new ActivityControlError("ACTIVITY_NOT_FOUND", "activity draft was not found");
-      const errors = validateDraft(draft);
+      const errors = validateDraft(draft, this.rewardCatalog);
       errors.push(...lotteryPoolFreezeErrors((detail?.snapshot || detail?.sourceSnapshot) as Record<string, unknown> | undefined, draft));
       if (errors.length) throw new ActivityControlError("ACTIVITY_PRECHECK_FAILED", "activity cannot be published", errors);
       const result: any = await this.repository.publish(activityId, command);

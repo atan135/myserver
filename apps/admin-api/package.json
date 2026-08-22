@@ -5,7 +5,7 @@
   "private": true,
   "scripts": {
     "test:game-server-control": "node --test --test-concurrency=1 src/rollout/game-server-control.controller.test.js",
-    "test:core": "node --test --test-concurrency=1 src/admin-store.policy.test.js src/admin-store.operation.test.js src/activity/activity-control.repository.test.js src/activity/activity-control.service.test.js src/activity/activity.controller.test.js src/activity-types.test.js src/modules/activity/types/login_reward.test.js src/modules/activity/types/lottery.test.js src/assets/asset-ledger.controller.test.js src/audit/audit.controller.test.js src/auth/admin-operation-assertion.service.test.js src/auth/admin-policy.service.test.js src/auth/admin-policy.guard.test.js src/auth/auth.service.test.js src/auth/jwt-auth.guard.test.js src/auth/roles.guard.test.js src/auth-http-client.test.js src/ban-utils.test.js src/common/control-plane-security.test.js src/config.test.js src/game-admin-client.test.js src/global-id/global-id.controller.test.js src/gm/gm.controller.test.js src/main-shutdown.test.js src/monitoring/monitoring.service.test.js",
+    "test:core": "node --test --test-concurrency=1 src/admin-store.policy.test.js src/admin-store.operation.test.js src/activity/activity-control.repository.test.js src/activity/activity-reward-catalog-path.test.js src/activity/activity-control.service.test.js src/activity/activity.controller.test.js src/activity-types.test.js src/modules/activity/types/login_reward.test.js src/modules/activity/types/lottery.test.js src/assets/asset-ledger.controller.test.js src/audit/audit.controller.test.js src/auth/admin-operation-assertion.service.test.js src/auth/admin-policy.service.test.js src/auth/admin-policy.guard.test.js src/auth/auth.service.test.js src/auth/jwt-auth.guard.test.js src/auth/roles.guard.test.js src/auth-http-client.test.js src/ban-utils.test.js src/common/control-plane-security.test.js src/config.test.js src/game-admin-client.test.js src/global-id/global-id.controller.test.js src/gm/gm.controller.test.js src/main-shutdown.test.js src/monitoring/monitoring.service.test.js",
     "test:business": "node --test --test-concurrency=1 src/myforge/myforge-store.test.js src/myforge/myforge-task-input.test.js src/myforge/myforge-orchestrator.test.js src/myforge/myforge.controller.test.js src/myforge/protocol.test.js src/myforge/schemas.test.js src/myforge/myforge-websocket.test.js src/operations/admin-high-risk-operation.service.test.js src/operations/admin-operation.controller.test.js src/operations/admin-operation.service.test.js src/players/players.controller.test.js src/registry-client.test.js src/services/archive.test.js",
     "dev": "node --watch src/server.js",
     "start": "node src/server.js",
@@ -23,6 +23,7 @@
     "bcrypt": "^5.1.1",
     "class-transformer": "^0.5.1",
     "class-validator": "^0.15.1",
+    "csv-parse": "^6.2.1",
     "dotenv": "^16.4.5",
     "ioredis": "^5.4.1",
     "log4js": "^6.9.1",

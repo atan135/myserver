@@ -45,6 +45,7 @@ import {
   PostgresActivityControlRepository,
   RedisActivityRefreshNotifier
 } from "./activity/activity-control.repository.js";
+import { CsvActivityRewardCatalog } from "./activity/activity-reward-catalog.js";
 import { RequestLogMiddleware } from "./common/request-log.middleware.js";
 import {
   ADMIN_CONFIG,
@@ -120,7 +121,8 @@ class GameDbPoolShutdown implements OnModuleDestroy {
         return new ActivityControlDomainService(
           repository,
           new RedisActivityRefreshNotifier(redis, config.redisKeyPrefix || ""),
-          repository
+          repository,
+          new CsvActivityRewardCatalog(config.activityRewardCatalogPath)
         );
       }
     },

@@ -4,12 +4,14 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 
 const CONFIG_ENV_KEYS = [
   "NODE_ENV",
   "DATABASE_URL",
   "GAME_DATABASE_URL",
   "ADMIN_GAME_DATABASE_URL",
+  "ACTIVITY_REWARD_CATALOG_PATH",
   "DB_POOL_SIZE",
   "JWT_SECRET",
   "GAME_ADMIN_TOKEN",
@@ -200,6 +202,23 @@ test("admin-api myforge config is disabled by default without requiring key file
     MYFORGE_AGENT_PUBLIC_KEYS_JSON: "not-json"
   }, (config) => {
     assert.equal(config.myforge.enabled, false);
+  });
+});
+
+test("admin-api uses the shared activity reward catalog path resolver", async () => {
+  const testDirectory = path.dirname(fileURLToPath(import.meta.url));
+  const repositoryRoot = path.resolve(testDirectory, "../../..");
+  const relativePath = "apps/game-server/csv/ItemTable.csv";
+  const absolutePath = path.join(repositoryRoot, relativePath);
+
+  await withEnv({}, (config) => {
+    assert.equal(config.activityRewardCatalogPath, absolutePath);
+  });
+  await withEnv({ ACTIVITY_REWARD_CATALOG_PATH: relativePath }, (config) => {
+    assert.equal(config.activityRewardCatalogPath, absolutePath);
+  });
+  await withEnv({ ACTIVITY_REWARD_CATALOG_PATH: absolutePath }, (config) => {
+    assert.equal(config.activityRewardCatalogPath, absolutePath);
   });
 });
 

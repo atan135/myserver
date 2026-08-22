@@ -86,6 +86,39 @@ test("reward catalog rejects unsafe or runtime-incompatible item definitions", a
   }
 });
 
+test("authoritative ItemTable binding rules gate draft, preflight and publish", async () => {
+  const invalid = draft({
+    activityId: "activity-pickup-binding-invalid",
+    rewardGroups: [{ key: "g1", selectionMode: "fixed", items: [{ item_id: 4001, quantity: 1 }] }]
+  });
+
+  const service = new ActivityControlDomainService();
+  await assert.rejects(
+    () => service.createDraft(invalid),
+    (error) => error.code === "ACTIVITY_INVALID_CONFIG"
+      && error.details.some((item) => item.path === "rewardGroups[0].items[0].binding"
+        && item.code === "REWARD_BINDING_MISMATCH")
+  );
+
+  const valid = await service.createDraft(draft({
+    activityId: "activity-pickup-binding-valid",
+    rewardGroups: [{ key: "g1", selectionMode: "fixed", items: [{ item_id: 4001, quantity: 1, binding: "character_bound" }] }]
+  }));
+  assert.equal(valid.draft.rewardGroups[0].items[0].binding, "character_bound");
+
+  const repository = new InMemoryActivityControlRepository();
+  await repository.createDraft(invalid);
+  const guarded = new ActivityControlDomainService(repository);
+  const preflight = await guarded.preflight(invalid.activityId, { version: 1, reason: "binding check" });
+  assert.equal(preflight.valid, false);
+  assert.equal(preflight.errors.some((item) => item.code === "REWARD_BINDING_MISMATCH"), true);
+  await assert.rejects(
+    () => guarded.publish(invalid.activityId, { version: 1, reason: "must fail" }),
+    (error) => error.code === "ACTIVITY_PRECHECK_FAILED"
+      && error.details.some((item) => item.code === "REWARD_BINDING_MISMATCH")
+  );
+});
+
 test("weighted reward catalog requires safe positive weights and safe totals", async () => {
   const cases = [
     { items: [{ item_id: 1001, quantity: 1 }], path: "rewardGroups[0].items[0].weight" },

@@ -4,6 +4,8 @@ import path from "node:path";
 
 import dotenv from "dotenv";
 
+import { resolveActivityRewardCatalogPath } from "./activity/activity-reward-catalog-path.js";
+
 const envPath = path.resolve(process.cwd(), ".env");
 if (fs.existsSync(envPath)) {
   dotenv.config({ path: envPath });
@@ -640,6 +642,7 @@ export function getConfig() {
     serviceBuildVersion: process.env.SERVICE_BUILD_VERSION || "dev",
     databaseUrl,
     gameDatabaseUrl: resolveGameDatabaseUrl(databaseUrl),
+    activityRewardCatalogPath: resolveActivityRewardCatalogPath(process.env.ACTIVITY_REWARD_CATALOG_PATH),
     dbPoolSize,
     gameDbPoolSize: dbPoolSize,
     jwtSecret: process.env.JWT_SECRET || "dev-only-change-this-jwt-secret",
