@@ -7,7 +7,9 @@ test("activity registry dynamically maps both supported type editors and schemas
   assert.deepEqual(definitions.map((item) => item.type).sort(), ["login_reward", "lottery"]);
   assert.equal(typeof resolveActivityTypeDefinition("login_reward").editor, "function");
   assert.equal(typeof resolveActivityTypeDefinition("lottery").module, "function");
-  assert.equal(buildActivityDraftTemplate("login_reward", "summer").typeConfig.stages[0].reward_group_key, "default");
+  const loginReward = buildActivityDraftTemplate("login_reward", "summer");
+  assert.equal(loginReward.typeConfig.stages[0].reward_group_key, "default");
+  assert.deepEqual(loginReward.rewardGroups[0].items, [{ item_id: 1001, quantity: 1 }]);
   assert.equal(buildActivityDraftTemplate("lottery", "draw").typeConfig.pool_items[0].item_id, 1001);
   assert.equal(resolveActivityTypeDefinition("missing"), null);
 });

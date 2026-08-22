@@ -30,7 +30,7 @@ export interface ActivityRecord {
   recordId: string;
   activityId: string;
   version: number;
-  recordType: "claim" | "draw" | "reward_grant";
+  recordType: "claim" | "draw" | "player_state" | "reward_grant" | "reward_mail" | "manual_review";
   characterId?: string;
   requestId?: string;
   status: string;
@@ -295,6 +295,11 @@ export class InMemoryActivityControlRepository implements ActivityControlReposit
 
 export interface ActivityPreflightError { path: string; code: string; message: string; }
 
+const REWARD_ITEM_I32_MAX = 0x7fffffff;
+const REWARD_QUANTITY_U32_MAX = 0xffffffff;
+const REWARD_ITEM_FIELDS = new Set(["item_id", "quantity", "weight", "binding"]);
+const REWARD_BINDINGS = new Set(["unbound", "character_bound"]);
+
 function pushError(errors: ActivityPreflightError[], path: string, code: string, message: string): void {
   errors.push({ path, code, message });
 }
@@ -378,9 +383,36 @@ function validateDraft(command: Record<string, unknown>): ActivityPreflightError
     else groupKeys.add(group.key);
     if (!["fixed", "weighted"].includes(String(group.selectionMode))) pushError(errors, `${path}.selectionMode`, "INVALID", "selectionMode must be fixed or weighted");
     if (!Array.isArray(group.items) || group.items.length === 0) pushError(errors, `${path}.items`, "REQUIRED", "reward group must contain items");
+    const weighted = group.selectionMode === "weighted";
+    let totalWeight = 0;
     for (const [itemIndex, item] of (Array.isArray(group.items) ? group.items : []).entries()) {
-      if (!item || typeof item !== "object") pushError(errors, `${path}.items[${itemIndex}]`, "INVALID_OBJECT", "reward item must be an object");
-      else if (!Number.isInteger(Number((item as any).quantity)) || Number((item as any).quantity) <= 0) pushError(errors, `${path}.items[${itemIndex}].quantity`, "INVALID", "quantity must be positive");
+      const itemPath = `${path}.items[${itemIndex}]`;
+      if (!item || typeof item !== "object" || Array.isArray(item)) {
+        pushError(errors, itemPath, "INVALID_OBJECT", "reward item must be an object");
+        continue;
+      }
+      const rewardItem = item as Record<string, unknown>;
+      for (const field of Object.keys(rewardItem)) {
+        if (!REWARD_ITEM_FIELDS.has(field)) pushError(errors, `${itemPath}.${field}`, "UNKNOWN_FIELD", "reward item field is not allowed");
+      }
+      if (!Number.isInteger(rewardItem.item_id) || Number(rewardItem.item_id) < 1 || Number(rewardItem.item_id) > REWARD_ITEM_I32_MAX) {
+        pushError(errors, `${itemPath}.item_id`, rewardItem.item_id === undefined ? "REQUIRED" : "INVALID", "item_id must be a positive int32");
+      }
+      if (!Number.isInteger(rewardItem.quantity) || Number(rewardItem.quantity) < 1 || Number(rewardItem.quantity) > REWARD_QUANTITY_U32_MAX) {
+        pushError(errors, `${itemPath}.quantity`, rewardItem.quantity === undefined ? "REQUIRED" : "INVALID", "quantity must be a positive uint32");
+      }
+      const hasWeight = Object.hasOwn(rewardItem, "weight");
+      if (weighted && !hasWeight) {
+        pushError(errors, `${itemPath}.weight`, "REQUIRED", "weighted reward item requires weight");
+      } else if (hasWeight && (!Number.isSafeInteger(rewardItem.weight) || Number(rewardItem.weight) < 1)) {
+        pushError(errors, `${itemPath}.weight`, "INVALID", "weight must be a positive safe integer");
+      } else if (weighted) {
+        totalWeight += Number(rewardItem.weight);
+        if (!Number.isSafeInteger(totalWeight)) pushError(errors, `${path}.items`, "OUT_OF_RANGE", "reward group weights exceed safe integer range");
+      }
+      if (rewardItem.binding !== undefined && (typeof rewardItem.binding !== "string" || !REWARD_BINDINGS.has(rewardItem.binding))) {
+        pushError(errors, `${itemPath}.binding`, "INVALID", "binding must be unbound or character_bound");
+      }
     }
   });
   const stages = Array.isArray(command.stages) ? command.stages : [];

@@ -2453,6 +2453,24 @@ mod tests {
     use chrono::{Duration as ChronoDuration, TimeZone};
     use serde_json::json;
 
+    #[test]
+    fn reward_items_accept_admin_control_plane_catalog() {
+        let public_config = json!({
+            "title": "Summer",
+            "reward_groups": [{
+                "key": "g1",
+                "selection_mode": "fixed",
+                "items": [{"item_id": 1001, "quantity": 2}]
+            }]
+        });
+
+        let items = ActivityEngine::reward_items(&public_config, "g1", "character-1").unwrap();
+        assert_eq!(
+            items,
+            vec![NormalizedAssetItem::new(1001, 2, AssetBinding::Unbound).unwrap()]
+        );
+    }
+
     struct FailingCache;
 
     impl ActivityCache for FailingCache {

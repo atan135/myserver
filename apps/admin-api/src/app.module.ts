@@ -40,7 +40,11 @@ import { MyforgeOrchestrator } from "./myforge/myforge-orchestrator.js";
 import { MyforgeController } from "./myforge/myforge.controller.js";
 import { HealthController } from "./health.controller.js";
 import { ActivityController } from "./activity/activity.controller.js";
-import { ActivityControlUnavailableService } from "./activity/activity-control.service.js";
+import { ActivityControlDomainService } from "./activity/activity-control.service.js";
+import {
+  PostgresActivityControlRepository,
+  RedisActivityRefreshNotifier
+} from "./activity/activity-control.repository.js";
 import { RequestLogMiddleware } from "./common/request-log.middleware.js";
 import {
   ADMIN_CONFIG,
@@ -108,7 +112,18 @@ class GameDbPoolShutdown implements OnModuleDestroy {
     GameDbPoolShutdown,
     MonitoringService,
     RoomTransferService,
-    { provide: ADMIN_ACTIVITY_CONTROL, useClass: ActivityControlUnavailableService },
+    {
+      provide: ADMIN_ACTIVITY_CONTROL,
+      inject: [ADMIN_GAME_DB_POOL, ADMIN_REDIS, ADMIN_CONFIG],
+      useFactory: (gamePool: any, redis: any, config: any) => {
+        const repository = new PostgresActivityControlRepository(gamePool);
+        return new ActivityControlDomainService(
+          repository,
+          new RedisActivityRefreshNotifier(redis, config.redisKeyPrefix || ""),
+          repository
+        );
+      }
+    },
     {
       provide: ADMIN_CONFIG,
       useFactory: () => getConfig()

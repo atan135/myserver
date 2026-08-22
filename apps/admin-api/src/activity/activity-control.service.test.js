@@ -26,7 +26,7 @@ function draft(overrides = {}) {
     publicConfig: {},
     typeConfig: { schema_version: 1, event_source: "game_entry", cycle_unit: "natural_day", progression: "consecutive", miss_policy: "reset", claim_mode: "manual", stages: [{ stage_no: 1, required_count: 1, reward_group_key: "g1" }] },
     stages: [{ stageId: "day-1", stageNo: 1, rewardGroupKey: "g1", qualification: {} }],
-    rewardGroups: [{ key: "g1", selectionMode: "fixed", items: [{ quantity: 1 }] }],
+    rewardGroups: [{ key: "g1", selectionMode: "fixed", items: [{ item_id: 1001, quantity: 1 }] }],
     reason: "test",
     ...overrides
   };
@@ -57,6 +57,63 @@ test("domain service returns field-level preflight errors and refuses invalid dr
     () => service.createDraft(draft({ endAt: "2026-08-31T00:00:00Z", timezone: "Mars/Base" })),
     (error) => error instanceof ActivityControlError && error.code === "ACTIVITY_INVALID_CONFIG" && error.details.some((item) => item.path === "endAt") && error.details.some((item) => item.path === "timezone")
   );
+});
+
+test("reward catalog rejects unsafe or runtime-incompatible item definitions", async () => {
+  const cases = [
+    { item: { quantity: 1 }, path: ".item_id" },
+    { item: { item_id: -1, quantity: 1 }, path: ".item_id" },
+    { item: { item_id: 0x80000000, quantity: 1 }, path: ".item_id" },
+    { item: { item_id: Number.MAX_SAFE_INTEGER + 1, quantity: 1 }, path: ".item_id" },
+    { item: { item_id: 1001, quantity: -1 }, path: ".quantity" },
+    { item: { item_id: 1001, quantity: 0x100000000 }, path: ".quantity" },
+    { item: { item_id: 1001, quantity: Number.MAX_SAFE_INTEGER + 1 }, path: ".quantity" },
+    { item: { item_id: 1001, quantity: 1, binding: "account_bound" }, path: ".binding" },
+    { item: { item_id: 1001, quantity: 1, result_item_id: 1001 }, path: ".result_item_id" }
+  ];
+  for (const [index, invalid] of cases.entries()) {
+    const service = new ActivityControlDomainService();
+    await assert.rejects(
+      () => service.createDraft(draft({
+        activityId: `invalid-reward-${index}`,
+        key: `invalid-reward-${index}`,
+        rewardGroups: [{ key: "g1", selectionMode: "fixed", items: [invalid.item] }]
+      })),
+      (error) => error instanceof ActivityControlError
+        && error.code === "ACTIVITY_INVALID_CONFIG"
+        && error.details.some((item) => item.path === `rewardGroups[0].items[0]${invalid.path}`)
+    );
+  }
+});
+
+test("weighted reward catalog requires safe positive weights and safe totals", async () => {
+  const cases = [
+    { items: [{ item_id: 1001, quantity: 1 }], path: "rewardGroups[0].items[0].weight" },
+    { items: [{ item_id: 1001, quantity: 1, weight: 0 }], path: "rewardGroups[0].items[0].weight" },
+    { items: [{ item_id: 1001, quantity: 1, weight: Number.MAX_SAFE_INTEGER + 1 }], path: "rewardGroups[0].items[0].weight" },
+    { items: [{ item_id: 1001, quantity: 1, weight: Number.MAX_SAFE_INTEGER }, { item_id: 1002, quantity: 1, weight: 1 }], path: "rewardGroups[0].items" }
+  ];
+  for (const [index, invalid] of cases.entries()) {
+    const service = new ActivityControlDomainService();
+    await assert.rejects(
+      () => service.createDraft(draft({
+        activityId: `invalid-weight-${index}`,
+        key: `invalid-weight-${index}`,
+        rewardGroups: [{ key: "g1", selectionMode: "weighted", items: invalid.items }]
+      })),
+      (error) => error instanceof ActivityControlError
+        && error.code === "ACTIVITY_INVALID_CONFIG"
+        && error.details.some((item) => item.path === invalid.path)
+    );
+  }
+
+  const service = new ActivityControlDomainService();
+  const created = await service.createDraft(draft({
+    activityId: "valid-character-bound-reward",
+    key: "valid-character-bound-reward",
+    rewardGroups: [{ key: "g1", selectionMode: "fixed", items: [{ item_id: 1001, quantity: 1, binding: "character_bound" }] }]
+  }));
+  assert.equal(created.status, "draft");
 });
 
 test("draft and published snapshot keep schema version and config digest consistent", async () => {

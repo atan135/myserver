@@ -349,6 +349,30 @@ mod tests {
         assert!(version.config_digest.starts_with("sha256:"));
         assert!(ActivityVersion::validate_digest(&version.config_digest));
         assert!(!ActivityVersion::validate_digest("sha256:bad"));
+
+        let admin_control_plane_vector = ActivityVersion::digest(
+            &json!({
+                "title": "Summer",
+                "reward_groups": [{
+                    "key": "g1",
+                    "selection_mode": "fixed",
+                    "items": [{"item_id": 1001, "quantity": 2}]
+                }]
+            }),
+            &json!({
+                "schema_version": 1,
+                "event_source": "game_entry",
+                "cycle_unit": "natural_day",
+                "progression": "consecutive",
+                "miss_policy": "reset",
+                "claim_mode": "manual",
+                "stages": [{"stage_no": 1, "required_count": 1, "reward_group_key": "g1"}]
+            }),
+        );
+        assert_eq!(
+            admin_control_plane_vector,
+            "sha256:8db18111c07f7f457d6ee34bd7be5b12dc6a876a7dcfe6670b441a1c929d0dd5"
+        );
     }
 
     #[test]

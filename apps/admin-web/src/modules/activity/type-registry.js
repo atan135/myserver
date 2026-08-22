@@ -10,7 +10,7 @@ const definitions = {
       publicConfig: { title: key },
       typeConfig: { schema_version: 1, event_source: "game_entry", cycle_unit: "natural_day", progression: "consecutive", miss_policy: "reset", claim_mode: "manual", stages: [{ stage_no: 1, required_count: 1, reward_group_key: "default" }] },
       stages: [{ stageId: "stage-1", stageNo: 1, rewardGroupKey: "default", qualification: {} }],
-      rewardGroups: [{ key: "default", selectionMode: "fixed", items: [{ quantity: 1 }] }]
+      rewardGroups: [{ key: "default", selectionMode: "fixed", items: [{ item_id: 1001, quantity: 1 }] }]
     }),
     editor: () => import("./LoginRewardTypeEditor.vue"),
     module: () => import("./types/login_reward.ts")
