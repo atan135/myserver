@@ -89,6 +89,13 @@ const DEFAULT_OPTIONS = {
   disciplineTier: "novice",
   disciplinePoints: 1,
   progressId: "achievement_first_forge",
+  activityId: "",
+  activityVersion: 0,
+  activityStageId: "",
+  activityAction: "",
+  activityRequestId: "",
+  activityPacingMs: 150,
+  activityDryRun: false,
   roleSystemSkipDebug: false,
   roleSystemSkipDeleteRestore: false,
   titleChangeReason: "mock-client character title debug",
@@ -348,6 +355,33 @@ export function parseArgs(argv) {
         break;
       case "--progress-id":
         ({ value: result.progressId, nextIndex: index } = collectOptionValue(argv, index));
+        break;
+      case "--activity-id":
+        ({ value: result.activityId, nextIndex: index } = collectOptionValue(argv, index));
+        break;
+      case "--activity-version": {
+        const { value, nextIndex } = collectOptionValue(argv, index);
+        result.activityVersion = /^\d+$/.test(value) ? Number(value) : Number.NaN;
+        index = nextIndex;
+        break;
+      }
+      case "--activity-stage-id":
+        ({ value: result.activityStageId, nextIndex: index } = collectOptionValue(argv, index));
+        break;
+      case "--activity-action":
+        ({ value: result.activityAction, nextIndex: index } = collectOptionValue(argv, index));
+        break;
+      case "--activity-request-id":
+        ({ value: result.activityRequestId, nextIndex: index } = collectOptionValue(argv, index));
+        break;
+      case "--activity-pacing-ms": {
+        const { value, nextIndex } = collectOptionValue(argv, index);
+        result.activityPacingMs = /^\d+$/.test(value) ? Number(value) : Number.NaN;
+        index = nextIndex;
+        break;
+      }
+      case "--activity-dry-run":
+        result.activityDryRun = true;
         break;
       case "--role-system-skip-debug":
         result.roleSystemSkipDebug = true;

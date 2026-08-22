@@ -342,12 +342,32 @@ export function encodeActivityDetailReq(activityId, version = 0) {
   return Buffer.concat([encodeStringField(1, activityId), encodeUInt32Field(2, version)]);
 }
 
+export function encodeActivityProgressReq(activityId, version = 0) {
+  return Buffer.concat([encodeStringField(1, activityId), encodeUInt32Field(2, version)]);
+}
+
 export function encodeActivityClaimReq(activityId, version, stageId, clientRequestId) {
   return Buffer.concat([
     encodeStringField(1, activityId),
     encodeUInt32Field(2, version),
     encodeStringField(3, stageId),
     encodeStringField(4, clientRequestId)
+  ]);
+}
+
+export function encodeActivityActionReq(
+  activityId,
+  version,
+  stageId,
+  actionType,
+  clientRequestId
+) {
+  return Buffer.concat([
+    encodeStringField(1, activityId),
+    encodeUInt32Field(2, version),
+    encodeStringField(3, stageId),
+    encodeStringField(4, actionType),
+    encodeStringField(5, clientRequestId)
   ]);
 }
 
@@ -927,6 +947,15 @@ export function decodeByMessageType(messageType, body) {
         progressJson: readString(fields, 4),
         stateRevision: readUInt64(fields, 5)
       };
+    case MESSAGE_TYPE.ACTIVITY_PROGRESS_RES:
+      return {
+        ok: readBool(fields, 1),
+        errorCode: readString(fields, 2),
+        activityId: readString(fields, 3),
+        version: readUInt32(fields, 4),
+        progressJson: readString(fields, 5),
+        stateRevision: readUInt64(fields, 6)
+      };
     case MESSAGE_TYPE.ACTIVITY_CLAIM_RES:
       return {
         ok: readBool(fields, 1),
@@ -938,6 +967,19 @@ export function decodeByMessageType(messageType, body) {
         processing: readBool(fields, 7),
         duplicate: readBool(fields, 8),
         stateRevision: readUInt64(fields, 9)
+      };
+    case MESSAGE_TYPE.ACTIVITY_ACTION_RES:
+      return {
+        ok: readBool(fields, 1),
+        errorCode: readString(fields, 2),
+        activityId: readString(fields, 3),
+        version: readUInt32(fields, 4),
+        stageId: readString(fields, 5),
+        actionType: readString(fields, 6),
+        clientRequestId: readString(fields, 7),
+        processing: readBool(fields, 8),
+        duplicate: readBool(fields, 9),
+        stateRevision: readUInt64(fields, 10)
       };
     case MESSAGE_TYPE.DEBUG_CHARACTER_TITLE_RES:
       return {

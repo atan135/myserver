@@ -25,6 +25,7 @@ tools/mock-client/
 │       ├── mail.js      # 邮件相关场景 (HTTP + 通知联调)
 │       ├── announce.js  # 公告相关场景 (HTTP CRUD 调试)
 │       ├── character.js # 角色体系接口与选角后入服调试
+│       ├── activity.js  # 活动领取、抽奖、幂等重放和结果查询
 │       ├── game.js      # 游戏相关场景
 │       ├── robot-sync.js # MyBevy Robot Sync 房间场景
 │       ├── movement.js  # 移动相关场景
@@ -235,6 +236,20 @@ npm run test:mail:server
 | `inventory-get` | 获取当前背包和仓库状态 |
 | `inventory-full` | 完整背包流程测试 |
 
+### 活动系统场景 (activity.js)
+
+`activity` 默认是 live 场景：先通过 `auth-http` 登录和选角，再使用配置的 TCP endpoint 连接 `game-proxy` 本地 TCP fallback，完成 `AuthReq`（同时触发服务端可信 `game_entry` 登录事件）后依次执行 `list -> detail -> progress -> claim/draw -> 同 request id 重放 -> detail -> progress`。本地默认 fallback 是 `127.0.0.1:14000`（默认 KCP `PROXY_PORT=4000` 加 10000，实际值可由 game-proxy `.env` 覆盖后再通过 `--host/--port` 指定）。当前 auth-http 的 `services.game` 是 KCP descriptor，TCP mock-client 会有意忽略；只有登录响应实际提供 `protocol: tcp` 时，现有 discovery helper 才覆盖 TCP endpoint。
+
+每个响应都按 `messageType + seq` 匹配，并核对活动、版本、阶段、动作和 request id；首次失败会带服务端 `error_code` 退出，重放必须返回 `duplicate=true` 且保持相同 `processing` 状态。live flow 默认在非重放请求之间等待 150ms，避开 detail/progress 共享的 100ms `read:detail` 限流窗口；`--activity-pacing-ms` 可在 `0..5000` 内调整，`0` 只适合 fake-client/专项限流测试。首次动作与同 request id 重放之间不会插入该等待。
+
+| 场景 | 说明 |
+|------|------|
+| `activity --activity-action claim` | 领取服务端阶段奖励并验证重复领取 |
+| `activity --activity-action draw` | 执行免费或道具券抽奖并验证重复请求；具体消耗由目标活动的服务端配置和玩家状态决定 |
+| `activity --activity-dry-run` | 仅离线构造同一请求序列，不登录、不连接服务 |
+
+活动协议 body 只接受服务端已下发的 `activity id`、`version`、可选/必需的 `stage id`、`claim|draw` 和不透明 `client request id`；request id 按服务端规则最多 128 UTF-8 bytes。CLI 的 `--character-id` 仅供 `auth-http` 选角和签发 character-bound ticket，不会写入任何活动请求；活动协议不接受角色身份、奖励内容、奖池权重、概率、进度、道具券 UID/数量或其他服务端权威字段，也不会输出 game ticket、access token 或密码。当前协议没有独立的“抽奖结果查询”请求；场景在动作后重新读取 `ActivityDetailRes.progress_json` 和 `ActivityProgressRes.progress_json`，仅断言它们是对应活动版本的合法 JSON，不伪造额外结果接口。
+
 ### 角色体系场景 (character.js)
 | 场景 | 说明 |
 |------|------|
@@ -444,6 +459,31 @@ node tools/mock-client/src/index.js --scenario admin-character-readonly-check \
 `character-discipline-learn` 只发送 `LearnCharacterDisciplineReq(1425)` 的 `discipline_id`，角色身份来自 ticket 绑定的当前连接，不传 `character_id` 或 debug token。激活、停用、切换和 points 推进分别使用正式玩家协议，不需要 debug token，响应包含 `activeSkillPool` 和本次 `unlockedTitles` 摘要。`character-progress-apply` 只发送 `ApplyCharacterProgressReq(1433)` 的 `progress_id`，由服务端按 CSV 解析任务、成就、活动、排行榜或世界事件来源并返回 `ApplyCharacterProgressRes(1434)`，响应包含 `applied`、`sourceType/sourceId` 和奖励摘要。`character-titles-debug` 和 `character-disciplines-debug` 输出包含 `before`、`action`、`after`、`unlockedTitles`、`equippedTitle`、`discipline` 和 `request`，便于测试脚本断言。debug 入口需要玩家 ticket 加 `MYSERVER_CHARACTER_TITLE_DEBUG_TOKEN` / `--title-debug-token`，并且生产配置拒绝启用。手动验收依赖和步骤见 `docs/游戏服与接入层/角色与成长/角色体系与四属性设计.md`；启动 PostgreSQL、Redis、Core NATS、auth-http、game-proxy、game-server 或执行真实联调命令前，必须先由用户确认。
 
 `character-role-system-check` 默认创建临时角色并执行软删除 / 恢复，用于覆盖生命周期和 profile 闭环；如果传入 `--character-id`，场景只使用指定角色并跳过破坏性生命周期步骤。该场景会正式学习并激活 `--discipline-id`，随后触发 `--progress-id`，按 `messageType + seq` 匹配响应，并监听 `CharacterDisciplineChangePush` 和进度奖励产生的角色状态 push。提供 `--admin-token` 时，它会额外调用 `admin-character-readonly-check` 的只读后台接口；token 仅来自参数或 `MYSERVER_ADMIN_TOKEN` / `ADMIN_API_TOKEN` 环境变量，不写死在工具中。
+
+# 登录奖励领取与同 request id 重放
+node tools/mock-client/src/index.js --scenario activity \
+  --http-base-url http://127.0.0.1:3000 \
+  --host 127.0.0.1 --port 14000 \
+  --login-name <LOGIN_NAME> --password <PASSWORD> \
+  --character-id <CHARACTER_ID> \
+  --activity-id <LOGIN_REWARD_ACTIVITY_ID> --activity-version <VERSION> \
+  --activity-stage-id <SERVER_STAGE_ID> --activity-action claim \
+  --activity-request-id <NEW_CLAIM_REQUEST_ID>
+
+# 免费/道具券抽奖与同 request id 重放；免费次数和券消耗均由服务端判定
+node tools/mock-client/src/index.js --scenario activity \
+  --http-base-url http://127.0.0.1:3000 \
+  --host 127.0.0.1 --port 14000 \
+  --login-name <LOGIN_NAME> --password <PASSWORD> \
+  --character-id <CHARACTER_ID> \
+  --activity-id <LOTTERY_ACTIVITY_ID> --activity-version <VERSION> \
+  --activity-action draw --activity-request-id <NEW_DRAW_REQUEST_ID>
+
+# 仅检查构包，不访问 auth-http 或 game-proxy
+node tools/mock-client/src/index.js --scenario activity --activity-dry-run \
+  --activity-id <ACTIVITY_ID> --activity-version <VERSION> \
+  --activity-stage-id <SERVER_STAGE_ID> --activity-action claim \
+  --activity-request-id <REQUEST_ID>
 
 # 房间测试
 node tools/mock-client/src/index.js --scenario two-client-room \

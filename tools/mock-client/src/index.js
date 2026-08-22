@@ -9,7 +9,6 @@ import {
 } from "./auth.js";
 import { TcpProtocolClient } from "./client.js";
 import {
-  MESSAGE_TYPE,
   // Room scenarios
   runHappyPath,
   runGetRoomData,
@@ -140,9 +139,19 @@ async function main() {
   const options = parseArgs(process.argv.slice(2));
 
   if (options.scenario === SCENARIO.ACTIVITY) {
-    await runActivityScenario(async (messageType, body) => {
-      console.log(JSON.stringify({ messageType, bodyHex: body.toString("hex") }));
-    });
+    const result = await runActivityScenario(options);
+    if (result.dryRun) {
+      console.log("activity.dryRun:", JSON.stringify({
+        target: result.target,
+        requests: result.requests.map(({ label, messageType, responseType, seq, body }) => ({
+          label,
+          messageType,
+          responseType,
+          seq,
+          bodyHex: body.toString("hex")
+        }))
+      }, null, 2));
+    }
     console.log(`scenario completed: ${options.scenario}`);
     return;
   }

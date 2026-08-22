@@ -38,6 +38,13 @@
 # --discipline-tier <tier>   character-disciplines-debug 设置的职业阶位 (默认 novice)
 # --discipline-points <n>    character-disciplines-debug 设置的职业点数，或 character-discipline-points 的 points 增量 (默认 1)
 # --progress-id <id>         character-progress-apply 触发的正式任务/成就/活动/排行/世界事件进度 ID
+# --activity-id <id>         activity 场景目标活动 ID（必填，必须来自服务端）
+# --activity-version <n>     activity 场景目标版本（必填，1..4294967295）
+# --activity-stage-id <id>   服务端阶段 ID；claim 必填，draw 可留空
+# --activity-action <action> activity 动作，只允许 claim 或 draw
+# --activity-request-id <id> 不透明幂等请求 ID（必填，最多 128 UTF-8 bytes，每轮首次动作应使用新值）
+# --activity-pacing-ms <ms>  live flow 非重放请求间隔，范围 0..5000（默认 150，避开 100ms read:detail 限流）
+# --activity-dry-run         只构造活动请求序列，不登录或连接服务；默认 activity 场景执行 live flow
 # --role-system-skip-debug   character-role-system-check 跳过 debug 授称号/装备称号步骤
 # --role-system-skip-delete-restore 跳过临时角色软删除/恢复步骤
 # --title-change-reason <text> 称号/职业 debug 写入日志的原因
@@ -166,6 +173,24 @@ node tools/mock-client/src/index.js --scenario character-limit --http-base-url h
 # 可传 --character-id 指定已有角色，或传 --auto-create-character / --create-character-if-missing 自动创建后继续联调。
 # 真实客户端应按 messageType + seq 处理四属性、称号和职业阶位查询响应，并把查询结果或后续变化推送作为异步状态更新。
 # 称号与职业阶位手动验收依赖见 docs/游戏服与接入层/角色与成长/角色体系与四属性设计.md；启动服务或执行真实联调前必须先由用户确认。
+
+# ---------- 活动系统 ----------
+
+# activity 默认通过 auth-http 登录/选角，再连接 game-proxy TCP fallback 并完成 Auth；Auth 同时触发服务端可信 game_entry 登录事件。
+# 本地默认 TCP fallback 是 14000（KCP PROXY_PORT 4000 + 10000，实际 .env 可覆盖）。当前 services.game 是 KCP descriptor，TCP client 会忽略；只有 protocol=tcp descriptor 才覆盖 endpoint。
+# 默认 pacing 150ms，避免 detail/progress 共享的 100ms read:detail 限流；同 request id 重放保持紧邻，不插入 pacing。
+# 固定流程：list -> detail -> progress -> action -> 同 request id 重放 -> detail -> progress。
+# 登录奖励阶段领取；首次 request id 必须是新值。
+node tools/mock-client/src/index.js --scenario activity --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --port 14000 --login-name <LOGIN_NAME> --password <PASSWORD> --character-id <CHARACTER_ID> --activity-id <LOGIN_REWARD_ACTIVITY_ID> --activity-version <VERSION> --activity-stage-id <SERVER_STAGE_ID> --activity-action claim --activity-request-id <NEW_CLAIM_REQUEST_ID>
+
+# 免费或道具券抽奖。客户端不选择免费/券模式，不传券 UID/数量；服务端按活动配置和玩家资产判定。
+node tools/mock-client/src/index.js --scenario activity --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --port 14000 --login-name <LOGIN_NAME> --password <PASSWORD> --character-id <CHARACTER_ID> --activity-id <LOTTERY_ACTIVITY_ID> --activity-version <VERSION> --activity-action draw --activity-request-id <NEW_DRAW_REQUEST_ID>
+
+# 显式离线构包，不访问 auth-http/game-proxy。
+node tools/mock-client/src/index.js --scenario activity --activity-dry-run --activity-id <ACTIVITY_ID> --activity-version <VERSION> --activity-stage-id <SERVER_STAGE_ID> --activity-action claim --activity-request-id <REQUEST_ID>
+
+# 活动请求不接受 character/account identity、奖励、概率、权重、进度或 token。工具不输出 ticket/token/password。
+# 当前没有独立抽奖结果查询协议；动作后只查询并校验 ActivityDetailRes/ActivityProgressRes 的 progress_json。
 
 # ---------- 基础流程 ----------
 
@@ -525,6 +550,7 @@ node tools/mock-client/src/index.js --scenario two-client-room --http-base-url h
 # inventory-warehouse     | 仓库存取
 # inventory-get          | 获取背包信息
 # inventory-full          | 完整背包流程
+# activity                | auth-http + game-proxy 活动领取/抽奖、同 request id 重放和 progress_json 结果查询
 # character-list          | 查询账号角色列表
 # character-create        | 创建角色
 # character-profile       | 查询账号角色基础资料
