@@ -13,6 +13,10 @@ const controlMetadataMigration = readFileSync(
   "db/migrations/game/20260822150000_add_activity_control_metadata.sql",
   "utf8"
 );
+const adminPermissionMigration = readFileSync(
+  "db/migrations/auth/20260822160000_add_activity_admin_permissions.sql",
+  "utf8"
+);
 const init = readFileSync("db/init.sql", "utf8");
 const deployGate = JSON.parse(readFileSync("db/config/deploy-gate.json", "utf8"));
 
@@ -139,12 +143,44 @@ test("activity control metadata migration records display and audit evidence", (
   }
 });
 
+test("activity admin permissions preserve separated control-plane roles", () => {
+  for (const permission of [
+    "activities.read",
+    "activities.write",
+    "activities.publish",
+    "activities.offline",
+    "activities.records.read"
+  ]) {
+    assert.ok(adminPermissionMigration.includes(`'${permission}'`), `activity RBAC migration must contain ${permission}`);
+  }
+  assert.match(adminPermissionMigration, /\('viewer', 'activities\.read'\)/);
+  assert.doesNotMatch(adminPermissionMigration, /\('viewer', 'activities\.(?:write|publish|offline|records\.read)'\)/);
+  assert.doesNotMatch(adminPermissionMigration, /\('operator', 'activities\./);
+  for (const role of ["admin", "super_admin"]) {
+    for (const permission of ["read", "write", "publish", "offline", "records.read"]) {
+      assert.ok(
+        adminPermissionMigration.includes(`('${role}', 'activities.${permission}')`),
+        `${role} must receive activities.${permission}`
+      );
+    }
+  }
+});
+
 test("game database deployment gate admits and probes all activity migrations", () => {
   assert.ok(deployGate.databases.game.keyTables.includes("public.activity"));
   for (const service of deployGate.databases.game.services) {
     assert.ok(
       service.maximumMigrationVersion >= "20260822150000",
       `${service.name} must admit the latest activity migration`
+    );
+  }
+});
+
+test("auth database deployment gate admits activity permission migrations", () => {
+  for (const service of deployGate.databases.auth.services) {
+    assert.ok(
+      service.maximumMigrationVersion >= "20260822160000",
+      `${service.name} must admit the activity permission migration`
     );
   }
 });
@@ -173,4 +209,49 @@ test("each activity type has one sibling implementation file in every applicatio
 
   const publicView = readFileSync(join("apps/admin-web/src/views/Activities.vue"), "utf8");
   assert.doesNotMatch(publicView, /\b(?:login_reward|lottery)\b/);
+});
+
+test("activity control plane validates rewards against the authoritative ItemTable binding catalog", () => {
+  const service = readFileSync("apps/admin-api/src/activity/activity-control.service.ts", "utf8");
+  const catalog = readFileSync("apps/admin-api/src/activity/activity-reward-catalog.ts", "utf8");
+  const appModule = readFileSync("apps/admin-api/src/app.module.ts", "utf8");
+  assert.match(service, /REWARD_BINDING_MISMATCH/);
+  assert.match(service, /rewardCatalog\.find/);
+  assert.match(catalog, /BindType/);
+  assert.match(catalog, /entry\.bindType !== "Pickup" \|\| binding === "character_bound"/);
+  assert.match(appModule, /new CsvActivityRewardCatalog\(config\.activityRewardCatalogPath\)/);
+});
+
+test("activity reward grants are append-only, idempotent and committed with runtime truth", () => {
+  const settlement = readFileSync("apps/game-server/src/activity/settlement.rs", "utf8");
+  const engine = readFileSync("apps/game-server/src/activity/engine.rs", "utf8");
+  const repository = readFileSync("apps/admin-api/src/activity/activity-control.repository.ts", "utf8");
+
+  assert.match(settlement, /INSERT INTO reward_grant_ledger[\s\S]*ON CONFLICT \(request_id\) DO NOTHING/);
+  assert.match(settlement, /activity reward grant ledger request conflict/);
+
+  const pgClaims = settlement.slice(settlement.indexOf("impl ActivityClaimStore for PgActivityClaimStore"));
+  const pgClaimFinish = pgClaims.slice(pgClaims.indexOf("fn finish<'a>"), pgClaims.indexOf("fn load<'a>"));
+  const claimBegin = pgClaimFinish.indexOf("self.pool.begin()");
+  const claimLock = pgClaimFinish.indexOf("FOR UPDATE");
+  const claimLedger = pgClaimFinish.indexOf("insert_reward_grant_ledger");
+  const claimUpdate = pgClaimFinish.indexOf("UPDATE activity_claim_record SET");
+  const claimCommit = pgClaimFinish.indexOf(".commit()");
+  assert.ok(claimBegin >= 0 && claimBegin < claimLock);
+  assert.ok(claimLock < claimLedger && claimLedger < claimUpdate && claimUpdate < claimCommit);
+  assert.match(pgClaimFinish, /result\.result_state != AssetResultState::Applied|status == ClaimStatus::Granted/);
+  assert.match(pgClaimFinish, /execute\(&mut \*transaction\)/);
+
+  const pgLottery = engine.slice(engine.indexOf("impl LotteryRuntimeStore for PgLotteryRuntimeStore"));
+  const lotteryGrant = pgLottery.slice(pgLottery.indexOf("fn grant<'a>"));
+  const lotteryBegin = lotteryGrant.indexOf("self.pool.begin()");
+  const lotteryState = lotteryGrant.indexOf("INSERT INTO player_activity_state");
+  const lotteryLedger = lotteryGrant.indexOf("insert_reward_grant_ledger");
+  const lotteryCommit = lotteryGrant.indexOf(".commit()");
+  assert.ok(lotteryBegin >= 0 && lotteryBegin < lotteryState);
+  assert.ok(lotteryState < lotteryLedger && lotteryLedger < lotteryCommit);
+  assert.match(lotteryGrant, /quantity_delta > 0/);
+
+  assert.match(repository, /'reward_grant' AS record_type|\'reward_grant\'/);
+  assert.match(repository, /FROM reward_grant_ledger g/);
 });
