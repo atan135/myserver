@@ -1519,6 +1519,58 @@ pub struct ActivityActionRes {
     #[prost(uint64, tag = "10")]
     pub state_revision: u64,
 }
+/// Character-bound append-only activity claim/draw history. The cursor is an
+/// opaque server-issued keyset token and must not be constructed by clients.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ActivityClaimHistoryReq {
+    #[prost(string, tag = "1")]
+    pub cursor: ::prost::alloc::string::String,
+    #[prost(uint32, tag = "2")]
+    pub limit: u32,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ActivityRewardSummary {
+    #[prost(string, tag = "1")]
+    pub reward_type: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub asset_id: ::prost::alloc::string::String,
+    #[prost(uint64, tag = "3")]
+    pub quantity: u64,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ActivityClaimHistoryRecord {
+    #[prost(string, tag = "1")]
+    pub activity_id: ::prost::alloc::string::String,
+    #[prost(uint32, tag = "2")]
+    pub version: u32,
+    #[prost(string, tag = "3")]
+    pub activity_type: ::prost::alloc::string::String,
+    #[prost(string, tag = "4")]
+    pub action_type: ::prost::alloc::string::String,
+    #[prost(string, tag = "5")]
+    pub stage_id: ::prost::alloc::string::String,
+    #[prost(int64, tag = "6")]
+    pub created_at_ms: i64,
+    #[prost(int64, tag = "7")]
+    pub completed_at_ms: i64,
+    #[prost(string, tag = "8")]
+    pub status: ::prost::alloc::string::String,
+    #[prost(message, repeated, tag = "9")]
+    pub rewards: ::prost::alloc::vec::Vec<ActivityRewardSummary>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ActivityClaimHistoryRes {
+    #[prost(bool, tag = "1")]
+    pub ok: bool,
+    #[prost(string, tag = "2")]
+    pub error_code: ::prost::alloc::string::String,
+    #[prost(message, repeated, tag = "3")]
+    pub records: ::prost::alloc::vec::Vec<ActivityClaimHistoryRecord>,
+    #[prost(string, tag = "4")]
+    pub next_cursor: ::prost::alloc::string::String,
+    #[prost(bool, tag = "5")]
+    pub has_more: bool,
+}
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct DebugCharacterTitleReq {
     #[prost(string, tag = "1")]

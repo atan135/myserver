@@ -7,14 +7,17 @@
 mod cache;
 mod domain;
 mod engine;
+mod history;
 mod repository;
 mod settlement;
 mod types;
 
 use crate::core::context::ConnectionContext;
 use crate::pb::{
-    ActivityActionReq, ActivityActionRes, ActivityClaimReq, ActivityClaimRes, ActivityDetailReq,
+    ActivityActionReq, ActivityActionRes, ActivityClaimHistoryRecord, ActivityClaimHistoryReq,
+    ActivityClaimHistoryRes, ActivityClaimReq, ActivityClaimRes, ActivityDetailReq,
     ActivityDetailRes, ActivityListReq, ActivityListRes, ActivityProgressReq, ActivityProgressRes,
+    ActivityRewardSummary,
 };
 use crate::protocol::{MessageType, Packet};
 use chrono::Utc;
@@ -33,6 +36,11 @@ pub(crate) use domain::{
 pub(crate) use engine::{
     ActivityActionRequest, ActivityActionResponse, ActivityEngine, ActivityRequestContext,
     PlayerManagerLotteryAssetGateway,
+};
+#[allow(unused_imports)]
+pub(crate) use history::{
+    ActivityClaimHistoryPage, ActivityClaimHistoryStore, ActivityHistoryCursor,
+    InMemoryActivityClaimHistoryStore, PgActivityClaimHistoryStore,
 };
 #[allow(unused_imports)]
 pub(crate) use repository::{
@@ -122,6 +130,73 @@ pub(crate) async fn handle_packet(
                 },
             };
             connection.queue_message(MessageType::ActivityListRes, packet.header.seq, response)
+        }
+        Some(MessageType::ActivityClaimHistoryReq) => {
+            let request =
+                match packet.decode_body::<ActivityClaimHistoryReq>("ACTIVITY_INVALID_REQUEST") {
+                    Ok(value) => value,
+                    Err(error_code) => {
+                        connection.queue_error(
+                            packet.header.seq,
+                            error_code,
+                            "invalid activity history request body",
+                        )?;
+                        return Ok(());
+                    }
+                };
+            let response = match engine
+                .claim_history_with_context(&request_context, &request.cursor, request.limit)
+                .await
+            {
+                Ok(page) => ActivityClaimHistoryRes {
+                    ok: true,
+                    error_code: String::new(),
+                    records: page
+                        .records
+                        .into_iter()
+                        .map(|record| ActivityClaimHistoryRecord {
+                            activity_id: record.activity_id,
+                            version: record.version.max(0) as u32,
+                            activity_type: record.activity_type,
+                            action_type: record.action_type,
+                            stage_id: record.stage_id.unwrap_or_default(),
+                            created_at_ms: record.created_at.timestamp_millis(),
+                            completed_at_ms: record
+                                .completed_at
+                                .map(|value| value.timestamp_millis())
+                                .unwrap_or_default(),
+                            status: record.status,
+                            rewards: record
+                                .rewards
+                                .into_iter()
+                                .map(|reward| ActivityRewardSummary {
+                                    reward_type: reward.reward_type,
+                                    asset_id: reward.asset_id,
+                                    quantity: reward.quantity,
+                                })
+                                .collect(),
+                        })
+                        .collect(),
+                    next_cursor: page
+                        .next_cursor
+                        .as_ref()
+                        .map(|cursor| engine.encode_history_cursor(identity.character_id(), cursor))
+                        .unwrap_or_default(),
+                    has_more: page.has_more,
+                },
+                Err(error) => ActivityClaimHistoryRes {
+                    ok: false,
+                    error_code: error.code.into(),
+                    records: Vec::new(),
+                    next_cursor: String::new(),
+                    has_more: false,
+                },
+            };
+            connection.queue_message(
+                MessageType::ActivityClaimHistoryRes,
+                packet.header.seq,
+                response,
+            )
         }
         Some(MessageType::ActivityDetailReq) => {
             let request = match packet.decode_body::<ActivityDetailReq>("ACTIVITY_INVALID_REQUEST")

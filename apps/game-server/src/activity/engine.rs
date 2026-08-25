@@ -1,5 +1,9 @@
 use super::cache::{ActivityCache, ActivityCacheError};
 use super::domain::ActivityStatus;
+use super::history::{
+    ActivityClaimHistoryPage, ActivityClaimHistoryStore, ActivityHistoryCursor,
+    InMemoryActivityClaimHistoryStore, PgActivityClaimHistoryStore,
+};
 use super::repository::{
     ActivityRepository, InMemoryActivityRepository, PgActivityRepository, PublishedActivitySnapshot,
 };
@@ -25,7 +29,9 @@ use crate::core::inventory::{
 use crate::core::player::db_player_store::AssetCommandRecordLookup;
 use crate::core::player::player_manager::PlayerManager;
 use crate::metrics::{ActivityActionMetric, ActivityCacheFailureMetric, METRICS, MetricsCollector};
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{DateTime, Utc};
+use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use std::collections::HashMap;
@@ -33,6 +39,13 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
+
+type HistoryCursorMac = Hmac<Sha256>;
+const DEFAULT_ACTIVITY_HISTORY_PAGE_SIZE: u32 = 20;
+const MAX_ACTIVITY_HISTORY_PAGE_SIZE: u32 = 50;
+const HISTORY_CURSOR_VERSION: u8 = 1;
+const HISTORY_CURSOR_PAYLOAD_LEN: usize = 1 + 32 + 8 + 8;
+const HISTORY_CURSOR_TAG_LEN: usize = 32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct LotteryVoucher {
@@ -1060,6 +1073,8 @@ pub(crate) struct ActivityEngine {
     login_progress: Arc<dyn LoginRewardProgressRepository>,
     enabled: bool,
     claim_coordinator: Option<ActivityClaimCoordinator>,
+    claim_history_store: Arc<dyn ActivityClaimHistoryStore>,
+    history_cursor_secret: Vec<u8>,
     lottery_states: Arc<dyn LotteryRuntimeStore>,
     lottery_assets: Arc<dyn LotteryAssetGateway>,
     lottery_notifier: Arc<dyn LotteryResultNotifier>,
@@ -1114,6 +1129,8 @@ impl ActivityEngine {
             login_progress: Arc::new(InMemoryLoginRewardProgressRepository::default()),
             enabled: true,
             claim_coordinator: None,
+            claim_history_store: Arc::new(InMemoryActivityClaimHistoryStore::default()),
+            history_cursor_secret: b"activity-history-test-secret".to_vec(),
             lottery_states: Arc::new(InMemoryLotteryRuntimeStore::default()),
             lottery_assets: Arc::new(UnavailableLotteryAssetGateway),
             lottery_notifier: Arc::new(NoopLotteryResultNotifier),
@@ -1130,7 +1147,11 @@ impl ActivityEngine {
         Self::new(Arc::new(InMemoryActivityRepository::default()))
     }
 
-    pub(crate) fn postgres(pool: PgPool, reward_delivery: Arc<dyn ActivityRewardDelivery>) -> Self {
+    pub(crate) fn postgres(
+        pool: PgPool,
+        reward_delivery: Arc<dyn ActivityRewardDelivery>,
+        history_cursor_secret: &[u8],
+    ) -> Self {
         let claim_store = Arc::new(PgActivityClaimStore::new(pool.clone()));
         Self::new(Arc::new(PgActivityRepository::from_pool(pool.clone())))
             .with_login_reward_progress_repository(Arc::new(PgLoginRewardProgressRepository::new(
@@ -1140,6 +1161,8 @@ impl ActivityEngine {
                 reward_delivery,
                 claim_store,
             ))
+            .with_claim_history_store(Arc::new(PgActivityClaimHistoryStore::new(pool.clone())))
+            .with_history_cursor_secret(history_cursor_secret)
             .with_lottery_runtime_store(Arc::new(PgLotteryRuntimeStore::new(pool)))
     }
 
@@ -1151,6 +1174,19 @@ impl ActivityEngine {
 
     pub(crate) fn with_claim_coordinator(mut self, coordinator: ActivityClaimCoordinator) -> Self {
         self.claim_coordinator = Some(coordinator);
+        self
+    }
+
+    pub(crate) fn with_claim_history_store(
+        mut self,
+        store: Arc<dyn ActivityClaimHistoryStore>,
+    ) -> Self {
+        self.claim_history_store = store;
+        self
+    }
+
+    pub(crate) fn with_history_cursor_secret(mut self, secret: &[u8]) -> Self {
+        self.history_cursor_secret = secret.to_vec();
         self
     }
 
@@ -1631,6 +1667,136 @@ impl ActivityEngine {
             result.as_ref().err().map(|error| error.code),
         );
         result
+    }
+
+    pub(crate) async fn claim_history_with_context(
+        &self,
+        context: &ActivityRequestContext,
+        cursor: &str,
+        requested_limit: u32,
+    ) -> Result<ActivityClaimHistoryPage, ActivityEngineError> {
+        let action = ActivityActionMetric::History;
+        self.metrics.record_activity_request(action);
+        let result = self
+            .claim_history_with_context_inner(context, cursor, requested_limit)
+            .await;
+        self.metrics.record_activity_response(
+            action,
+            result.is_ok(),
+            false,
+            result.as_ref().err().map(|error| error.code),
+        );
+        result
+    }
+
+    async fn claim_history_with_context_inner(
+        &self,
+        context: &ActivityRequestContext,
+        cursor: &str,
+        requested_limit: u32,
+    ) -> Result<ActivityClaimHistoryPage, ActivityEngineError> {
+        if !self.enabled {
+            return Err(Self::unavailable_error());
+        }
+        if context.character_id.trim().is_empty() {
+            return Err(Self::auth_error());
+        }
+        let limit = if requested_limit == 0 {
+            DEFAULT_ACTIVITY_HISTORY_PAGE_SIZE
+        } else if requested_limit <= MAX_ACTIVITY_HISTORY_PAGE_SIZE {
+            requested_limit
+        } else {
+            return Err(ActivityEngineError::new(
+                "ACTIVITY_INVALID_REQUEST",
+                "activity history limit is out of range",
+            ));
+        };
+        if self.check_rate_limit(context, "*", "read:history").await {
+            return Err(Self::rate_limited_error());
+        }
+        let cursor = self.decode_history_cursor(&context.character_id, cursor)?;
+        self.claim_history_store
+            .list(&context.character_id, cursor, limit)
+            .await
+            .map_err(|_| {
+                ActivityEngineError::new(
+                    "ACTIVITY_STORAGE_UNAVAILABLE",
+                    "activity history storage unavailable",
+                )
+            })
+    }
+
+    pub(crate) fn encode_history_cursor(
+        &self,
+        character_id: &str,
+        cursor: &ActivityHistoryCursor,
+    ) -> String {
+        let mut payload = Vec::with_capacity(HISTORY_CURSOR_PAYLOAD_LEN + HISTORY_CURSOR_TAG_LEN);
+        payload.push(HISTORY_CURSOR_VERSION);
+        payload.extend(Sha256::digest(character_id.as_bytes()));
+        payload.extend(cursor.created_at.timestamp_micros().to_be_bytes());
+        payload.extend(cursor.id.to_be_bytes());
+        let mut mac = HistoryCursorMac::new_from_slice(&self.history_cursor_secret)
+            .expect("HMAC accepts arbitrary secret lengths");
+        mac.update(&payload);
+        payload.extend(mac.finalize().into_bytes());
+        URL_SAFE_NO_PAD.encode(payload)
+    }
+
+    fn decode_history_cursor(
+        &self,
+        character_id: &str,
+        encoded: &str,
+    ) -> Result<Option<ActivityHistoryCursor>, ActivityEngineError> {
+        if encoded.trim().is_empty() {
+            return Ok(None);
+        }
+        let bytes = URL_SAFE_NO_PAD.decode(encoded).map_err(|_| {
+            ActivityEngineError::new(
+                "ACTIVITY_HISTORY_CURSOR_INVALID",
+                "activity history cursor is invalid",
+            )
+        })?;
+        if bytes.len() != HISTORY_CURSOR_PAYLOAD_LEN + HISTORY_CURSOR_TAG_LEN
+            || bytes[0] != HISTORY_CURSOR_VERSION
+        {
+            return Err(ActivityEngineError::new(
+                "ACTIVITY_HISTORY_CURSOR_INVALID",
+                "activity history cursor is invalid",
+            ));
+        }
+        let (payload, tag) = bytes.split_at(HISTORY_CURSOR_PAYLOAD_LEN);
+        let mut mac = HistoryCursorMac::new_from_slice(&self.history_cursor_secret)
+            .expect("HMAC accepts arbitrary secret lengths");
+        mac.update(payload);
+        mac.verify_slice(tag).map_err(|_| {
+            ActivityEngineError::new(
+                "ACTIVITY_HISTORY_CURSOR_INVALID",
+                "activity history cursor is invalid",
+            )
+        })?;
+        let expected_character_hash = Sha256::digest(character_id.as_bytes());
+        if payload[1..33] != expected_character_hash[..] {
+            return Err(ActivityEngineError::new(
+                "ACTIVITY_HISTORY_CURSOR_INVALID",
+                "activity history cursor is invalid",
+            ));
+        }
+        let created_at_micros = i64::from_be_bytes(payload[33..41].try_into().unwrap());
+        let id = i64::from_be_bytes(payload[41..49].try_into().unwrap());
+        let created_at = DateTime::from_timestamp_micros(created_at_micros).ok_or_else(|| {
+            ActivityEngineError::new(
+                "ACTIVITY_HISTORY_CURSOR_INVALID",
+                "activity history cursor is invalid",
+            )
+        })?;
+        if id <= 0 {
+            return Err(ActivityEngineError::new(
+                "ACTIVITY_HISTORY_CURSOR_INVALID",
+                "activity history cursor is invalid",
+            ));
+        }
+        Ok(Some(ActivityHistoryCursor { created_at, id }))
     }
 
     async fn list_with_context_inner(
@@ -3640,6 +3806,100 @@ mod tests {
                 .code,
             "ACTIVITY_ENGINE_UNAVAILABLE"
         );
+        assert_eq!(
+            engine
+                .claim_history_with_context(
+                    &ActivityRequestContext::character_only("character-1"),
+                    "",
+                    0,
+                )
+                .await
+                .unwrap_err()
+                .code,
+            "ACTIVITY_ENGINE_UNAVAILABLE"
+        );
+    }
+
+    struct FailingHistoryStore;
+
+    impl ActivityClaimHistoryStore for FailingHistoryStore {
+        fn list<'a>(
+            &'a self,
+            _character_id: &'a str,
+            _cursor: Option<ActivityHistoryCursor>,
+            _limit: u32,
+        ) -> super::super::history::HistoryStoreFuture<'a, Result<ActivityClaimHistoryPage, String>>
+        {
+            Box::pin(async { Err("history store offline".to_string()) })
+        }
+    }
+
+    #[tokio::test]
+    async fn history_cursor_is_character_bound_and_rejects_tampering() {
+        let mut engine = ActivityEngine::in_memory();
+        engine.rate_limit_policy.action_max = 100;
+        let cursor = ActivityHistoryCursor {
+            created_at: Utc
+                .timestamp_opt(1_725_000_000, 123_456_000)
+                .single()
+                .unwrap(),
+            id: 42,
+        };
+        let encoded = engine.encode_history_cursor("character-1", &cursor);
+        assert_eq!(
+            engine
+                .decode_history_cursor("character-1", &encoded)
+                .unwrap(),
+            Some(cursor.clone())
+        );
+        let context = ActivityRequestContext::character_only("character-1");
+        let page = engine
+            .claim_history_with_context(&context, &encoded, 20)
+            .await
+            .unwrap();
+        assert!(page.records.is_empty());
+        assert!(!page.has_more);
+        assert!(page.next_cursor.is_none());
+
+        let cross_character = engine
+            .claim_history_with_context(
+                &ActivityRequestContext::character_only("character-2"),
+                &encoded,
+                20,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(cross_character.code, "ACTIVITY_HISTORY_CURSOR_INVALID");
+
+        let mut tampered = encoded.clone();
+        let last = tampered.pop().expect("encoded cursor is non-empty");
+        tampered.push(if last == 'A' { 'B' } else { 'A' });
+        let tampered_error = engine
+            .claim_history_with_context(&context, &tampered, 20)
+            .await
+            .unwrap_err();
+        assert_eq!(tampered_error.code, "ACTIVITY_HISTORY_CURSOR_INVALID");
+
+        let invalid_limit = engine
+            .claim_history_with_context(&context, "", 51)
+            .await
+            .unwrap_err();
+        assert_eq!(invalid_limit.code, "ACTIVITY_INVALID_REQUEST");
+    }
+
+    #[tokio::test]
+    async fn history_storage_errors_are_stable_and_public_fields_are_bounded() {
+        let engine =
+            ActivityEngine::in_memory().with_claim_history_store(Arc::new(FailingHistoryStore));
+        let error = engine
+            .claim_history_with_context(
+                &ActivityRequestContext::character_only("character-1"),
+                "",
+                20,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "ACTIVITY_STORAGE_UNAVAILABLE");
     }
 
     #[tokio::test]

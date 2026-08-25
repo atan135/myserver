@@ -1,5 +1,5 @@
 {
-  "digest": "sha256:d122ca37133dfb9dc8927a054a16d34aa7a6e88690f946e3de13bdb8d4052b93",
+  "digest": "sha256:840f8d46f1771504f2ecea9929f38af5079f07fced21ab6eb0f1aaf7148116b0",
   "files": [
     {
       "enums": [],
@@ -1627,6 +1627,148 @@
             },
             {
               "label": "singular",
+              "name": "activity_type",
+              "number": 3,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "action_type",
+              "number": 4,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "stage_id",
+              "number": 5,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "created_at_ms",
+              "number": 6,
+              "oneof": "",
+              "type": "int64"
+            },
+            {
+              "label": "singular",
+              "name": "completed_at_ms",
+              "number": 7,
+              "oneof": "",
+              "type": "int64"
+            },
+            {
+              "label": "singular",
+              "name": "status",
+              "number": 8,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "repeated",
+              "name": "rewards",
+              "number": 9,
+              "oneof": "",
+              "type": "ActivityRewardSummary"
+            }
+          ],
+          "name": "ActivityClaimHistoryRecord",
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "fields": [
+            {
+              "label": "singular",
+              "name": "cursor",
+              "number": 1,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "limit",
+              "number": 2,
+              "oneof": "",
+              "type": "uint32"
+            }
+          ],
+          "name": "ActivityClaimHistoryReq",
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "fields": [
+            {
+              "label": "singular",
+              "name": "ok",
+              "number": 1,
+              "oneof": "",
+              "type": "bool"
+            },
+            {
+              "label": "singular",
+              "name": "error_code",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "repeated",
+              "name": "records",
+              "number": 3,
+              "oneof": "",
+              "type": "ActivityClaimHistoryRecord"
+            },
+            {
+              "label": "singular",
+              "name": "next_cursor",
+              "number": 4,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "has_more",
+              "number": 5,
+              "oneof": "",
+              "type": "bool"
+            }
+          ],
+          "name": "ActivityClaimHistoryRes",
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "fields": [
+            {
+              "label": "singular",
+              "name": "activity_id",
+              "number": 1,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "version",
+              "number": 2,
+              "oneof": "",
+              "type": "uint32"
+            },
+            {
+              "label": "singular",
               "name": "stage_id",
               "number": 3,
               "oneof": "",
@@ -1906,6 +2048,37 @@
             }
           ],
           "name": "ActivityProgressRes",
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "fields": [
+            {
+              "label": "singular",
+              "name": "reward_type",
+              "number": 1,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "asset_id",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "quantity",
+              "number": 3,
+              "oneof": "",
+              "type": "uint64"
+            }
+          ],
+          "name": "ActivityRewardSummary",
           "reserved": {
             "names": [],
             "numbers": [],

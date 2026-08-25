@@ -1022,6 +1022,39 @@ message ActivityActionRes {
   uint64 state_revision = 10;
 }
 
+// Character-bound append-only activity claim/draw history. The cursor is an
+// opaque server-issued keyset token and must not be constructed by clients.
+message ActivityClaimHistoryReq {
+  string cursor = 1;
+  uint32 limit = 2;
+}
+
+message ActivityRewardSummary {
+  string reward_type = 1;
+  string asset_id = 2;
+  uint64 quantity = 3;
+}
+
+message ActivityClaimHistoryRecord {
+  string activity_id = 1;
+  uint32 version = 2;
+  string activity_type = 3;
+  string action_type = 4;
+  string stage_id = 5;
+  int64 created_at_ms = 6;
+  int64 completed_at_ms = 7;
+  string status = 8;
+  repeated ActivityRewardSummary rewards = 9;
+}
+
+message ActivityClaimHistoryRes {
+  bool ok = 1;
+  string error_code = 2;
+  repeated ActivityClaimHistoryRecord records = 3;
+  string next_cursor = 4;
+  bool has_more = 5;
+}
+
 message DebugCharacterTitleReq {
   string action = 1;
   string title_id = 2;

@@ -6,6 +6,7 @@ import { MESSAGE_TYPE } from "./constants.js";
 import {
   decodeByMessageType,
   encodeActivityActionReq,
+  encodeActivityClaimHistoryReq,
   encodeActivityClaimReq,
   encodeActivityProgressReq
 } from "./messages.js";
@@ -298,6 +299,73 @@ test("activity request encoders include only server-issued routing and opaque re
   for (const forbidden of ["character-1", "account-1", "reward", "weight", "probability", "progress", "token"]) {
     assert.equal(drawBody.includes(Buffer.from(forbidden)), false, `${forbidden} must remain server-owned`);
   }
+});
+
+test("activity history request and response preserve the character-bound paging contract", () => {
+  const request = decodeFieldsWithRepeated(encodeActivityClaimHistoryReq("opaque-cursor", 25));
+  assert.equal(readString(request, 1), "opaque-cursor");
+  assert.equal(readUInt32(request, 2), 25);
+  for (const forbidden of ["character_id", "character-1", "ticket", "reward_snapshot"]) {
+    assert.equal(encodeActivityClaimHistoryReq("opaque-cursor", 25).includes(Buffer.from(forbidden)), false);
+  }
+
+  const reward = Buffer.concat([
+    encodeStringField(1, "item"),
+    encodeStringField(2, "1001"),
+    encodeInt64Field(3, 2)
+  ]);
+  const granted = Buffer.concat([
+    encodeStringField(1, "activity-demo"),
+    encodeUInt32Field(2, 3),
+    encodeStringField(3, "login_reward"),
+    encodeStringField(4, "claim"),
+    encodeStringField(5, "stage-1"),
+    encodeInt64Field(6, 1000),
+    encodeInt64Field(7, 1100),
+    encodeStringField(8, "granted"),
+    encodeMessageField(9, reward)
+  ]);
+  const manualReview = Buffer.concat([
+    encodeStringField(1, "activity-demo"),
+    encodeUInt32Field(2, 3),
+    encodeStringField(4, "draw"),
+    encodeStringField(8, "manual_review")
+  ]);
+  const response = decodeByMessageType(
+    MESSAGE_TYPE.ACTIVITY_CLAIM_HISTORY_RES,
+    Buffer.concat([
+      encodeBoolField(1, true),
+      encodeMessageField(3, granted),
+      encodeMessageField(3, manualReview),
+      encodeStringField(4, "next-cursor"),
+      encodeBoolField(5, true)
+    ])
+  );
+  assert.equal(response.ok, true);
+  assert.equal(response.nextCursor, "next-cursor");
+  assert.equal(response.hasMore, true);
+  assert.equal(response.records.length, 2);
+  assert.deepEqual(response.records[0].rewards, [{ rewardType: "item", assetId: "1001", quantity: 2 }]);
+  assert.deepEqual(response.records[1].rewards, []);
+  assert.equal(response.records[1].status, "manual_review");
+  assert.equal(response.records[1].errorCode, undefined);
+
+  const empty = decodeByMessageType(
+    MESSAGE_TYPE.ACTIVITY_CLAIM_HISTORY_RES,
+    Buffer.concat([encodeBoolField(1, true), encodeBoolField(5, false)])
+  );
+  assert.deepEqual(empty.records, []);
+  assert.equal(empty.hasMore, false);
+
+  const unavailable = decodeByMessageType(
+    MESSAGE_TYPE.ACTIVITY_CLAIM_HISTORY_RES,
+    Buffer.concat([
+      encodeBoolField(1, false),
+      encodeStringField(2, "ACTIVITY_STORAGE_UNAVAILABLE")
+    ])
+  );
+  assert.equal(unavailable.ok, false);
+  assert.equal(unavailable.errorCode, "ACTIVITY_STORAGE_UNAVAILABLE");
 });
 
 test("activity response decoder covers progress and generic action contracts", () => {

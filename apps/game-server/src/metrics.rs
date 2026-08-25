@@ -15,7 +15,7 @@ use tracing::{error, info};
 
 use crate::protocol_version_policy::ClientProtocolVersionMetric;
 
-const ACTIVITY_ACTION_COUNT: usize = 7;
+const ACTIVITY_ACTION_COUNT: usize = 8;
 const ACTIVITY_CACHE_FAILURE_COUNT: usize = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -25,6 +25,7 @@ pub(crate) enum ActivityActionMetric {
     Progress,
     Claim,
     Draw,
+    History,
     GameEntry,
     Unknown,
 }
@@ -36,6 +37,7 @@ impl ActivityActionMetric {
         Self::Progress,
         Self::Claim,
         Self::Draw,
+        Self::History,
         Self::GameEntry,
         Self::Unknown,
     ];
@@ -47,6 +49,7 @@ impl ActivityActionMetric {
             "progress" => Self::Progress,
             "claim" => Self::Claim,
             "draw" => Self::Draw,
+            "history" => Self::History,
             "game_entry" => Self::GameEntry,
             _ => Self::Unknown,
         }
@@ -63,6 +66,7 @@ impl ActivityActionMetric {
             Self::Progress => "progress",
             Self::Claim => "claim",
             Self::Draw => "draw",
+            Self::History => "history",
             Self::GameEntry => "game_entry",
             Self::Unknown => "unknown",
         }

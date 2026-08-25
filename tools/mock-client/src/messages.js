@@ -338,6 +338,13 @@ export function encodeActivityListReq() {
   return Buffer.alloc(0);
 }
 
+export function encodeActivityClaimHistoryReq(cursor = "", limit = 0) {
+  return Buffer.concat([
+    encodeStringField(1, cursor),
+    encodeUInt32Field(2, limit)
+  ]);
+}
+
 export function encodeActivityDetailReq(activityId, version = 0) {
   return Buffer.concat([encodeStringField(1, activityId), encodeUInt32Field(2, version)]);
 }
@@ -644,6 +651,30 @@ function decodeActivitySummary(buffer) {
   };
 }
 
+function decodeActivityRewardSummary(buffer) {
+  const fields = decodeFieldsWithRepeated(buffer);
+  return {
+    rewardType: readString(fields, 1),
+    assetId: readString(fields, 2),
+    quantity: readUInt64(fields, 3)
+  };
+}
+
+function decodeActivityClaimHistoryRecord(buffer) {
+  const fields = decodeFieldsWithRepeated(buffer);
+  return {
+    activityId: readString(fields, 1),
+    version: readUInt32(fields, 2),
+    activityType: readString(fields, 3),
+    actionType: readString(fields, 4),
+    stageId: readString(fields, 5),
+    createdAtMs: readInt64(fields, 6),
+    completedAtMs: readInt64(fields, 7),
+    status: readString(fields, 8),
+    rewards: decodeRepeatedMessage(fields, 9, decodeActivityRewardSummary)
+  };
+}
+
 /**
  * Decode a message body by message type
  * @param {number} messageType
@@ -938,6 +969,14 @@ export function decodeByMessageType(messageType, body) {
         errorCode: readString(fields, 2),
         serverTimeMs: readInt64(fields, 3),
         activities: decodeRepeatedMessage(fields, 4, decodeActivitySummary)
+      };
+    case MESSAGE_TYPE.ACTIVITY_CLAIM_HISTORY_RES:
+      return {
+        ok: readBool(fields, 1),
+        errorCode: readString(fields, 2),
+        records: decodeRepeatedMessage(fields, 3, decodeActivityClaimHistoryRecord),
+        nextCursor: readString(fields, 4),
+        hasMore: readBool(fields, 5)
       };
     case MESSAGE_TYPE.ACTIVITY_DETAIL_RES:
       return {

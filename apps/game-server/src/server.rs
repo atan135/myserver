@@ -1035,7 +1035,11 @@ pub async fn run(
             item_uid_generator.clone(),
             delivery.clone(),
         );
-        let activity_engine = crate::activity::ActivityEngine::postgres(pool.clone(), delivery)
+        let activity_engine = crate::activity::ActivityEngine::postgres(
+            pool.clone(),
+            delivery,
+            config.ticket_secret.as_bytes(),
+        )
             .with_lottery_asset_gateway(Arc::new(lottery_gateway))
             .with_cache_operation_timeout(Duration::from_millis(
                 config.activity_cache_operation_timeout_ms,
@@ -2200,6 +2204,7 @@ async fn dispatch_packet(
         }
         Some(
             MessageType::ActivityListReq
+            | MessageType::ActivityClaimHistoryReq
             | MessageType::ActivityDetailReq
             | MessageType::ActivityProgressReq
             | MessageType::ActivityClaimReq

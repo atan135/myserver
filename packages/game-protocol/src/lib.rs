@@ -69,6 +69,7 @@ message_types! {
     ActivityProgressReq = 1439, ActivityProgressRes = 1440,
     ActivityClaimReq = 1441, ActivityClaimRes = 1442,
     ActivityActionReq = 1443, ActivityActionRes = 1444,
+    ActivityClaimHistoryReq = 1445, ActivityClaimHistoryRes = 1446,
     InventoryUpdatePush = 1501, AttrChangePush = 1502, VisualChangePush = 1503,
     ItemObtainPush = 1504, CharacterElementsChangePush = 1505,
     CharacterTitleChangePush = 1506, CharacterDisciplineChangePush = 1507,
