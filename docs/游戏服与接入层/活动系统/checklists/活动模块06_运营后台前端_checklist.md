@@ -75,3 +75,9 @@
 - [x] 运营可以不改代码完成两种活动创建、预检、发布和下线。（验收：Activities 活动控制面接入列表、草稿、公共编辑器、动态类型表单、预检、发布/下线确认和记录面板；阶段 1-4 测试/build 全部通过。）
 - [x] 公共页面没有登录或抽奖专属规则分支。（验收：Activities 类型选项/标签/模板均来自 `type-registry.js`，公共结构编辑器只通过通用 props/emits 工作；`97a223ad` 收敛动态装配。）
 - [x] 类型表单与同级类型代码文件一一对应。（验收：registry 的 `module()` 分别动态加载 `types/login_reward.ts` 与 `types/lottery.ts`，并装配 `LoginRewardTypeEditor.vue`、`LotteryTypeEditor.vue`；registry/type tests 通过。）
+
+## 补充修复：已发布/已下线版本详情与新草稿
+
+- [x] 已发布和已下线详情展示完整只读快照，而不是只展示 JSON 摘要。（验证：`ActivitySnapshotViewer.vue` 展示公共字段、类型配置、阶段和奖励组；非草稿详情隐藏编辑器和预检操作。）
+- [x] 已发布和已下线版本可从详情创建新草稿，旧版本仍保持不可变。（验证：`Activities.vue` 调用 `createDraftFromPublished`，成功后切换到 draft 编辑器；保存/发布仍受 draft 状态门禁。）
+- [x] 前端构建和活动控制面回归通过。（验证：admin-web build；admin-api activity control tests 覆盖 offline fork。）

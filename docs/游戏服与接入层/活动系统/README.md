@@ -20,7 +20,7 @@
 - `apps/game-server/src/activity/cache.rs` 提供 Redis 版本/活动列表缓存和刷新通知适配器；Redis 不是活动事实源。
 - `apps/game-server/src/activity/types/` 注册 `login_reward` 与 `lottery` 的同级类型处理器；登录周期推进、阶段资格、服务端抽奖选择、次数/消耗和奖励结算已接入 `ActivityEngine`。
 - `packages/activity-contract/` 是 `admin-api` 与 `admin-web` 共用的类型 schema 注册契约；未知类型、动作或 schema 版本会被拒绝。
-- `apps/admin-api/src/activity/` 已提供 PostgreSQL 运营控制面：草稿保存、字段级预检、发布/下线 CAS、已发布版本 fork 新草稿、运行记录查询、Redis 刷新通知、RBAC 和审计；内存 repository 仅用于离线契约测试。
+- `apps/admin-api/src/activity/` 已提供 PostgreSQL 运营控制面：草稿保存、字段级预检、发布/下线 CAS、已发布或已下线版本 fork 新草稿、运行记录查询、Redis 刷新通知、RBAC 和审计；内存 repository 仅用于离线契约测试。
 - 玩家 TCP 协议已登记并路由 `1435-1446`，覆盖列表、详情、进度、阶段领取、通用动作和当前角色历史领取记录；玩家身份、资格、概率、奖励和进度均来自服务端可信上下文。历史记录使用 PostgreSQL `activity_claim_record` 的 character-bound keyset 查询，游标由 ticket secret HMAC 绑定角色。
 - `apps/game-server/src/metrics.rs` 按固定动作集合上报请求、成功、资格失败、重复、限流、发奖延迟、恢复 backlog 和缓存刷新失败，活动历史查询计入固定 `history` 维度。字段名由固定枚举生成，不接收角色、账号、活动、请求、领奖、token 或版本值作为维度。
 

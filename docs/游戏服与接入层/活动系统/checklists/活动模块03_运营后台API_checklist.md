@@ -9,7 +9,7 @@
 ## 基础原则
 
 - [x] 发布、下线和配置修改记录管理员、原因、版本和配置摘要。（验证：`ActivityAuditSink` 记录 actor/action/reason/version/result 最小摘要；控制器注入 `req.admin.sub`）
-- [x] 已发布版本不可直接编辑，编辑产生新草稿。（验证：PATCH 返回 `ACTIVITY_PUBLISHED_IMMUTABLE`；`POST /:activityId/drafts` 通过 source CAS fork 新 draft）
+- [x] 已发布和已下线版本不可直接编辑，编辑产生新草稿。（验证：PATCH 返回 `ACTIVITY_PUBLISHED_IMMUTABLE`；`POST /:activityId/drafts` 通过 source CAS 从发布/下线版本 fork 新 draft）
 - [x] 类型配置通过同一 types/ 目录中的独立类型文件注册 validator。（验证：`packages/activity-contract` 与 `apps/admin-api/src/activity-types.js` 共享 registry validator，unknown type/schema 测试通过）
 
 ## 引用文档
@@ -37,7 +37,7 @@
 
 - 开始时间：2026-08-21 15:22:11 +08:00
 - 结束时间：2026-08-21 15:34:28 +08:00
-- 开发总结：新增可替换活动控制领域 service/repository/notifier 边界和离线 adapter；生产仍绑定 unavailable provider。支持字段级预检、不可变发布快照、CAS/etag、已发布版本 fork 新草稿、重复发布/下线拒绝及缓存刷新失败不回滚。
+- 开发总结：新增可替换活动控制领域 service/repository/notifier 边界和离线 adapter；生产仍绑定 unavailable provider。支持字段级预检、不可变发布快照、CAS/etag、已发布/已下线版本 fork 新草稿、重复发布/下线拒绝及缓存刷新失败不回滚。
 - 验证记录：`node --test --test-concurrency=1 src/activity/activity.controller.test.js src/activity/activity-control.service.test.js src/activity-types.test.js src/auth/roles.guard.test.js`（16/16 通过）；`npx tsc --noEmit -p apps/admin-api/tsconfig.json` 通过；`git diff --check` 通过。
 
 - [x] 实现草稿保存和发布前公共校验。（验证：`ActivityControlDomainService` 的 `validateDraft` 与 create/update/preflight/publish 测试覆盖时间窗、时区、阶段和奖励组引用）

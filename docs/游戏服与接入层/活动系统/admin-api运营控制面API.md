@@ -10,7 +10,7 @@
 | GET | `/api/v1/activities/:activityId` | `activities.read` | 活动详情和当前版本摘要 |
 | POST | `/api/v1/activities/drafts` | `activities.write` | 创建草稿 |
 | PATCH | `/api/v1/activities/:activityId/drafts` | `activities.write` | 更新未发布草稿，支持 `ifMatch` |
-| POST | `/api/v1/activities/:activityId/drafts` | `activities.write` | 从当前已发布版本 fork 新草稿 |
+| POST | `/api/v1/activities/:activityId/drafts` | `activities.write` | 从当前已发布或已下线版本 fork 新草稿 |
 | POST | `/api/v1/activities/:activityId/preflight` | `activities.publish` | 发布前校验，返回字段级错误 |
 | POST | `/api/v1/activities/:activityId/publish` | `activities.publish` | 发布不可变版本 |
 | POST | `/api/v1/activities/:activityId/offline` | `activities.offline` | 下线当前发布版本 |
@@ -22,7 +22,7 @@
 
 - 草稿更新使用 `ifMatch`（ETag 或 revision），旧值返回 `409 ACTIVITY_VERSION_CONFLICT`。
 - 已发布版本不可通过 PATCH 修改，返回 `409 ACTIVITY_PUBLISHED_IMMUTABLE`。
-- 从发布版本创建新草稿的请求必须包含 `sourceVersion`、`ifMatch`、`reason` 和 `overrides` 对象；身份字段不可覆盖，旧 source CAS 返回 409。
+- 从发布或下线版本创建新草稿的请求必须包含 `sourceVersion`、`ifMatch`、`reason` 和 `overrides` 对象；身份字段不可覆盖，旧 source CAS 返回 409。
 - 重复发布返回 `409 ACTIVITY_ALREADY_PUBLISHED`；重复下线返回 `409 ACTIVITY_ALREADY_OFFLINE`。
 - 发布版本快照不可变；下线不删除历史事实。
 
@@ -61,7 +61,7 @@ Nest 应用通过 `/api/docs` 暴露 OpenAPI 文档。DTO 和 controller 的字�
 - 所有接口都需要管理员 JWT：`Authorization: Bearer <ADMIN_JWT>`。JWT 的获取属于 admin-api 认证流程，不把密码写入活动配置或脚本日志。
 - 当前控制器会拒绝未知字段。请求对象中不要附带 `requestId`、`actorId`、`createdBy` 等未列入白名单的字段；`actorId` 由 JWT 中的 `sub`/`username` 注入。
 - JSON 对象最大 64 KiB，最大嵌套深度为 8。时间使用可被 `Date.parse` 解析的 ISO-8601 字符串，建议统一使用带 `Z` 的 UTC 时间。
-- 发布版本不可变。修改已发布活动必须先 fork 新草稿；不要尝试 PATCH 已发布版本。
+- 发布版本不可变。修改已发布或已下线活动必须先 fork 新草稿；不要尝试 PATCH 已发布版本。
 - `ifMatch` 支持详情返回的弱 ETag（例如 `W/"activity/<id>/<revision>"`）或详情返回的数字 `revision`。推荐原样传 ETag。
 - 失败响应不是业务成功：调用方必须检查 HTTP 状态和响应中的 `ok`/`error`，不能仅检查 HTTP 请求是否发出。
 
@@ -140,11 +140,11 @@ PostgreSQL 适配器会把请求中的 `rewardGroups` 规范化后，以 `public
 | `ifMatch` | string | 发布/下线时实际必需；预检建议携带 | 详情返回的 `etag` 或 `revision`。发布和下线会用它做 CAS；预检当前主要校验 `version`，但携带同一值可以让自动化请求保持一致。 |
 | `reason` | string | 是 | 预检、发布或下线原因，写入审计。 |
 
-从已发布版本 fork 新草稿时，请求体不同：
+从已发布或已下线版本 fork 新草稿时，请求体不同：
 
 | 字段 | 类型 | 必填 | 含义 |
 | --- | --- | --- | --- |
-| `sourceVersion` | positive integer | 是 | 要复制的当前已发布版本。 |
+| `sourceVersion` | positive integer | 是 | 要复制的当前发布/下线版本。 |
 | `ifMatch` | string | 推荐/并发时必需 | 当前活动详情的 ETag/revision。 |
 | `reason` | string | 是 | fork 原因。新草稿会把它写入版本变更原因。 |
 | `overrides` | object | 是 | 对发布快照的浅层字段覆盖。不能包含 `activityId`、`key`、`activityType`；需要修改嵌套对象时提交完整的新对象，避免误解为深 merge。 |
@@ -262,7 +262,7 @@ PostgreSQL 适配器会把请求中的 `rewardGroups` 规范化后，以 `public
 }
 ```
 
-详情中的 `snapshot` 是当前已发布的不可变快照；`draft` 是当前可编辑版本。活动处于 `draft` 时通常只有 `draft`，发布后通常只有 `snapshot`。`configDigest` 是服务端对规范化公共配置和类型配置计算的 SHA-256 摘要，不应由自动化程序自行重算后作为身份依据。
+详情中的 `snapshot` 是当前已发布或已下线的不可变快照；`draft` 是当前可编辑版本。活动处于 `draft` 时通常只有 `draft`，发布或下线后通常只有 `snapshot`。控制台应将没有 `draft` 的详情按只读快照展示。`configDigest` 是服务端对规范化公共配置和类型配置计算的 SHA-256 摘要，不应由自动化程序自行重算后作为身份依据。
 
 列表成功响应为 `{ "ok": true, "items": [...], "total": 1, "limit": 50, "offset": 0, "audit": { "status": "sent" } }`；列表项是摘要，不保证含完整 `draft`/`snapshot`，需要详情时调用 GET。
 
@@ -503,9 +503,9 @@ curl -sS -X POST "$BASE/api/v1/activities/$ACTIVITY_ID/offline" \
 
 下线不会删除配置、玩家状态、领取记录、抽奖记录或奖励流水。响应状态为 `offline`，并带有 `offlineReason`；下线后的活动不能再领取，即使 `claimDeadline` 尚未到达。
 
-### 8. 修改已发布活动：fork 新草稿并发布新版本
+### 8. 修改已发布或已下线活动：fork 新草稿并发布新版本
 
-已发布版本不能 PATCH。以下示例把第 3 天奖励从 `item_id=1003` 改为 `item_id=2001`，同时把奖池/奖励内容作为完整嵌套对象覆盖：
+已发布或已下线版本不能 PATCH，也不能直接恢复上线。以下示例把第 3 天奖励从 `item_id=1003` 改为 `item_id=2001`，同时把奖池/奖励内容作为完整嵌套对象覆盖：
 
 ```bash
 curl -sS -X POST "$BASE/api/v1/activities/$ACTIVITY_ID/drafts" \
