@@ -13,15 +13,15 @@ use crate::route_store::{
     RolloutDrainStatus, RolloutEndSummary, RolloutSessionState, RoomRouteRecord,
 };
 
-mod audit;
 mod assertion;
+mod audit;
 mod auth;
 mod http;
 mod query;
 mod route_handlers;
 
-pub use audit::{AdminAuditConfig, AdminAuditLogger};
 pub(crate) use assertion::AdminAssertionVerifier;
+pub use audit::{AdminAuditConfig, AdminAuditLogger};
 pub use auth::AdminAuthConfig;
 
 #[cfg(test)]
@@ -32,7 +32,10 @@ use audit::{
 };
 #[cfg(test)]
 use auth::{AdminPermission, authorize, authorize_method, is_authorized};
-use auth::{admin_route_requirement, assertion_route_requirement, authorize_route, fallback_route_requirement};
+use auth::{
+    admin_route_requirement, assertion_route_requirement, authorize_route,
+    fallback_route_requirement,
+};
 use http::{http_response, split_path_and_query, write_json, write_json_status, write_plain};
 use query::{required, required_identifier};
 use route_handlers::{handle_character_route_upsert, handle_room_route_upsert, handle_switch};
@@ -187,7 +190,9 @@ async fn handle_connection(
                 return Ok(());
             }
         }
-    } else if let Err((status, body)) = authorize_route(&request, route_requirement, auth_config.as_ref()) {
+    } else if let Err((status, body)) =
+        authorize_route(&request, route_requirement, auth_config.as_ref())
+    {
         let response = http_response(status, "text/plain; charset=utf-8", body.to_string());
         socket.write_all(response.as_bytes()).await?;
         return Ok(());

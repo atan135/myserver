@@ -239,8 +239,8 @@ impl Config {
                     .to_string(),
             );
         }
-        let admin_assertion_max_ttl_ms = parse_u64("ADMIN_ASSERTION_MAX_TTL_MS", 60_000)
-            .clamp(1_000, 300_000);
+        let admin_assertion_max_ttl_ms =
+            parse_u64("ADMIN_ASSERTION_MAX_TTL_MS", 60_000).clamp(1_000, 300_000);
         let admin_audit_enabled = parse_bool("PROXY_ADMIN_AUDIT_ENABLED", true);
         let admin_audit_path = env::var("PROXY_ADMIN_AUDIT_PATH")
             .map(|value| value.trim().to_string())

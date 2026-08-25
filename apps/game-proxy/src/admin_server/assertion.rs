@@ -90,7 +90,9 @@ impl AdminAssertionVerifier {
     ) -> Self {
         let public_keys = public_keys
             .iter()
-            .filter_map(|(key_id, encoded)| decode_public_key(encoded).map(|key| (key_id.clone(), key)))
+            .filter_map(|(key_id, encoded)| {
+                decode_public_key(encoded).map(|key| (key_id.clone(), key))
+            })
             .collect();
         Self {
             issuer,
@@ -146,7 +148,10 @@ impl AdminAssertionVerifier {
             return Err(AdminAssertionError::Expired);
         }
         if assertion.issued_at_ms > now.saturating_add(5_000)
-            || assertion.expires_at_ms.saturating_sub(assertion.issued_at_ms) > self.max_ttl_ms
+            || assertion
+                .expires_at_ms
+                .saturating_sub(assertion.issued_at_ms)
+                > self.max_ttl_ms
         {
             return Err(AdminAssertionError::Expired);
         }
@@ -166,21 +171,31 @@ impl AdminAssertionVerifier {
             actor: assertion.actor_id,
             actor_missing: false,
             method: method.to_string(),
-            path: request_target.split_once('?').map(|(path, _)| path).unwrap_or(request_target).to_string(),
+            path: request_target
+                .split_once('?')
+                .map(|(path, _)| path)
+                .unwrap_or(request_target)
+                .to_string(),
         })
     }
 
-    fn verify_signature(&self, assertion: &AdminOperationAssertion) -> Result<(), AdminAssertionError> {
+    fn verify_signature(
+        &self,
+        assertion: &AdminOperationAssertion,
+    ) -> Result<(), AdminAssertionError> {
         let key = self
             .public_keys
             .get(&assertion.key_id)
             .ok_or(AdminAssertionError::Unauthenticated)?;
-        let signature_bytes = decode_base64url(&assertion.signature)
-            .ok_or(AdminAssertionError::Unauthenticated)?;
+        let signature_bytes =
+            decode_base64url(&assertion.signature).ok_or(AdminAssertionError::Unauthenticated)?;
         let signature = Signature::from_slice(&signature_bytes)
             .map_err(|_| AdminAssertionError::Unauthenticated)?;
-        key.verify(canonical_assertion_payload(assertion).as_bytes(), &signature)
-            .map_err(|_| AdminAssertionError::Unauthenticated)
+        key.verify(
+            canonical_assertion_payload(assertion).as_bytes(),
+            &signature,
+        )
+        .map_err(|_| AdminAssertionError::Unauthenticated)
     }
 
     fn reserve_request(
@@ -188,7 +203,10 @@ impl AdminAssertionVerifier {
         assertion: &AdminOperationAssertion,
         now: i64,
     ) -> Result<(), AdminAssertionError> {
-        let mut cache = self.replay_cache.lock().map_err(|_| AdminAssertionError::Unauthenticated)?;
+        let mut cache = self
+            .replay_cache
+            .lock()
+            .map_err(|_| AdminAssertionError::Unauthenticated)?;
         cache.retain(|_, entry| entry.expires_at_ms > now);
         if let Some(existing) = cache.get(&assertion.request_id) {
             return if existing.payload_sha256 == assertion.payload_sha256 {
@@ -238,12 +256,28 @@ fn verify_target_and_scope(
     service: &str,
     instance_id: &str,
 ) -> Result<(), AdminAssertionError> {
-    let target = assertion.target.as_object().ok_or(AdminAssertionError::TargetDenied)?;
-    let target_service = target.get("service").and_then(Value::as_str).unwrap_or_default();
-    let target_instance = target.get("instanceId").and_then(Value::as_str).unwrap_or_default();
-    let target_type = target.get("targetType").and_then(Value::as_str).unwrap_or_default();
-    let target_world = target.get("worldId").and_then(Value::as_str).unwrap_or_default();
-    let target_ids = string_array(target.get("targetIds")).ok_or(AdminAssertionError::TargetDenied)?;
+    let target = assertion
+        .target
+        .as_object()
+        .ok_or(AdminAssertionError::TargetDenied)?;
+    let target_service = target
+        .get("service")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let target_instance = target
+        .get("instanceId")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let target_type = target
+        .get("targetType")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let target_world = target
+        .get("worldId")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let target_ids =
+        string_array(target.get("targetIds")).ok_or(AdminAssertionError::TargetDenied)?;
     if target_service != service
         || target_instance != instance_id
         || target_type != expected_target_type
@@ -252,7 +286,10 @@ fn verify_target_and_scope(
     {
         return Err(AdminAssertionError::TargetDenied);
     }
-    let scope = assertion.scope.as_object().ok_or(AdminAssertionError::TargetDenied)?;
+    let scope = assertion
+        .scope
+        .as_object()
+        .ok_or(AdminAssertionError::TargetDenied)?;
     let matches_scope = scope_allows(scope, "worldIds", &[target_world])
         && scope_allows(scope, "serviceNames", &[target_service])
         && scope_allows(scope, "instanceIds", &[target_instance])
@@ -313,7 +350,11 @@ fn canonical_json(value: &Value) -> String {
         Value::String(value) => json_string(value),
         Value::Array(values) => format!(
             "[{}]",
-            values.iter().map(canonical_json).collect::<Vec<_>>().join(",")
+            values
+                .iter()
+                .map(canonical_json)
+                .collect::<Vec<_>>()
+                .join(",")
         ),
         Value::Object(values) => {
             let mut entries = values.iter().collect::<Vec<_>>();

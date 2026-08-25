@@ -1,4 +1,4 @@
-use service_registry::{ServiceEndpoint, ServiceInstance, SERVICE_INSTANCE_SCHEMA_VERSION};
+use service_registry::{SERVICE_INSTANCE_SCHEMA_VERSION, ServiceEndpoint, ServiceInstance};
 
 fn endpoint<'a>(instance: &'a ServiceInstance, name: &str) -> Option<&'a ServiceEndpoint> {
     instance

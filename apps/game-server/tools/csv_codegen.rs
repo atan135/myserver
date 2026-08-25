@@ -357,21 +357,15 @@ impl CsvField {
             CsvType::Int => format!("reader.parse_i32({}, {:?})?", index, self.original_name),
             CsvType::Int64 => format!("reader.parse_i64({}, {:?})?", index, self.original_name),
             CsvType::Float => format!("reader.parse_f32({}, {:?})?", index, self.original_name),
-            CsvType::String => self.loader_call_expr(
-                "parse_string_key",
-                index,
-                &["&mut string_pool"],
-            ),
-            CsvType::Array(ScalarType::String) => self.loader_call_expr(
-                "parse_string_array",
-                index,
-                &["&mut string_pool"],
-            ),
-            CsvType::Dict(ScalarType::String, ScalarType::Int) => self.loader_call_expr(
-                "parse_string_int_dict",
-                index,
-                &["&mut string_pool"],
-            ),
+            CsvType::String => {
+                self.loader_call_expr("parse_string_key", index, &["&mut string_pool"])
+            }
+            CsvType::Array(ScalarType::String) => {
+                self.loader_call_expr("parse_string_array", index, &["&mut string_pool"])
+            }
+            CsvType::Dict(ScalarType::String, ScalarType::Int) => {
+                self.loader_call_expr("parse_string_int_dict", index, &["&mut string_pool"])
+            }
             _ => format!(
                 "unimplemented!(\"loader for field {}\")",
                 self.original_name
@@ -522,7 +516,9 @@ fn render_table(table: &CsvTable, out: &mut String) {
     out.push_str("            let columns = crate::config_table::parse_csv_columns(trimmed);\n");
     out.push_str("            if columns.len() != header_columns.len() {\n");
     out.push_str("                return Err(CsvLoadError::InvalidRow(format!(\n");
-    out.push_str("                    \"table {} row {} column count mismatch: expected {}, got {}\",\n");
+    out.push_str(
+        "                    \"table {} row {} column count mismatch: expected {}, got {}\",\n",
+    );
     out.push_str("                    Self::TABLE_NAME,\n");
     out.push_str("                    row_offset + 3,\n");
     out.push_str("                    header_columns.len(),\n");

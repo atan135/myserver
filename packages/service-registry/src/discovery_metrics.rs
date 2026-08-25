@@ -115,9 +115,7 @@ fn discovery_metric_kind(source: &str, reason: &str) -> Option<&'static str> {
     }
     match reason {
         "discovered" if source == "registry" => Some("discovery_success"),
-        "registry_error" | "registry_disabled" | "fallback_forbidden" => {
-            Some("discovery_failure")
-        }
+        "registry_error" | "registry_disabled" | "fallback_forbidden" => Some("discovery_failure"),
         "no_healthy_instance" => Some("no_healthy_instance"),
         "endpoint_missing" => Some("endpoint_missing"),
         _ => None,

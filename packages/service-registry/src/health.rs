@@ -151,12 +151,10 @@ fn parse_seconds(
     let Some(value) = value else {
         return Ok(default_secs);
     };
-    let seconds = value
-        .parse::<u64>()
-        .map_err(|_| HealthConfigError {
-            variable,
-            reason: "must be an unsigned integer number of seconds",
-        })?;
+    let seconds = value.parse::<u64>().map_err(|_| HealthConfigError {
+        variable,
+        reason: "must be an unsigned integer number of seconds",
+    })?;
     if seconds == 0 {
         return Err(HealthConfigError {
             variable,
@@ -172,10 +170,7 @@ fn parse_seconds(
     Ok(seconds)
 }
 
-fn seconds_to_millis(
-    variable: &'static str,
-    seconds: u64,
-) -> Result<u64, HealthConfigError> {
+fn seconds_to_millis(variable: &'static str, seconds: u64) -> Result<u64, HealthConfigError> {
     seconds.checked_mul(1_000).ok_or(HealthConfigError {
         variable,
         reason: "overflows millisecond representation",
@@ -524,8 +519,8 @@ impl HealthState {
             false
         } else {
             let ready_since = *inner.required_ready_since_ms.get_or_insert(now_ms);
-            let stable = now_ms.saturating_sub(ready_since)
-                >= inner.config.ready_stability_window_ms;
+            let stable =
+                now_ms.saturating_sub(ready_since) >= inner.config.ready_stability_window_ms;
             if stable {
                 inner.ever_ready = true;
                 inner.state = if optional_degraded {
@@ -586,9 +581,7 @@ impl HealthState {
         let dependencies = inner
             .dependencies
             .values()
-            .map(|record| {
-                effective_dependency(record, &inner.config, now_ms)
-            })
+            .map(|record| effective_dependency(record, &inner.config, now_ms))
             .collect();
         HealthSnapshot {
             service: inner.service.clone(),
@@ -724,21 +717,9 @@ mod tests {
             "lookup",
             StartupErrorCode::RegistryUnavailable,
         );
-        state.mark_failed(
-            "local-runtime",
-            "worker-lease",
-            StartupErrorCode::LeaseLost,
-        );
-        state.mark_failed(
-            "local-socket",
-            "bind",
-            StartupErrorCode::SocketConflict,
-        );
-        state.mark_failed(
-            "bootstrap",
-            "phase",
-            StartupErrorCode::StartupPhaseFailure,
-        );
+        state.mark_failed("local-runtime", "worker-lease", StartupErrorCode::LeaseLost);
+        state.mark_failed("local-socket", "bind", StartupErrorCode::SocketConflict);
+        state.mark_failed("bootstrap", "phase", StartupErrorCode::StartupPhaseFailure);
         clock.advance(100);
 
         let snapshot = state.snapshot();
@@ -783,11 +764,7 @@ mod tests {
         clock.advance(10);
         assert!(state.snapshot().ready);
 
-        state.mark_pending(
-            "match-service",
-            "grpc",
-            StartupErrorCode::DependencyPending,
-        );
+        state.mark_pending("match-service", "grpc", StartupErrorCode::DependencyPending);
         assert_eq!(
             state.snapshot().dependencies[0].error_code,
             Some(StartupErrorCode::DependencyPending)
@@ -812,11 +789,7 @@ mod tests {
         assert!(state.snapshot().ready);
         clock.advance(100);
 
-        state.mark_pending(
-            "match-service",
-            "grpc",
-            StartupErrorCode::DependencyPending,
-        );
+        state.mark_pending("match-service", "grpc", StartupErrorCode::DependencyPending);
         let snapshot = state.snapshot();
         assert_eq!(
             snapshot.dependencies[0].error_code,
@@ -855,7 +828,10 @@ mod tests {
         let stale = state.snapshot();
         assert!(!stale.ready);
         assert_eq!(stale.state, StartupState::Degraded);
-        assert_eq!(stale.dependencies[0].error_code, Some(StartupErrorCode::DependencyTimeout));
+        assert_eq!(
+            stale.dependencies[0].error_code,
+            Some(StartupErrorCode::DependencyTimeout)
+        );
 
         state.mark_ready("match-service", "grpc");
         clock.advance(10);
@@ -866,7 +842,15 @@ mod tests {
     fn serialized_snapshot_contains_no_connection_or_credential_fields() {
         let (state, _) = state(vec![DependencySpec::required("match-service", "grpc")]);
         let json = serde_json::to_string(&state.snapshot()).unwrap();
-        for forbidden in ["url", "host", "port", "socket", "token", "password", "error_message"] {
+        for forbidden in [
+            "url",
+            "host",
+            "port",
+            "socket",
+            "token",
+            "password",
+            "error_message",
+        ] {
             assert!(!json.contains(forbidden));
         }
     }
@@ -882,53 +866,25 @@ mod tests {
                     .then(|| invalid.to_string()))
             })
             .unwrap_err();
-            assert_eq!(
-                error.variable,
-                "MYSERVER_STARTUP_CONVERGENCE_WINDOW_SECS"
-            );
+            assert_eq!(error.variable, "MYSERVER_STARTUP_CONVERGENCE_WINDOW_SECS");
         }
-        assert!(
-            seconds_to_millis(
-                "MYSERVER_STARTUP_CONVERGENCE_WINDOW_SECS",
-                u64::MAX
-            )
-            .is_err()
-        );
+        assert!(seconds_to_millis("MYSERVER_STARTUP_CONVERGENCE_WINDOW_SECS", u64::MAX).is_err());
     }
 
     #[test]
     fn strict_config_rejects_unsafe_window_relationships() {
         let values = BTreeMap::from([
-            (
-                "MYSERVER_STARTUP_CONVERGENCE_WINDOW_SECS",
-                "10".to_string(),
-            ),
-            (
-                "MYSERVER_READY_STABILITY_WINDOW_SECS",
-                "11".to_string(),
-            ),
-            (
-                "MYSERVER_DEPENDENCY_STALE_WINDOW_SECS",
-                "12".to_string(),
-            ),
+            ("MYSERVER_STARTUP_CONVERGENCE_WINDOW_SECS", "10".to_string()),
+            ("MYSERVER_READY_STABILITY_WINDOW_SECS", "11".to_string()),
+            ("MYSERVER_DEPENDENCY_STALE_WINDOW_SECS", "12".to_string()),
         ]);
-        assert!(
-            HealthConfig::try_from_values(|name| Ok(values.get(name).cloned())).is_err()
-        );
+        assert!(HealthConfig::try_from_values(|name| Ok(values.get(name).cloned())).is_err());
 
         let values = BTreeMap::from([
-            (
-                "MYSERVER_READY_STABILITY_WINDOW_SECS",
-                "60".to_string(),
-            ),
-            (
-                "MYSERVER_DEPENDENCY_STALE_WINDOW_SECS",
-                "60".to_string(),
-            ),
+            ("MYSERVER_READY_STABILITY_WINDOW_SECS", "60".to_string()),
+            ("MYSERVER_DEPENDENCY_STALE_WINDOW_SECS", "60".to_string()),
         ]);
-        assert!(
-            HealthConfig::try_from_values(|name| Ok(values.get(name).cloned())).is_err()
-        );
+        assert!(HealthConfig::try_from_values(|name| Ok(values.get(name).cloned())).is_err());
     }
 
     #[test]
