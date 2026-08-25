@@ -12,7 +12,7 @@ if (-not $rustfmt) {
 }
 
 $csvCodeRoot = (Resolve-Path "$projectRoot\apps\game-server\src\csv_code").Path
-$rustFiles = Get-ChildItem -Path "$projectRoot\apps", "$projectRoot\packages" -Recurse -File -Filter "*.rs" |
+$rustFiles = Get-ChildItem -Path "$projectRoot\apps", "$projectRoot\packages", "$projectRoot\tools" -Recurse -File -Filter "*.rs" |
     Where-Object {
         $fullPath = $_.FullName
         if ($fullPath -match "\\target\\" -or $fullPath -match "\\.tmp\\") {
