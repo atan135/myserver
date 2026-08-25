@@ -4,7 +4,7 @@ use crate::pb::{
     MatchCancelReq, MatchCancelRes, MatchEventPush, MatchEventStreamReq, MatchEventStreamRes,
     MatchStartReq, MatchStartRes, MatchStatusReq, MatchStatusRes,
 };
-use crate::protocol::{encode_body, MessageType, Packet};
+use crate::protocol::{MessageType, Packet, encode_body};
 
 fn identity(connection: &ConnectionContext, seq: u32) -> Result<String, std::io::Error> {
     connection

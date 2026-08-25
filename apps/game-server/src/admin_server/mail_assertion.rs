@@ -89,8 +89,8 @@ impl MailGrantAssertionVerifier {
     }
 
     pub(super) fn parse(&self, body: &[u8]) -> Result<MailGrantAssertion, MailGrantAssertionError> {
-        let assertion: MailGrantAssertion = serde_json::from_slice(body)
-            .map_err(|_| MailGrantAssertionError::Unauthenticated)?;
+        let assertion: MailGrantAssertion =
+            serde_json::from_slice(body).map_err(|_| MailGrantAssertionError::Unauthenticated)?;
         if ![
             &assertion.operation_id,
             &assertion.request_id,
@@ -183,13 +183,21 @@ impl MailGrantAssertionVerifier {
         if assertion.expires_at_ms <= now
             || assertion.expires_at_ms <= assertion.issued_at_ms
             || assertion.issued_at_ms > now.saturating_add(5_000)
-            || assertion.expires_at_ms.saturating_sub(assertion.issued_at_ms) > self.max_ttl_ms
+            || assertion
+                .expires_at_ms
+                .saturating_sub(assertion.issued_at_ms)
+                > self.max_ttl_ms
         {
             return Err(MailGrantAssertionError::Expired);
         }
-        let key = self.public_keys.get(&assertion.key_id).ok_or(MailGrantAssertionError::Unauthenticated)?;
-        let signature = Signature::from_slice(&decode_b64(&assertion.signature).ok_or(MailGrantAssertionError::Unauthenticated)?)
-            .map_err(|_| MailGrantAssertionError::Unauthenticated)?;
+        let key = self
+            .public_keys
+            .get(&assertion.key_id)
+            .ok_or(MailGrantAssertionError::Unauthenticated)?;
+        let signature = Signature::from_slice(
+            &decode_b64(&assertion.signature).ok_or(MailGrantAssertionError::Unauthenticated)?,
+        )
+        .map_err(|_| MailGrantAssertionError::Unauthenticated)?;
         key.verify(canonical(assertion).as_bytes(), &signature)
             .map_err(|_| MailGrantAssertionError::Unauthenticated)?;
         if payload_hash(&packet.body) != assertion.payload_sha256 {
@@ -203,7 +211,10 @@ impl MailGrantAssertionVerifier {
         assertion: &MailGrantAssertion,
     ) -> Result<(), MailGrantAssertionError> {
         let now = unix_ms();
-        let mut seen = self.seen.lock().map_err(|_| MailGrantAssertionError::Unauthenticated)?;
+        let mut seen = self
+            .seen
+            .lock()
+            .map_err(|_| MailGrantAssertionError::Unauthenticated)?;
         seen.retain(|_, entry| entry.expires_at_ms > now);
         if let Some(existing) = seen.get(&assertion.operation_id) {
             return if existing.payload_sha256 == assertion.payload_sha256 {
@@ -227,34 +238,67 @@ impl MailGrantAssertionVerifier {
 }
 
 fn mail_context(instance: &str) -> AdminAuthContext {
-    AdminAuthContext { actor: format!("mail-service.{}", instance), actor_missing: false }
+    AdminAuthContext {
+        actor: format!("mail-service.{}", instance),
+        actor_missing: false,
+    }
 }
 
 fn canonical(value: &MailGrantAssertion) -> String {
     let fields = [
-        value.version.to_string(), json(&value.operation_id), json(&value.request_id), json(&value.mail_id),
-        json(&value.character_id), json(&value.attachment_fingerprint), json(&value.issuer), json(&value.key_id),
-        json(&value.service), json(&value.service_instance_id), json(&value.target_service), json(&value.target_instance_id),
-        value.issued_at_ms.to_string(), value.expires_at_ms.to_string(), json(&value.payload_sha256),
+        value.version.to_string(),
+        json(&value.operation_id),
+        json(&value.request_id),
+        json(&value.mail_id),
+        json(&value.character_id),
+        json(&value.attachment_fingerprint),
+        json(&value.issuer),
+        json(&value.key_id),
+        json(&value.service),
+        json(&value.service_instance_id),
+        json(&value.target_service),
+        json(&value.target_instance_id),
+        value.issued_at_ms.to_string(),
+        value.expires_at_ms.to_string(),
+        json(&value.payload_sha256),
     ];
     format!("[{}]", fields.join(","))
 }
 
-fn json(value: &str) -> String { serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_string()) }
-fn payload_hash(payload: &[u8]) -> String { base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(Sha256::digest(payload)) }
-fn decode_b64(value: &str) -> Option<Vec<u8>> {
-    base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(value)
-        .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(value))
-        .or_else(|_| base64::engine::general_purpose::STANDARD.decode(value)).ok()
+fn json(value: &str) -> String {
+    serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_string())
 }
-fn decode_public_key(value: &str) -> Option<VerifyingKey> { VerifyingKey::from_bytes(&decode_b64(value)?.try_into().ok()?).ok() }
+fn payload_hash(payload: &[u8]) -> String {
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(Sha256::digest(payload))
+}
+fn decode_b64(value: &str) -> Option<Vec<u8>> {
+    base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(value)
+        .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(value))
+        .or_else(|_| base64::engine::general_purpose::STANDARD.decode(value))
+        .ok()
+}
+fn decode_public_key(value: &str) -> Option<VerifyingKey> {
+    VerifyingKey::from_bytes(&decode_b64(value)?.try_into().ok()?).ok()
+}
 fn attachment_fingerprint(value: &str) -> bool {
     value.len() == 71
         && value.starts_with("sha256:")
         && value[7..].bytes().all(|byte| byte.is_ascii_hexdigit())
 }
-fn identifier(value: &str) -> bool { !value.is_empty() && value.len() <= MAX_IDENTIFIER_LEN && value.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'@' | b'-')) }
-fn unix_ms() -> i64 { SystemTime::now().duration_since(UNIX_EPOCH).map(|value| value.as_millis() as i64).unwrap_or_default() }
+fn identifier(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_IDENTIFIER_LEN
+        && value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'@' | b'-')
+        })
+}
+fn unix_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|value| value.as_millis() as i64)
+        .unwrap_or_default()
+}
 
 #[cfg(test)]
 mod tests {
@@ -275,11 +319,7 @@ mod tests {
         )
     }
 
-    fn grant_payload(
-        character_id: &str,
-        fingerprint: &str,
-        source: &str,
-    ) -> Vec<u8> {
+    fn grant_payload(character_id: &str, fingerprint: &str, source: &str) -> Vec<u8> {
         format!(
             r#"{{"requestId":"mail_claim:mail-1","mailId":"mail-1","characterId":"{character_id}","requestFingerprint":"{fingerprint}","source":"{source}"}}"#
         )
@@ -310,12 +350,18 @@ mod tests {
             payload_sha256: payload_hash(payload),
             signature: String::new(),
         };
-        assertion.signature = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .encode(signing_key.sign(canonical(&assertion).as_bytes()).to_bytes());
+        assertion.signature = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
+            signing_key
+                .sign(canonical(&assertion).as_bytes())
+                .to_bytes(),
+        );
         assertion
     }
 
-    fn fixture(payload: &[u8], fingerprint: &str) -> (MailGrantAssertionVerifier, SigningKey, MailGrantAssertion) {
+    fn fixture(
+        payload: &[u8],
+        fingerprint: &str,
+    ) -> (MailGrantAssertionVerifier, SigningKey, MailGrantAssertion) {
         let signing_key = SigningKey::from_bytes(&[23u8; 32]);
         let public_key = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .encode(signing_key.verifying_key().as_bytes());
@@ -353,34 +399,54 @@ mod tests {
         let mut wrong_issuer = assertion.clone();
         wrong_issuer.issuer = "admin-api".to_string();
         assert_eq!(
-            verifier.verify_grant(&wrong_issuer, &packet(MessageType::MailAttachmentGrantReq, &payload), "game-server-1"),
+            verifier.verify_grant(
+                &wrong_issuer,
+                &packet(MessageType::MailAttachmentGrantReq, &payload),
+                "game-server-1"
+            ),
             Err(MailGrantAssertionError::Unauthenticated)
         );
 
         let mut wrong_key = assertion.clone();
         wrong_key.key_id = "admin-api-v1".to_string();
         assert_eq!(
-            verifier.verify_grant(&wrong_key, &packet(MessageType::MailAttachmentGrantReq, &payload), "game-server-1"),
+            verifier.verify_grant(
+                &wrong_key,
+                &packet(MessageType::MailAttachmentGrantReq, &payload),
+                "game-server-1"
+            ),
             Err(MailGrantAssertionError::Unauthenticated)
         );
 
         let mut expired = assertion.clone();
         expired.expires_at_ms = unix_ms() - 1;
         assert_eq!(
-            verifier.verify_grant(&expired, &packet(MessageType::MailAttachmentGrantReq, &payload), "game-server-1"),
+            verifier.verify_grant(
+                &expired,
+                &packet(MessageType::MailAttachmentGrantReq, &payload),
+                "game-server-1"
+            ),
             Err(MailGrantAssertionError::Expired)
         );
 
         let tampered_payload = grant_payload("chr-2", &fingerprint, "mail-claim");
         assert_eq!(
-            verifier.verify_grant(&assertion, &packet(MessageType::MailAttachmentGrantReq, &tampered_payload), "game-server-1"),
+            verifier.verify_grant(
+                &assertion,
+                &packet(MessageType::MailAttachmentGrantReq, &tampered_payload),
+                "game-server-1"
+            ),
             Err(MailGrantAssertionError::PayloadMismatch)
         );
 
         let invalid_workflow = grant_payload("chr-1", &fingerprint, "gm-emergency-correction");
         let invalid_assertion = signed_assertion(&signing_key, &invalid_workflow, &fingerprint);
         assert_eq!(
-            verifier.verify_grant(&invalid_assertion, &packet(MessageType::MailAttachmentGrantReq, &invalid_workflow), "game-server-1"),
+            verifier.verify_grant(
+                &invalid_assertion,
+                &packet(MessageType::MailAttachmentGrantReq, &invalid_workflow),
+                "game-server-1"
+            ),
             Err(MailGrantAssertionError::WorkflowMismatch)
         );
     }
@@ -392,7 +458,9 @@ mod tests {
         let (verifier, signing_key, assertion) = fixture(&payload, &fingerprint);
         let grant_packet = packet(MessageType::MailAttachmentGrantReq, &payload);
 
-        verifier.verify_grant(&assertion, &grant_packet, "game-server-1").unwrap();
+        verifier
+            .verify_grant(&assertion, &grant_packet, "game-server-1")
+            .unwrap();
         assert_eq!(
             verifier.verify_grant(&assertion, &grant_packet, "game-server-1"),
             Err(MailGrantAssertionError::Replay)
@@ -400,15 +468,19 @@ mod tests {
 
         let mut retry_assertion = assertion.clone();
         retry_assertion.operation_id = "mail-op-2".to_string();
-        retry_assertion.signature = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .encode(signing_key.sign(canonical(&retry_assertion).as_bytes()).to_bytes());
+        retry_assertion.signature = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
+            signing_key
+                .sign(canonical(&retry_assertion).as_bytes())
+                .to_bytes(),
+        );
         verifier
             .verify_grant(&retry_assertion, &grant_packet, "game-server-1")
             .unwrap();
 
         let conflicting_fingerprint = format!("sha256:{}", "d".repeat(64));
         let conflicting_payload = grant_payload("chr-1", &conflicting_fingerprint, "mail-claim");
-        let conflicting_assertion = signed_assertion(&signing_key, &conflicting_payload, &conflicting_fingerprint);
+        let conflicting_assertion =
+            signed_assertion(&signing_key, &conflicting_payload, &conflicting_fingerprint);
         assert_eq!(
             verifier.verify_grant(
                 &conflicting_assertion,

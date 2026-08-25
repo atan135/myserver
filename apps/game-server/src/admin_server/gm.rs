@@ -19,8 +19,8 @@ use crate::core::global_id::ItemUidGenerator;
 use crate::core::inventory::Item;
 use crate::core::online_route::validate_online_route_authority;
 use crate::core::player::PlayerManager;
-use crate::core::player::db_player_store::{GrantRecord, GrantRecordLookup};
 use crate::core::player::db_player_store::AssetLedgerContext;
+use crate::core::player::db_player_store::{GrantRecord, GrantRecordLookup};
 use crate::core::player::grant_contract::{
     GrantItemIntent, GrantResultSummary, compute_grant_fingerprint, normalize_grant_items,
 };

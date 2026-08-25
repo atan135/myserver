@@ -198,21 +198,22 @@ impl RoomManager {
         }
 
         let force_snapshot_for_frame_replay = room.policy_id == "lockstep_sim_demo";
-        let snapshot = if force_snapshot_for_frame_replay || waiting_frame_id % snapshot_interval == 0 {
-            room.last_snapshot_frame = waiting_frame_id;
-            if !force_snapshot_for_frame_replay {
-                info!(
-                    room_id = %room_id,
-                    frame_id = waiting_frame_id,
-                    snapshot_interval = snapshot_interval,
-                    ">>> SNAPSHOT GENERATED at frame {} <<<",
-                    waiting_frame_id
-                );
-            }
-            Some(room.snapshot())
-        } else {
-            None
-        };
+        let snapshot =
+            if force_snapshot_for_frame_replay || waiting_frame_id % snapshot_interval == 0 {
+                room.last_snapshot_frame = waiting_frame_id;
+                if !force_snapshot_for_frame_replay {
+                    info!(
+                        room_id = %room_id,
+                        frame_id = waiting_frame_id,
+                        snapshot_interval = snapshot_interval,
+                        ">>> SNAPSHOT GENERATED at frame {} <<<",
+                        waiting_frame_id
+                    );
+                }
+                Some(room.snapshot())
+            } else {
+                None
+            };
 
         let is_silent_frame = tick_inputs.iter().all(|input| input.action.is_empty());
         if !tick_inputs.is_empty() {

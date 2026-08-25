@@ -3,13 +3,13 @@
 //! GameServer 通过此客户端调用 MatchService 的内部接口
 
 use service_registry::{
-    record_discovery_metric, spawn_convergence, ConvergenceAttempt, ConvergenceConfig,
-    ConvergenceTask, HealthState, RegistryClient, StartupErrorCode,
+    ConvergenceAttempt, ConvergenceConfig, ConvergenceTask, HealthState, RegistryClient,
+    StartupErrorCode, record_discovery_metric, spawn_convergence,
 };
 use std::error::Error;
 use std::future::Future;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::sync::Mutex;
 use tonic::transport::Channel;

@@ -522,12 +522,14 @@ async fn lockstep_sim_demo_rejoin_reconnect_and_observer_snapshots_are_recoverab
             .iter()
             .all(|binding| binding["characterId"] != OBSERVER_1)
     );
-    assert!(observer
-        .snapshot
-        .members
-        .iter()
-        .any(|member| member.character_id == OBSERVER_1
-            && member.role == crate::pb::MemberRole::Observer as i32));
+    assert!(
+        observer
+            .snapshot
+            .members
+            .iter()
+            .any(|member| member.character_id == OBSERVER_1
+                && member.role == crate::pb::MemberRole::Observer as i32)
+    );
 
     let observer_input = manager
         .accept_player_input(

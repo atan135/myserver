@@ -635,9 +635,9 @@ fn validate_json_value(value: &serde_json::Value, depth: usize) -> Result<(), &'
 
 fn contains_json_key(value: &serde_json::Value, needle: &str) -> bool {
     match value {
-        serde_json::Value::Array(values) => values
-            .iter()
-            .any(|value| contains_json_key(value, needle)),
+        serde_json::Value::Array(values) => {
+            values.iter().any(|value| contains_json_key(value, needle))
+        }
         serde_json::Value::Object(values) => values
             .iter()
             .any(|(key, value)| key == needle || contains_json_key(value, needle)),
@@ -737,7 +737,9 @@ mod tests {
         });
         state.entities.push(entity);
 
-        let json = state.to_json().expect("npc transfer state should serialize");
+        let json = state
+            .to_json()
+            .expect("npc transfer state should serialize");
         assert!(json.contains("targetCharacterId"));
         assert!(!json.contains("targetPlayerId"));
 

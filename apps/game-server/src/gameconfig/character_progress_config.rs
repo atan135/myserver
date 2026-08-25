@@ -3,11 +3,11 @@ use std::collections::BTreeSet;
 use serde_json::Value;
 
 use crate::config_table::CsvLoadError;
+use crate::core::reward_source::RewardSource;
 use crate::csv_code::characterprogresstable::CharacterProgressTable;
 use crate::csv_code::disciplinetable::DisciplineTable;
 use crate::csv_code::itemtable::ItemTable;
 use crate::csv_code::titletable::TitleTable;
-use crate::core::reward_source::RewardSource;
 
 const VALID_SOURCE_TYPES: &[&str] = &[
     "task",
@@ -65,8 +65,9 @@ pub fn validate_character_progress_table(
         if source_id.trim().is_empty() {
             return invalid_row(csv_row, "SourceId must not be empty");
         }
-        RewardSource::from_character_progress(&source_type, source_id)
-            .map_err(|error| invalid_row_value(csv_row, format!("invalid reward source: {error}")))?;
+        RewardSource::from_character_progress(&source_type, source_id).map_err(|error| {
+            invalid_row_value(csv_row, format!("invalid reward source: {error}"))
+        })?;
 
         let conditions = parse_json_field(progress_table, row.conditions, csv_row, "Conditions")?;
         validate_condition_value(

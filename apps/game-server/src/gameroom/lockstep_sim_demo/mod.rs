@@ -337,11 +337,8 @@ impl RoomLogic for LockstepSimDemoLogic {
                     .cloned()
                     .filter(|value| !value.is_null())
                     .and_then(|value| serde_json::from_value::<SimFrameEnvelope>(value).ok());
-                self.last_event_count = self
-                    .last_frame
-                    .as_ref()
-                    .map(frame_event_count)
-                    .unwrap_or(0);
+                self.last_event_count =
+                    self.last_frame.as_ref().map(frame_event_count).unwrap_or(0);
                 self.last_error = None;
             }
             Err(error) => {
@@ -515,10 +512,12 @@ mod tests {
             started["initialSnapshot"]["stateHash"]
         );
         assert_eq!(started["observerFrame"]["lastEventCount"], 0);
-        assert!(started["observerFrame"]["lastEventSummaries"]
-            .as_array()
-            .unwrap()
-            .is_empty());
+        assert!(
+            started["observerFrame"]["lastEventSummaries"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
         assert!(started["observerFrame"]["lastFrame"].is_null());
         assert_eq!(started["tickRate"], DEFAULT_LOCKSTEP_SIM_TICK_RATE);
         assert_eq!(
@@ -581,18 +580,30 @@ mod tests {
                 .as_str()
                 .is_some_and(|hex| hex.len() == 16)
         );
-        assert_eq!(advanced["lastStateHash"], advanced["lastFrame"]["stateHash"]);
+        assert_eq!(
+            advanced["lastStateHash"],
+            advanced["lastFrame"]["stateHash"]
+        );
         assert_eq!(advanced["lastFrame"]["eventCount"], 0);
-        assert!(advanced["lastFrame"]["eventSummaries"]
-            .as_array()
-            .unwrap()
-            .is_empty());
-        assert!(advanced["lastEventSummaries"].as_array().unwrap().is_empty());
+        assert!(
+            advanced["lastFrame"]["eventSummaries"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            advanced["lastEventSummaries"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
         assert_eq!(advanced["observerFrame"]["lastEventCount"], 0);
-        assert!(advanced["observerFrame"]["lastEventSummaries"]
-            .as_array()
-            .unwrap()
-            .is_empty());
+        assert!(
+            advanced["observerFrame"]["lastEventSummaries"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
         assert_eq!(advanced["lastFrame"]["debugSummary"]["inputCount"], 0);
         assert_eq!(advanced["lastFrame"]["debugSummary"]["eventCount"], 0);
         assert_eq!(advanced["lastFrame"]["debugState"]["schemaVersion"], 1);
@@ -649,7 +660,10 @@ mod tests {
         assert_eq!(attacked["trainingTarget"]["hp"], 136);
         assert_eq!(attacked["lastEventCount"], 2);
         assert_eq!(attacked["lastFrame"]["frame"], 2);
-        assert_eq!(attacked["lastStateHash"], attacked["lastFrame"]["stateHash"]);
+        assert_eq!(
+            attacked["lastStateHash"],
+            attacked["lastFrame"]["stateHash"]
+        );
         assert_eq!(attacked["lastFrame"]["eventCount"], 2);
         assert_eq!(attacked["lastFrame"]["events"].as_array().unwrap().len(), 2);
         assert_eq!(
@@ -659,8 +673,14 @@ mod tests {
                 .len(),
             2
         );
-        assert_eq!(attacked["lastFrame"]["eventSummaries"][0]["kind"], "skillCast");
-        assert_eq!(attacked["lastFrame"]["eventSummaries"][0]["schemaVersion"], 1);
+        assert_eq!(
+            attacked["lastFrame"]["eventSummaries"][0]["kind"],
+            "skillCast"
+        );
+        assert_eq!(
+            attacked["lastFrame"]["eventSummaries"][0]["schemaVersion"],
+            1
+        );
         assert_eq!(
             attacked["lastFrame"]["eventSummaries"][0]["sourceEntityId"],
             1000
@@ -705,7 +725,10 @@ mod tests {
             attacked["lastFrame"]["debugState"]["entities"][1]["entityId"],
             TRAINING_TARGET_ENTITY_ID
         );
-        assert_eq!(attacked["lastFrame"]["debugState"]["entities"][1]["hp"], 136);
+        assert_eq!(
+            attacked["lastFrame"]["debugState"]["entities"][1]["hp"],
+            136
+        );
         assert!(
             attacked["lastFrame"]["debugState"]["entities"][1]["alive"]
                 .as_bool()
@@ -737,10 +760,12 @@ mod tests {
         assert_eq!(stopped["lastFrame"]["frame"], 3);
         assert_eq!(stopped["lastFrame"]["events"].as_array().unwrap().len(), 0);
         assert_eq!(stopped["lastFrame"]["eventCount"], 0);
-        assert!(stopped["lastFrame"]["eventSummaries"]
-            .as_array()
-            .unwrap()
-            .is_empty());
+        assert!(
+            stopped["lastFrame"]["eventSummaries"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
         assert_eq!(stopped["lastEventCount"], 0);
         assert_eq!(
             stopped["lastFrame"]["stateHash"],
@@ -1171,13 +1196,19 @@ mod tests {
         );
 
         let movement_state = serde_json::from_str::<serde_json::Value>(
-            &factory.create("movement_demo").unwrap().get_serialized_state(),
+            &factory
+                .create("movement_demo")
+                .unwrap()
+                .get_serialized_state(),
         )
         .unwrap();
         assert!(movement_state.get("scene_id").is_some());
 
         let combat_state = serde_json::from_str::<serde_json::Value>(
-            &factory.create("combat_demo").unwrap().get_serialized_state(),
+            &factory
+                .create("combat_demo")
+                .unwrap()
+                .get_serialized_state(),
         )
         .unwrap();
         assert!(combat_state.get("snapshot").is_some());
