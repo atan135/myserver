@@ -53,6 +53,7 @@
     "check:proto": "node tools/check-proto.js",
     "check:proto:server": "node tools/proto-compatibility-baseline.js --check && node tools/proto-generate.js --check --server-only && node tools/check-proto-breaking-changes.js --check && node tools/check-protocol-routing-consistency.js && node tools/check-proto-compatibility-fixtures.js",
     "fmt:rust": "powershell -ExecutionPolicy Bypass -File scripts/rustfmt-non-generated.ps1",
+    "fmt:rust:check": "powershell -ExecutionPolicy Bypass -File scripts/rustfmt-non-generated.ps1 -Check",
     "global-id:decode": "node tools/global-id-decode.js",
     "db": "node tools/db.js",
     "db:status": "node tools/db.js status",

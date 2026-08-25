@@ -1,3 +1,8 @@
+[CmdletBinding()]
+param(
+    [switch]$Check
+)
+
 $ErrorActionPreference = "Stop"
 
 $projectRoot = Resolve-Path "$PSScriptRoot\.."
@@ -20,11 +25,36 @@ $rustFiles = Get-ChildItem -Path "$projectRoot\apps", "$projectRoot\packages" -R
         -not (($head -join "`n") -match "@generated")
     }
 
+if ($Check) {
+    Write-Host "Checking $($rustFiles.Count) Rust files; generated Rust outputs are skipped."
+} else {
+    Write-Host "Formatting $($rustFiles.Count) Rust files; generated Rust outputs are skipped."
+}
+
+$failedFiles = @()
 foreach ($file in $rustFiles) {
-    & $rustfmt.Source --edition 2024 $file.FullName
+    $rustfmtArguments = @("--edition", "2024")
+    if ($Check) {
+        $rustfmtArguments += "--check"
+    }
+    $rustfmtArguments += $file.FullName
+
+    & $rustfmt.Source @rustfmtArguments
     if ($LASTEXITCODE -ne 0) {
+        if ($Check) {
+            $failedFiles += $file.FullName
+            continue
+        }
         throw "rustfmt failed for $($file.FullName)"
     }
 }
 
-Write-Host "Formatted $($rustFiles.Count) Rust files; skipped generated Rust outputs."
+if ($Check -and $failedFiles.Count -gt 0) {
+    throw "rustfmt check failed for $($failedFiles.Count) file(s): $($failedFiles -join ', ')"
+}
+
+if ($Check) {
+    Write-Host "Rust format check passed; skipped generated Rust outputs."
+} else {
+    Write-Host "Formatted $($rustFiles.Count) Rust files; skipped generated Rust outputs."
+}
