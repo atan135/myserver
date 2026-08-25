@@ -170,7 +170,7 @@ test("game database deployment gate admits and probes all activity migrations", 
   assert.ok(deployGate.databases.game.keyTables.includes("public.activity"));
   for (const service of deployGate.databases.game.services) {
     assert.ok(
-      service.maximumMigrationVersion >= "20260822150000",
+      service.maximumMigrationVersion >= "20260825120000",
       `${service.name} must admit the latest activity migration`
     );
   }

@@ -10,9 +10,9 @@
     },
     "game": {
       "file": "db/schema/targets/game.json",
-      "version": "20260822150000",
-      "description": "add activity control metadata",
-      "checksum": "a6776d83854f37fdc4c67b0a74421001798f081a3b47f6685b5366c50737d09b42f95c107876613471ca5f96b8c31c88"
+      "version": "20260825120000",
+      "description": "add activity claim history index",
+      "checksum": "f218c200f2243d0bf236571de3bd5688c10fbde5d9982c3507cdd796bbca1274dc3dddd143229aaae164159940f4a51b"
     },
     "chat": {
       "file": "db/schema/targets/chat.json",

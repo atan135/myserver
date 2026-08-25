@@ -2,11 +2,11 @@
   "schema": 1,
   "database": "game",
   "migration": {
-    "version": "20260822150000",
-    "description": "add activity control metadata",
-    "checksum": "a6776d83854f37fdc4c67b0a74421001798f081a3b47f6685b5366c50737d09b42f95c107876613471ca5f96b8c31c88"
+    "version": "20260825120000",
+    "description": "add activity claim history index",
+    "checksum": "f218c200f2243d0bf236571de3bd5688c10fbde5d9982c3507cdd796bbca1274dc3dddd143229aaae164159940f4a51b"
   },
-  "catalog_sha256": "10b088401fe46211633a60caec02f5160341fcfe5c54800dad4556875e600ded",
+  "catalog_sha256": "41a70a3ccb5a037827683ee3df5fed21d2b196c14f55ea00446c91c334000ae1",
   "objects": [
     [
       "column",
@@ -2482,6 +2482,11 @@
       "index",
       "public.idx_activity_audit_actor",
       "87b18a85692847af7e50db537d22a1f64f7552a6ea14c6dff7c8f7562a9e6849"
+    ],
+    [
+      "index",
+      "public.idx_activity_claim_history_owner",
+      "0e6f7b4d4da44aa115511c92e0a1604fb3f1013635fe68323eb908bca249e983"
     ],
     [
       "index",
