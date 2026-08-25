@@ -402,6 +402,20 @@ impl PlayerViewBuilder for LotteryHandler {
         let state = player_state
             .and_then(|value| serde_json::from_value::<LotteryState>(value.type_state.clone()).ok())
             .unwrap_or_default();
+        let state = if state.pool_version != Some(config.pool_version) {
+            let mut initial = state;
+            initial.pool_version = Some(config.pool_version);
+            initial.free_draws_remaining = config.free_draw_count;
+            initial.daily_draw_count = 0;
+            initial.total_draw_count = 0;
+            initial.last_draw_period_key = None;
+            initial.draw_request_id = None;
+            initial.result_item_id = None;
+            initial.result_state = None;
+            initial
+        } else {
+            state
+        };
         Ok(
             json!({"type": activity.activity_type.as_str(), "schema_version": self.schema_version(), "draw_source": config.draw_source, "pool_version": config.pool_version, "free_draw_count": config.free_draw_count, "daily_draw_limit": config.daily_draw_limit, "total_draw_limit": config.total_draw_limit, "pool_total_weight": config.pool_items.iter().map(|item| item.weight).sum::<u64>(), "state": state, "contract_only": true}),
         )
@@ -463,6 +477,8 @@ mod tests {
             .build_player_view(&activity, &version, None)
             .unwrap();
         assert_eq!(view["pool_total_weight"], 10);
+        assert_eq!(view["state"]["pool_version"], 3);
+        assert_eq!(view["state"]["free_draws_remaining"], 2);
         assert_eq!(view["contract_only"], true);
     }
 
