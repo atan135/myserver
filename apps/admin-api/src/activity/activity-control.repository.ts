@@ -381,8 +381,8 @@ export class PostgresActivityControlRepository implements ActivityControlReposit
   async createDraftFromPublished(activityId: string, command: Record<string, unknown>): Promise<unknown> {
     await this.transaction(async (client) => {
       const row = await this.lockActivity(client, activityId);
-      if (row.status !== "published") {
-        throw new ActivityControlError("ACTIVITY_INVALID_STATE", "only published activities can create a new draft");
+      if (!new Set(["published", "offline"]).has(row.status)) {
+        throw new ActivityControlError("ACTIVITY_INVALID_STATE", "only published or offline activities can create a new draft");
       }
       const sourceVersion = Number(command.sourceVersion);
       if (sourceVersion !== Number(row.current_version)) {

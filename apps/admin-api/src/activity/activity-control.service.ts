@@ -276,7 +276,7 @@ export class InMemoryActivityControlRepository implements ActivityControlReposit
 
   async createDraftFromPublished(activityId: string, command: Record<string, unknown>): Promise<any> {
     const item = requireActivity(this.state, activityId);
-    if (item.status !== "published") throw new ActivityControlError("ACTIVITY_INVALID_STATE", "only published activities can create a new draft");
+    if (!new Set(["published", "offline"]).has(item.status)) throw new ActivityControlError("ACTIVITY_INVALID_STATE", "only published or offline activities can create a new draft");
     const sourceVersion = Number(command.sourceVersion);
     if (sourceVersion !== item.currentVersion || !expectedMatches(item, command.ifMatch)) throw new ActivityControlError("ACTIVITY_VERSION_CONFLICT", "published source version is stale");
     const source = item.versions.get(sourceVersion);
@@ -513,7 +513,7 @@ export class ActivityControlDomainService implements ActivityControlService {
   async createDraftFromPublished(activityId: string, command: Record<string, unknown>): Promise<unknown> {
     try {
       const detail: any = await this.repository.detail(activityId);
-      if (detail?.status !== "published") throw new ActivityControlError("ACTIVITY_INVALID_STATE", "only published activities can create a new draft");
+      if (!new Set(["published", "offline"]).has(detail?.status)) throw new ActivityControlError("ACTIVITY_INVALID_STATE", "only published or offline activities can create a new draft");
       const source = detail?.snapshot as Record<string, unknown> | undefined;
       if (!source) throw new ActivityControlError("ACTIVITY_NOT_FOUND", "published source version was not found");
       const overrides = command.overrides && typeof command.overrides === "object" && !Array.isArray(command.overrides) ? command.overrides as Record<string, unknown> : {};

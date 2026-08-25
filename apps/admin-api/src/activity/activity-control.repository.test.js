@@ -406,6 +406,23 @@ test("published snapshots can fork a schedule-only draft without requiring a new
   assert.match(migration, /CREATE INDEX IF NOT EXISTS idx_activity_version_digest/);
 });
 
+test("offline snapshots can fork a new draft while retaining the published source", async () => {
+  const pool = new ActivityPool();
+  const repository = new PostgresActivityControlRepository(pool);
+  const created = await repository.createDraft(draft());
+  const published = await repository.publish(created.activityId, {
+    version: 1, ifMatch: created.etag, reason: "publish", actorId: "admin-1"
+  });
+  const offline = await repository.offline(created.activityId, { version: 1, ifMatch: published.etag, reason: "planned end" });
+  const forked = await repository.createDraftFromPublished(created.activityId, {
+    sourceVersion: 1, ifMatch: offline.etag, reason: "new schedule", overrides: {}
+  });
+  assert.equal(forked.status, "draft");
+  assert.equal(forked.version, 2);
+  assert.equal(forked.sourceSnapshot.publicConfig.title, "Summer");
+  assert.equal(forked.draft.reason, "new schedule");
+});
+
 test("records map manual review and claim rows without exposing raw request ids", async () => {
   const pool = new ActivityPool();
   const repository = new PostgresActivityControlRepository(pool);

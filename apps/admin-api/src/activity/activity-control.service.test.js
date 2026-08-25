@@ -284,6 +284,21 @@ test("published snapshot can only be forked into a new draft with source CAS", a
   );
 });
 
+test("offline snapshot can be forked into a new draft without reopening the old version", async () => {
+  const repository = new InMemoryActivityControlRepository();
+  const service = new ActivityControlDomainService(repository);
+  await service.createDraft(draft({ activityId: "activity-offline-fork" }));
+  const published = await service.publish("activity-offline-fork", { version: 1, reason: "publish" });
+  const offline = await service.offline("activity-offline-fork", { version: 1, ifMatch: published.etag, reason: "planned end" });
+  const forked = await service.createDraftFromPublished("activity-offline-fork", {
+    sourceVersion: 1, ifMatch: offline.etag, reason: "new schedule", overrides: {}
+  });
+  assert.equal(forked.status, "draft");
+  assert.equal(forked.version, 2);
+  assert.deepEqual(forked.sourceSnapshot.publicConfig, published.snapshot.publicConfig);
+  assert.equal(forked.draft.reason, "new schedule");
+});
+
 test("records are append-only read views with activity/version/character/status/time/request filters", async () => {
   const repository = new InMemoryActivityControlRepository();
   const service = new ActivityControlDomainService(repository);
