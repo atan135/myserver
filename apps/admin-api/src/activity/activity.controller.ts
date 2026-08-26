@@ -1,11 +1,11 @@
-import { Body, Controller, Get, Inject, Param, Patch, Post, Query, Req, UseGuards } from "@nestjs/common";
+import { Body, Controller, Get, Inject, Optional, Param, Patch, Post, Query, Req, UseGuards } from "@nestjs/common";
 import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from "@nestjs/swagger";
 import { createActivityTypeRegistry, validateActivityTypeConfig } from "../activity-types.js";
 import { JwtAuthGuard } from "../auth/jwt-auth.guard.js";
 import { AdminPolicyGuard } from "../auth/admin-policy.guard.js";
 import { Permissions, PolicyScopeResolver } from "../auth/roles.decorator.js";
 import { ApiHttpException, badRequest } from "../common/http-exception.js";
-import { ADMIN_ACTIVITY_CONTROL } from "../tokens.js";
+import { ADMIN_ACTIVITY_CONTROL, ADMIN_HIGH_RISK_OPERATIONS } from "../tokens.js";
 import { assertActivityDraftShape, assertJsonObject, assertStrictJson } from "./activity.dto.js";
 import { ActivityControlError } from "./activity-control.service.js";
 import type { ActivityControlService } from "./activity-control.service.js";
@@ -14,6 +14,7 @@ const DRAFT_FIELDS = ["key", "activityType", "schemaVersion", "startAt", "endAt"
 const UPDATE_DRAFT_FIELDS = [...DRAFT_FIELDS, "ifMatch"] as const;
 const NEW_DRAFT_FIELDS = ["sourceVersion", "ifMatch", "reason", "overrides"] as const;
 const VERSION_FIELDS = ["version", "ifMatch", "reason"] as const;
+const HIGH_RISK_VERSION_FIELDS = [...VERSION_FIELDS, "requestId", "request_id", "preflightNonce", "preflight_nonce", "preflightSummarySha256", "preflight_summary_sha256", "backupReference", "backup_reference"] as const;
 
 function activityPolicyScope(request: any) {
   const activityId = typeof request?.params?.activityId === "string" && request.params.activityId.trim()
@@ -55,7 +56,10 @@ function actorCommand(command: Record<string, unknown>, request: any): Record<st
 @Controller("/api/v1/activities")
 export class ActivityController {
   private readonly schemas = createActivityTypeRegistry();
-  constructor(@Inject(ADMIN_ACTIVITY_CONTROL) private readonly service: ActivityControlService) {}
+  constructor(
+    @Inject(ADMIN_ACTIVITY_CONTROL) private readonly service: ActivityControlService,
+    @Optional() @Inject(ADMIN_HIGH_RISK_OPERATIONS) private readonly highRiskOperations?: any
+  ) {}
 
   @Get()
   @ApiOperation({ summary: "List activity control-plane records" })
@@ -120,7 +124,7 @@ export class ActivityController {
   @Permissions("activities.publish")
   @PolicyScopeResolver(activityPolicyScope)
   async publish(@Param("activityId") activityId: string, @Body() body: any, @Req() request?: any) {
-    return this.invoke(() => this.service.publish(text(activityId, "activityId"), actorCommand(this.versionCommand(body), request)));
+    return this.highRisk("activities.publish", "publish", activityId, body, request);
   }
 
   @Post(":activityId/offline")
@@ -129,7 +133,7 @@ export class ActivityController {
   @Permissions("activities.offline")
   @PolicyScopeResolver(activityPolicyScope)
   async offline(@Param("activityId") activityId: string, @Body() body: any, @Req() request?: any) {
-    return this.invoke(() => this.service.offline(text(activityId, "activityId"), actorCommand(this.versionCommand(body), request)));
+    return this.highRisk("activities.offline", "offline", activityId, body, request);
   }
 
   @Get(":activityId/records")
@@ -187,6 +191,77 @@ export class ActivityController {
     } catch (error: any) { throw this.contractError(error); }
   }
 
+  private async highRisk(permission: "activities.publish" | "activities.offline", action: "publish" | "offline", rawActivityId: string, body: any, request?: any) {
+    const activityId = text(rawActivityId, "activityId");
+    const command = this.highRiskVersionCommand(body);
+    const activityCommand = actorCommand({
+      ...command,
+      requestId: body?.requestId ?? body?.request_id
+    }, request);
+    if (typeof this.highRiskOperations?.run !== "function") {
+      throw new ApiHttpException(503, {
+        ok: false,
+        error: "ADMIN_OPERATION_SERVICE_UNAVAILABLE",
+        message: "High-risk operation service is unavailable"
+      });
+    }
+    const hasExecutionProof = Boolean(
+      (body?.preflightNonce ?? body?.preflight_nonce) &&
+      (body?.preflightSummarySha256 ?? body?.preflight_summary_sha256)
+    );
+    let businessPreflight: any = null;
+    if (!hasExecutionProof) {
+      businessPreflight = await this.invoke(() => this.service.preflight(activityId, activityCommand));
+      if (businessPreflight?.valid !== true) {
+        throw new ApiHttpException(422, {
+          ok: false,
+          error: "ACTIVITY_PRECHECK_FAILED",
+          message: "activity cannot be published",
+          details: businessPreflight?.errors || []
+        });
+      }
+    }
+    return this.invokeHighRisk(() => this.highRiskOperations.run({
+      request,
+      permission,
+      scope: activityPolicyScope({ params: { activityId } }),
+      targetSummary: { targetType: "activity", targetIds: [activityId], activityId, version: command.version },
+      payload: { action, activityId, version: command.version, ifMatch: command.ifMatch || null },
+      impactSummary: {
+        action: `activity_${action}`,
+        activityId,
+        version: command.version,
+        targetType: "activity",
+        targetCount: 1,
+        businessPreflight: businessPreflight
+          ? { valid: businessPreflight.valid === true, errors: Array.isArray(businessPreflight.errors) ? businessPreflight.errors : [] }
+          : { valid: true, errors: [] }
+      },
+      reason: command.reason,
+      execute: () => action === "publish"
+        ? this.service.publish(activityId, activityCommand)
+        : this.service.offline(activityId, activityCommand),
+      resultSummary: (result: any) => ({
+        action: `activity_${action}`,
+        activityId,
+        version: Number(result?.version ?? command.version),
+        status: result?.status || (action === "publish" ? "published" : "offline"),
+        notification: result?.notification?.status || "unknown"
+      })
+    }));
+  }
+
+  private highRiskVersionCommand(body: any) {
+    try {
+      assertStrictJson(body, HIGH_RISK_VERSION_FIELDS);
+      return this.versionCommand({
+        version: body?.version,
+        ifMatch: body?.ifMatch,
+        reason: body?.reason
+      });
+    } catch (error: any) { throw this.contractError(error); }
+  }
+
   private newDraftCommand(body: any) {
     try {
       assertStrictJson(body, NEW_DRAFT_FIELDS);
@@ -217,11 +292,22 @@ export class ActivityController {
       if (error instanceof ActivityControlError) {
         const status = error.code === "ACTIVITY_NOT_FOUND" ? 404
           : error.code === "ACTIVITY_PRECHECK_FAILED" ? 422
+            : error.code === "ACTIVITY_AUDIT_UNAVAILABLE" ? 503
             : error.code.startsWith("ACTIVITY_VERSION_CONFLICT") || error.code.startsWith("ACTIVITY_ALREADY_") || error.code === "ACTIVITY_INVALID_STATE" || error.code === "ACTIVITY_PUBLISHED_IMMUTABLE" ? 409
               : 400;
         throw new ApiHttpException(status, { ok: false, error: error.code, message: error.message, details: error.details });
       }
       throw error;
+    }
+  }
+
+  private async invokeHighRisk(operation: () => Promise<any>) {
+    try {
+      const outcome = await operation();
+      return outcome?.state === "executed" ? { ok: true, ...(outcome.result as object) } : outcome?.response;
+    } catch (error: any) {
+      if (error instanceof ApiHttpException) throw error;
+      return this.invoke(async () => { throw error; });
     }
   }
 }

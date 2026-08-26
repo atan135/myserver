@@ -44,6 +44,7 @@ export interface ActivityAuditEvent {
   action: "draft_created" | "draft_updated" | "draft_forked" | "preflight" | "published" | "offlined" | "records_read";
   activityId?: string;
   actorId: string;
+  requestId?: string;
   reason?: string;
   version?: number;
   result: "success" | "failure";
@@ -565,7 +566,7 @@ export class ActivityControlDomainService implements ActivityControlService {
       let notification: Record<string, unknown> = { status: "sent" };
       try { await this.notifier.notify({ activityId, version: Number(result.version), action: "published", digest: typeof result.configDigest === "string" ? result.configDigest : undefined }); }
       catch (error: any) { notification = { status: "failed", error: String(error?.message || "refresh notification failed") }; }
-      return this.withAudit({ ...result, notification }, { action: "published", activityId, actorId: String(command.actorId || "admin-api"), reason: String(command.reason), version: Number(result.version) });
+      return this.withAudit({ ...result, notification }, { action: "published", activityId, actorId: String(command.actorId || "admin-api"), requestId: command.requestId ? String(command.requestId) : undefined, reason: String(command.reason), version: Number(result.version) }, true);
     } catch (error: any) {
       await this.auditFailure("published", { ...command, activityId }, error);
       throw error;
@@ -578,7 +579,7 @@ export class ActivityControlDomainService implements ActivityControlService {
       let notification: Record<string, unknown> = { status: "sent" };
       try { await this.notifier.notify({ activityId, version: Number(result.version), action: "offline", digest: typeof result.configDigest === "string" ? result.configDigest : undefined }); }
       catch (error: any) { notification = { status: "failed", error: String(error?.message || "refresh notification failed") }; }
-      return this.withAudit({ ...result, notification }, { action: "offlined", activityId, actorId: String(command.actorId || "admin-api"), reason: String(command.reason), version: Number(result.version) });
+      return this.withAudit({ ...result, notification }, { action: "offlined", activityId, actorId: String(command.actorId || "admin-api"), requestId: command.requestId ? String(command.requestId) : undefined, reason: String(command.reason), version: Number(result.version) }, true);
     } catch (error: any) {
       await this.auditFailure("offlined", { ...command, activityId }, error);
       throw error;
@@ -590,11 +591,19 @@ export class ActivityControlDomainService implements ActivityControlService {
       .catch(async (error) => { await this.auditFailure("records_read", { ...query, activityId, actorId: query.actorId }, error); throw error; });
   }
 
-  private async withAudit<T>(result: T, event: Omit<ActivityAuditEvent, "result">): Promise<T> {
-    let auditStatus: Record<string, unknown> = { status: "sent" };
-    try { await this.audit.write({ ...event, result: "success", summary: summarize(result) }); }
-    catch (error: any) { auditStatus = { status: "failed", error: String(error?.message || "audit storage unavailable") }; }
-    return result && typeof result === "object" ? { ...(result as Record<string, unknown>), audit: auditStatus } as T : result;
+  private async withAudit<T>(result: T, event: Omit<ActivityAuditEvent, "result">, strict = false): Promise<T> {
+    try {
+      await this.audit.write({ ...event, result: "success", summary: summarize(result) });
+      return result;
+    } catch (error: any) {
+      if (!strict) {
+        const auditStatus = { status: "failed", error: String(error?.message || "audit storage unavailable") };
+        return result && typeof result === "object" ? { ...(result as Record<string, unknown>), audit: auditStatus } as T : result;
+      }
+      const auditError: any = new ActivityControlError("ACTIVITY_AUDIT_UNAVAILABLE", "activity audit storage is unavailable");
+      auditError.cause = error;
+      throw auditError;
+    }
   }
 
   private async auditFailure(action: ActivityAuditEvent["action"], command: Record<string, unknown>, error: any): Promise<void> {

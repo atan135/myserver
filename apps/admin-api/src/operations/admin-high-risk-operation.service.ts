@@ -315,6 +315,9 @@ export class AdminHighRiskOperationService {
           details: { errorCode: errorCode(error), operationId: claim.operation.operationId }
         });
       }
+      if (errorCode(error) === "ACTIVITY_AUDIT_UNAVAILABLE") {
+        throw persistenceFailure();
+      }
       throw error;
     }
 

@@ -341,3 +341,17 @@ test("audit sink failure is explicit and never makes configuration payload part 
   assert.equal(JSON.stringify(result).includes("secret"), true);
   assert.equal(JSON.stringify(result.audit).includes("secret"), false);
 });
+
+test("publish and offline reject after a side effect when their audit cannot be persisted", async () => {
+  const repository = new InMemoryActivityControlRepository();
+  const service = new ActivityControlDomainService(repository, new NoopActivityRefreshNotifier(), { async write(event) {
+    if (event.action === "published" || event.action === "offlined") throw new Error("audit unavailable");
+  } });
+  await service.createDraft(draft({ activityId: "activity-strict-audit" }));
+  await assert.rejects(
+    () => service.publish("activity-strict-audit", { version: 1, reason: "publish", requestId: "op-activity-1" }),
+    (error) => error.code === "ACTIVITY_AUDIT_UNAVAILABLE"
+  );
+  const detail = await repository.detail("activity-strict-audit");
+  assert.equal(detail.status, "published");
+});

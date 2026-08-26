@@ -531,6 +531,7 @@ export class PostgresActivityControlRepository implements ActivityControlReposit
     const version = Number.isInteger(event.version) ? event.version : null;
     const details = {
       result: event.result,
+      ...(event.requestId ? { requestId: String(event.requestId) } : {}),
       ...(event.errorCode ? { errorCode: event.errorCode } : {}),
       ...(event.summary ? { summary: auditSummary(event.summary) } : {})
     };

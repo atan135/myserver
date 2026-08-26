@@ -46,6 +46,11 @@ function irreversible(request: any, conditions: string[], riskSummary: string): 
   };
 }
 
+function activityId(request: any) {
+  const value = request?.params?.activityId;
+  return typeof value === "string" && value.trim() ? value.trim() : ":activityId";
+}
+
 export function highRiskRecoveryPlan(permission: string, request: any): RecoveryPlan {
   switch (permission) {
     case "maintenance.write":
@@ -65,6 +70,18 @@ export function highRiskRecoveryPlan(permission: string, request: any): Recovery
         { permission: "myforge.task.cancel", route: "/api/v1/myforge/tasks/:requestId/cancel", method: "POST", body: {} },
         ["Only queued, dispatched or running tasks can be cancelled; a running agent must acknowledge cancellation."],
         "Generated artifacts may already exist when cancellation is requested and require manual review."
+      );
+    case "activities.publish":
+      return reversible(
+        { permission: "activities.offline", route: `/api/v1/activities/${activityId(request)}/offline`, method: "POST", body: {} },
+        ["The published activity version can be taken offline through a new, separately authorized operation."],
+        "The immutable activity version remains available until a separate offline operation is accepted."
+      );
+    case "activities.offline":
+      return reversible(
+        { permission: "activities.publish", route: `/api/v1/activities/${activityId(request)}/publish`, method: "POST", body: {} },
+        ["A new draft and publish operation are required to restore an activity; historical versions remain immutable."],
+        "Taking an activity offline stops its availability without deleting its immutable version."
       );
     default:
       return irreversible(

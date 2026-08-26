@@ -121,9 +121,9 @@ export const activityApi = {
   preflight: (activityId, data = {}, config = {}) =>
     api.post(`/activities/${encodeURIComponent(String(activityId))}/preflight`, data, config),
   publish: (activityId, data = {}, config = {}) =>
-    api.post(`/activities/${encodeURIComponent(String(activityId))}/publish`, data, config),
+    api.post(`/activities/${encodeURIComponent(String(activityId))}/publish`, highRiskRequestBody(data), config),
   offline: (activityId, data = {}, config = {}) =>
-    api.post(`/activities/${encodeURIComponent(String(activityId))}/offline`, data, config),
+    api.post(`/activities/${encodeURIComponent(String(activityId))}/offline`, highRiskRequestBody(data), config),
   records: (activityId, params = {}, config = {}) =>
     api.get(`/activities/${encodeURIComponent(String(activityId))}/records`, { ...config, params })
 };
