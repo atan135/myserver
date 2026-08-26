@@ -41,7 +41,7 @@ docker info
 }
 ```
 
-上述 `local` driver 只负责 Docker 侧的固定大小短期缓冲。当前尚未部署普通运行日志采集器，日志查看仍以 `docker logs` 为准；采集器完成后，目标是持续读取 Docker 日志并按 UTC 日期写入 `/data/myserver/log`。完整职责、补采和丢失边界见[服务端日志采集与留存设计](../../安全与监控/服务端日志采集与留存设计.md)。
+上述 `local` driver 只负责 Docker 侧的固定大小短期缓冲。当前尚未部署 Vector，日志查看仍以 `docker logs` 为准；Vector 完成后，目标是持续读取 Docker 日志并按 UTC 日期写入 `/data/myserver/log`。完整职责、补采和丢失边界见[服务端日志采集与留存设计](../../安全与监控/服务端日志采集与留存设计.md)。
 
 可设置 `vm.overcommit_memory=1` 以满足 Redis 建议。小型 swap 只能作为防止宿主机立刻失联的最后缓冲，不能用来掩盖内存预算错误；一旦出现持续 swap in/out，应降载或调整配额而非继续运行。
 
@@ -69,11 +69,13 @@ docker info
   release/        # 已审阅的 release bundle，按 release ID 分目录
   secrets/        # 仅服务器本地，0700 目录、0600 文件
   backups/
-  log/             # v2 目标：采集器按服务/实例/UTC 日期写入；当前为预留目录
+  log/             # v2 目标：Vector 按服务/实例/UTC 日期写入；当前为预留目录
   sockets/        # 临时 local socket，不备份、不跨主机复制
 ```
 
 当前生产 Compose 使用命名 volume，实际数据位于 Docker `data-root` 下；Docker 使用独立 `containerd.service` 时，镜像 content store 与 overlayfs 快照还会位于 containerd `root`。两者都必须位于 `/data/myserver/`，不能只配置 Docker `data-root` 后默认让 `/var/lib/containerd` 占用系统根分区。不得使用匿名 volume，也不得手工修改 `/data/myserver/docker` 或 `/data/myserver/containerd` 中的受管内容。Caddy 的状态数据保存自动 HTTPS 证书和 ACME 账户，必须跨容器重建保留。若后续改为 bind mount，先用已锁定镜像确认容器运行 UID/GID，再仅对对应目录授予最小权限；不要猜测 UID 后执行递归 `chown`。数据目录不放入 Git、不随 release 清理，也不作为镜像构建上下文。
+
+admin audit 目录必须按服务隔离：目标 Compose 使用 `game-server-audit` 和 `game-proxy-audit` 两个 named volume，并分别将 `GAME_ADMIN_AUDIT_PATH`、`PROXY_ADMIN_AUDIT_PATH` 设置为 `/var/log/myserver/admin-audit.jsonl`。当前 Compose 仍使用共享 `game-audit`，属于待实施修复；在修复完成前不得把该共享目录视为安全的审计隔离边界。
 
 `secrets/` 保存 production env 文件、Compose secret 文件、registry 拉取凭据引用和 TLS 私钥。它们不能同步回开发机、上传到镜像仓库、写入 `images.lock.json` 或通过 `docker inspect` 的环境变量明文暴露。优先使用 Compose secrets 或外部 secret manager；若暂时使用 env file，文件权限必须为 `0600`，且仅由受控运维账号读取。
 
@@ -178,7 +180,7 @@ DISALLOW_LEGACY_DIRECT_CONFIG=true
 以下条件全部满足后，才允许开放玩家和运营流量：
 
 - 所有容器均使用 `images.lock.json` 中的 digest，且运行镜像与 release ID 一致。
-- PostgreSQL、Redis、NATS 可用，且磁盘、内存、`/data/myserver/log`（如已启用采集器）、Docker 日志和数据目录均有剩余空间。
+- PostgreSQL、Redis、NATS 可用，且磁盘、内存、`/data/myserver/log`（如已启用 Vector）、Docker 日志和数据目录均有剩余空间。
 - registry 自身可访问；每个应注册服务都有正确的 service name、instance ID、endpoint、visibility 和 heartbeat。
 - 所有关键依赖可通过 registry 发现，未使用 `GAME_PROXY_HOST`、`GAME_SERVER_ADMIN_HOST`、`MATCH_SERVICE_ADDR` 等 local fallback。
 - `game-proxy` 的 Redis route store 使用生产要求的 backend；玩家入口的 advertised host/port 为客户端可达地址，而内部 endpoint 不泄露到登录响应。
@@ -253,7 +255,7 @@ Redis 保持 `maxmemory-policy noeviction`，因此达到 `maxmemory` 后会拒�
 - Redis：本部署以 AOF 为恢复来源，RDB snapshot 已禁用；备份 AOF 持久文件。其恢复不能替代 PostgreSQL 恢复。恢复后须核对 registry、session/ticket 失效策略和 route store 一致性。
 - NATS：当前使用 Core NATS，不应把它当作持久业务队列或备份来源。
 - 配置与 release bundle：备份受版本控制的非敏感配置和 `images.lock.json`；secret 按 secret manager 的独立恢复流程处理。
-- 每日巡检：磁盘、inode、Docker 日志、`/data/myserver/log` 采集器输出（启用后）、容器重启次数、OOM、CPU steal、内存/Swap、PostgreSQL 连接和慢查询、Redis 内存、NATS 连接、registry heartbeat、备份最近成功时间。
+- 每日巡检：磁盘、inode、Docker 日志、`/data/myserver/log` Vector 输出（启用后）、Vector 状态与采集延迟、容器重启次数、OOM、CPU steal、内存/Swap、PostgreSQL 连接和慢查询、Redis 内存、NATS 连接、registry heartbeat、备份最近成功时间。
 
 ## 6. 单机限制
 

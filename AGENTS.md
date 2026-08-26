@@ -145,7 +145,7 @@ docs/                 # 当前正式设计文档
 
 Node.js 服务使用 `log4js`，Rust 异步服务使用 `tracing + tracing-subscriber + tracing-appender`。
 
-当前生产 Docker Compose 以 console 日志为主，业务服务的 `LOG_ENABLE_FILE` 默认关闭；Docker `local` logging driver 的固定大小/文件数轮转只是短期缓冲。目标态由[服务端日志采集与留存设计](./docs/安全与监控/服务端日志采集与留存设计.md)定义：常驻采集器持续读取 Docker 日志，按 UTC 日期和固定大小分片写入宿主机 `/data/myserver/log`，再由独立工具负责后续压缩或远端归档。采集器尚未落地前，日常日志入口仍是 `docker logs`，不要将目标目录或 Docker 私有日志文件视为已经可用的长期接口。
+当前生产 Docker Compose 以 console 日志为主，业务服务的 `LOG_ENABLE_FILE` 默认关闭；Docker `local` logging driver 的固定大小/文件数轮转只是短期缓冲。目标态由[服务端日志采集与留存设计](./docs/安全与监控/服务端日志采集与留存设计.md)定义：宿主机受控服务运行的 Vector 持续读取 Docker 日志，按 UTC 日期和固定大小分片写入宿主机 `/data/myserver/log`，再由独立工具负责后续压缩或远端归档。Vector 尚未落地前，日常日志入口仍是 `docker logs`，不要将目标目录或 Docker 私有日志文件视为已经可用的长期接口。
 
 常见配置来源：
 

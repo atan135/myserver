@@ -378,7 +378,7 @@ scoped token 配置会拒绝空 token、明显默认 token、重复 token、未�
 
 - 操作人来自 `X-Admin-Actor` header，允许字母、数字、`-`、`_`、`.`、`@`，最大 128 字节。
 - 未提供或格式非法时记录 `actor=unknown` 且 `actor_missing=true`；配置 `PROXY_ADMIN_AUDIT_REQUIRE_ACTOR=true` 后，缺失 actor 的写操作会返回 `400 missing X-Admin-Actor`。
-- JSONL 文件路径由 `PROXY_ADMIN_AUDIT_PATH` 控制，默认 `logs/game-proxy/admin-audit.jsonl`；每行包含 `ts_ms`、`actor`、`actor_missing`、`method`、`path`、`action`、`result`、`error`、`server_id`、`room_id`、`character_id`、`rollout_epoch`。
+- JSONL 文件路径由 `PROXY_ADMIN_AUDIT_PATH` 控制，默认 `logs/game-proxy/admin-audit.jsonl`；生产部署应覆盖为 `/var/log/myserver/admin-audit.jsonl` 并挂载独立的 `game-proxy-audit` volume。每行包含 `ts_ms`、`actor`、`actor_missing`、`method`、`path`、`action`、`result`、`error`、`server_id`、`room_id`、`character_id`、`rollout_epoch`。
 - 审计文件创建或追加失败时，admin 写操作按安全优先返回 `500` 并记录 warning，不静默放行。
 - 该审计是控制面补充，不是公网暴露依据；生产仍必须把 `PROXY_ADMIN_HOST:PROXY_ADMIN_PORT` 放在内网、VPN、堡垒机或安全组边界内。
 

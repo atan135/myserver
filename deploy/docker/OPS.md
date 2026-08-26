@@ -14,7 +14,7 @@
 /home/gameops/script/ops-disk-report.sh
 ```
 
-当前 `ops-logs.sh` 直接读取目标容器的 `docker logs`，对应 Docker `local` driver 的有限保留窗口。普通运行日志采集器完成 v2 Checklist 后，日常排障入口应优先切换为采集器在 `/data/myserver/log` 的按日输出；`docker logs` 仍保留为采集延迟、重启或落盘故障时的短期兜底。采集器尚未落地前，不要假定该目录已有完整日志。
+当前 `ops-logs.sh` 直接读取目标容器的 `docker logs`，对应 Docker `local` driver 的有限保留窗口。Vector 完成 v2 Checklist 后，日常排障入口应优先切换为 Vector 在 `/data/myserver/log` 的按日输出；`docker logs` 仍保留为 Vector 延迟、重启或落盘故障时的短期兜底。Vector 尚未落地前，不要假定该目录已有完整日志。
 
 `ops-restart.sh` 只重启现有容器，不重新读取 Compose 定义、环境文件或镜像。`ops-replace.sh` 使用当前 release 的 Compose 定义执行单服务 `up -d --no-deps`，不会连带重建依赖。两者先确认目标容器已运行且其可用 healthcheck 已通过，再复用当前 release 的统一 readiness 收敛函数；不能以容器 `running` 或单次 health 成功作为整个操作的完成条件。其余参数由脚本白名单校验，避免将服务名传递为任意 Docker 参数。
 
