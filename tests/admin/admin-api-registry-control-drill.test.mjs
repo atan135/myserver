@@ -275,6 +275,9 @@ async function startGameAdminMock(instanceId) {
           authPackets.push(parseAuthBody(packet.body));
           continue;
         }
+        if (packet.messageType === MESSAGE_TYPE.ADMIN_OPERATION_ASSERTION_REQ) {
+          continue;
+        }
 
         const bodyText = packet.body.toString("utf8");
         requests.push({
@@ -382,7 +385,6 @@ function makeAdminStore() {
 async function createAdminHttpTestApp({ config, redis, adminStore = makeAdminStore() }) {
   const assertions = { issue: async () => ({ version: 1, operationId: "test", requestId: "test", traceId: "test", issuer: "test", keyId: "test", actorId: "1", permission: "gm.send_item", scope: {}, target: {}, service: "game-server", instanceId: "game-server-gm", issuedAtMs: 1, expiresAtMs: Date.now() + 10000, payloadSha256: "test", signature: "test" }) };
   const gameAdminClient = new GameAdminClient(config, redis, assertions);
-  gameAdminClient.sendItem = async () => ({ ok: true, instanceId: "game-server-gm" });
   const nats = {
     publishes: [],
     async publishJson(subject, payload) {
@@ -531,7 +533,6 @@ test("admin-api HTTP status and GM routes use registry game-server.admin under s
       targetInstanceId: "game-server-gm"
     }
   });
-  if (gmResponse.statusCode !== 200) console.log("gmResponse", gmResponse.statusCode, gmResponse.body);
   assert.equal(gmResponse.statusCode, 200);
   const gmResult = parseJsonResponse(gmResponse);
 
@@ -551,7 +552,7 @@ test("admin-api HTTP status and GM routes use registry game-server.admin under s
     }
   ]);
   assert.deepEqual(gmAdmin.authPackets, [
-    { token: gameAdminToken, actor: "ops" }
+    { mode: "assertion" }
   ]);
   assert.equal(
     statusAdmin.requests.filter((request) => request.messageType === MESSAGE_TYPE.GM_SEND_ITEM_REQ).length,
