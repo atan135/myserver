@@ -11,6 +11,9 @@ const testFiles = [
   "src/auth/auth.service.test.ts",
   "src/auth-store.register.test.js",
   "src/auth-store.ban-expiry.test.js",
+  "src/auth-store.session-index.test.js",
+  "src/metrics.test.js",
+  "src/session-metrics-index.test.js",
   "src/common/client-ip.test.js",
   "src/common/redis-blocklist.middleware.test.ts",
   "src/common/tls-required.middleware.test.js"

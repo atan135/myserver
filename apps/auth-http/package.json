@@ -9,7 +9,8 @@
     "test": "node scripts/run-tests.js",
     "proto": "npm run proto:admin",
     "proto:admin": "node scripts/generate-admin-proto.js",
-    "seed:test-accounts": "node scripts/seed-test-accounts.js"
+    "seed:test-accounts": "node scripts/seed-test-accounts.js",
+    "backfill:session-metrics-index": "node scripts/backfill-session-metrics-index.js"
   },
   "dependencies": {
     "@fastify/static": "^9.1.3",

@@ -5,6 +5,7 @@ import { log } from "./logger.js";
 import { generatePlayerId } from "./global-id.js";
 import { createPasswordSalt, hashPassword, normalizeLoginName, verifyPassword } from "./password-utils.js";
 import { BLOCKLIST_UNAVAILABLE_ERROR, PLAYER_BLOCKED_ERROR, RedisBlocklistChecker } from "./blocklist.js";
+import { sessionMetricsIndexKeys } from "./session-metrics-index.js";
 
 function base64UrlEncode(value) {
   return Buffer.from(value).toString("base64url");
@@ -153,6 +154,184 @@ export class AuthStore {
     return `${this.config.redisKeyPrefix || ""}${key}`;
   }
 
+  async upsertSessionIndexes(accessToken, playerId, { markActive = false } = {}) {
+    if (!accessToken || !playerId || typeof this.redis.zadd !== "function") {
+      return;
+    }
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    const expiresAtSeconds = nowSeconds + this.config.sessionTtlSeconds;
+    const keys = sessionMetricsIndexKeys(this.config.redisKeyPrefix);
+    const operations = [
+      [keys.sessions, expiresAtSeconds, accessToken],
+      [keys.players, expiresAtSeconds, playerId]
+    ];
+    if (markActive) {
+      operations.push([keys.activity, nowSeconds, accessToken]);
+    }
+
+    try {
+      if (typeof this.redis.pipeline === "function") {
+        const pipeline = this.redis.pipeline();
+        for (const [key, score, member] of operations) {
+          pipeline.zadd(key, score, member);
+        }
+        const results = await pipeline.exec();
+        if (results.some((result) => Array.isArray(result) && result[0])) {
+          throw new Error("session metrics index update failed");
+        }
+        return;
+      }
+      for (const [key, score, member] of operations) {
+        await this.redis.zadd(key, score, member);
+      }
+    } catch (error) {
+      // Session indexes are observability state and must not break authentication.
+      console.error("[auth-store] upsertSessionIndexes error:", error);
+    }
+  }
+
+  async removeSessionIndexes(accessToken, playerId = null) {
+    if (!accessToken || typeof this.redis.zrem !== "function") {
+      return;
+    }
+    const keys = sessionMetricsIndexKeys(this.config.redisKeyPrefix);
+    const operations = [
+      [keys.sessions, accessToken],
+      [keys.activity, accessToken]
+    ];
+    if (playerId) {
+      operations.push([keys.players, playerId]);
+    }
+
+    try {
+      if (typeof this.redis.pipeline === "function") {
+        const pipeline = this.redis.pipeline();
+        for (const [key, member] of operations) {
+          pipeline.zrem(key, member);
+        }
+        const results = await pipeline.exec();
+        if (results.some((result) => Array.isArray(result) && result[0])) {
+          throw new Error("session metrics index removal failed");
+        }
+        return;
+      }
+      for (const [key, member] of operations) {
+        await this.redis.zrem(key, member);
+      }
+    } catch (error) {
+      console.error("[auth-store] removeSessionIndexes error:", error);
+    }
+  }
+
+  async deleteSessionArtifacts(accessToken, playerId = null) {
+    await this.redis.del(this.prefixedKey(sessionKey(accessToken)));
+    await this.redis.del(this.prefixedKey(sessionActivityKey(accessToken)));
+    await this.removeSessionIndexes(accessToken, playerId);
+  }
+
+  async renewSessionState(accessToken, playerId) {
+    if (!accessToken || !playerId) {
+      return false;
+    }
+
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    const keys = sessionMetricsIndexKeys(this.config.redisKeyPrefix);
+    const sessionKeyName = this.prefixedKey(sessionKey(accessToken));
+    const playerSessionKeyName = this.prefixedKey(playerSessionKey(playerId));
+    const activityKeyName = this.prefixedKey(sessionActivityKey(accessToken));
+    const script = `
+      if redis.call("EXISTS", KEYS[1]) == 0 then
+        return 0
+      end
+      if redis.call("GET", KEYS[2]) ~= ARGV[1] then
+        return 0
+      end
+      local expires_at = tonumber(ARGV[4]) + tonumber(ARGV[3])
+      redis.call("EXPIRE", KEYS[1], tonumber(ARGV[3]))
+      redis.call("EXPIRE", KEYS[2], tonumber(ARGV[3]))
+      redis.call("SET", KEYS[3], tostring(tonumber(ARGV[4]) * 1000), "EX", 300)
+      redis.pcall("ZADD", KEYS[4], expires_at, ARGV[1])
+      redis.pcall("ZADD", KEYS[5], expires_at, ARGV[2])
+      redis.pcall("ZADD", KEYS[6], tonumber(ARGV[4]), ARGV[1])
+      return 1
+    `;
+
+    if (typeof this.redis.eval === "function") {
+      const renewed = await this.redis.eval(
+        script,
+        6,
+        sessionKeyName,
+        playerSessionKeyName,
+        activityKeyName,
+        keys.sessions,
+        keys.players,
+        keys.activity,
+        accessToken,
+        playerId,
+        this.config.sessionTtlSeconds,
+        nowSeconds
+      );
+      return Number(renewed) === 1;
+    }
+
+    // Lightweight test/local adapters may not expose EVAL. Production ioredis
+    // always uses the atomic branch above.
+    const currentToken = await this.redis.get(playerSessionKeyName);
+    if (currentToken !== accessToken) {
+      return false;
+    }
+    await this.redis.expire(sessionKeyName, this.config.sessionTtlSeconds);
+    await this.redis.expire(playerSessionKeyName, this.config.sessionTtlSeconds);
+    await this.upsertSessionIndexes(accessToken, playerId, { markActive: true });
+    await this.markSessionActive(accessToken);
+    return true;
+  }
+
+  async destroyMappedSessionArtifacts(accessToken, playerId) {
+    const keys = sessionMetricsIndexKeys(this.config.redisKeyPrefix);
+    const sessionKeyName = this.prefixedKey(sessionKey(accessToken));
+    const playerSessionKeyName = this.prefixedKey(playerSessionKey(playerId));
+    const activityKeyName = this.prefixedKey(sessionActivityKey(accessToken));
+    const script = `
+      redis.call("DEL", KEYS[1])
+      redis.call("DEL", KEYS[3])
+      redis.pcall("ZREM", KEYS[4], ARGV[1])
+      redis.pcall("ZREM", KEYS[6], ARGV[1])
+      if redis.call("GET", KEYS[2]) == ARGV[1] then
+        redis.call("DEL", KEYS[2])
+        redis.pcall("ZREM", KEYS[5], ARGV[2])
+        return 1
+      end
+      return 0
+    `;
+
+    if (typeof this.redis.eval === "function") {
+      return this.redis.eval(
+        script,
+        6,
+        sessionKeyName,
+        playerSessionKeyName,
+        activityKeyName,
+        keys.sessions,
+        keys.players,
+        keys.activity,
+        accessToken,
+        playerId
+      );
+    }
+
+    const currentToken = await this.redis.get(playerSessionKeyName);
+    await this.deleteSessionArtifacts(
+      accessToken,
+      currentToken === accessToken ? playerId : null
+    );
+    if (currentToken === accessToken) {
+      await this.redis.del(playerSessionKeyName);
+      return 1;
+    }
+    return 0;
+  }
+
   async markSessionActive(accessToken) {
     try {
       await this.redis.set(
@@ -161,6 +340,10 @@ export class AuthStore {
         "EX",
         300
       );
+      if (typeof this.redis.zadd === "function") {
+        const keys = sessionMetricsIndexKeys(this.config.redisKeyPrefix);
+        await this.redis.zadd(keys.activity, Math.floor(Date.now() / 1000), accessToken);
+      }
     } catch (error) {
       // Session activity should improve observability, not break auth.
       console.error("[auth-store] markSessionActive error:", error);
@@ -434,6 +617,7 @@ export class AuthStore {
     const sessionKeyName = this.prefixedKey(sessionKey(accessToken));
     const oldAccessToken = await this.replacePlayerSession({
       playerSessionKeyName: psKey,
+      playerId: account.playerId,
       accessToken,
       sessionKeyName,
       sessionData: JSON.stringify(session)
@@ -474,6 +658,7 @@ export class AuthStore {
 
   async replacePlayerSession({
     playerSessionKeyName,
+    playerId,
     accessToken,
     sessionKeyName,
     sessionData
@@ -481,27 +666,42 @@ export class AuthStore {
     const script = `
       local player_session_key = KEYS[1]
       local new_session_key = KEYS[2]
+      local session_index_key = KEYS[3]
+      local player_index_key = KEYS[4]
+      local activity_index_key = KEYS[5]
       local old_token = redis.call("GET", player_session_key)
       if old_token then
         redis.call("DEL", ARGV[1] .. old_token)
         redis.call("DEL", ARGV[2] .. old_token)
+        redis.pcall("ZREM", session_index_key, old_token)
+        redis.pcall("ZREM", activity_index_key, old_token)
       end
       redis.call("SET", new_session_key, ARGV[3], "EX", tonumber(ARGV[5]))
       redis.call("SET", player_session_key, ARGV[4], "EX", tonumber(ARGV[5]))
+      local expires_at = tonumber(ARGV[7]) + tonumber(ARGV[5])
+      redis.pcall("ZADD", session_index_key, expires_at, ARGV[4])
+      redis.pcall("ZADD", player_index_key, expires_at, ARGV[6])
+      redis.pcall("ZADD", activity_index_key, tonumber(ARGV[7]), ARGV[4])
       return old_token
     `;
 
     if (typeof this.redis.eval === "function") {
+      const indexKeys = sessionMetricsIndexKeys(this.config.redisKeyPrefix);
       return this.redis.eval(
         script,
-        2,
+        5,
         playerSessionKeyName,
         sessionKeyName,
+        indexKeys.sessions,
+        indexKeys.players,
+        indexKeys.activity,
         this.prefixedKey("session:"),
         this.prefixedKey("session-activity:"),
         sessionData,
         accessToken,
-        this.config.sessionTtlSeconds
+        this.config.sessionTtlSeconds,
+        playerId,
+        Math.floor(Date.now() / 1000)
       );
     }
 
@@ -509,9 +709,11 @@ export class AuthStore {
     if (oldAccessToken) {
       await this.redis.del(this.prefixedKey(sessionKey(oldAccessToken)));
       await this.redis.del(this.prefixedKey(sessionActivityKey(oldAccessToken)));
+      await this.removeSessionIndexes(oldAccessToken);
     }
     await this.redis.set(sessionKeyName, sessionData, "EX", this.config.sessionTtlSeconds);
     await this.redis.set(playerSessionKeyName, accessToken, "EX", this.config.sessionTtlSeconds);
+    await this.upsertSessionIndexes(accessToken, playerId, { markActive: true });
     return oldAccessToken;
   }
 
@@ -530,22 +732,12 @@ export class AuthStore {
       return null;
     }
 
-    // Sliding window: renew session TTL on every access
-    await this.redis.expire(
-      this.prefixedKey(sessionKey(accessToken)),
-      this.config.sessionTtlSeconds
-    );
     const session = JSON.parse(raw);
-    // Also renew player-session mapping
-    if (session.playerId) {
-      await this.redis.expire(
-        this.prefixedKey(playerSessionKey(session.playerId)),
-        this.config.sessionTtlSeconds
-      );
+    if (!session.playerId) {
+      return null;
     }
-
-    await this.markSessionActive(accessToken);
-    return session;
+    const renewed = await this.renewSessionState(accessToken, session.playerId);
+    return renewed ? session : null;
   }
 
   async issueGameTicket(playerId, clientIp = null, options = {}) {
@@ -610,15 +802,7 @@ export class AuthStore {
       return { destroyed: false };
     }
 
-    await this.redis.del(this.prefixedKey(sessionKey(accessToken)));
-    await this.redis.del(this.prefixedKey(sessionActivityKey(accessToken)));
-
-    // Clean up player-session mapping if it still points to this token
-    const psKey = this.prefixedKey(playerSessionKey(sessionData.playerId));
-    const currentToken = await this.redis.get(psKey);
-    if (currentToken === accessToken) {
-      await this.redis.del(psKey);
-    }
+    await this.destroyMappedSessionArtifacts(accessToken, sessionData.playerId);
 
     await this.dbStore?.appendAuthAudit({
       playerId: sessionData.playerId,

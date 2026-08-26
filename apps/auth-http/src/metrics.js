@@ -11,9 +11,12 @@ import {
   collectRegistryCapacityMetricFields,
   collectRegistryLifecycleMetricFields
 } from "../../../packages/service-registry/node/registry-schema.js";
+import {
+  readSessionMetricsIndex,
+  SESSION_ACTIVITY_WINDOW_SECONDS
+} from "./session-metrics-index.js";
 
 const REPORT_INTERVAL_MS = 5000;
-const ACTIVE_SESSION_WINDOW_SECONDS = 300;
 
 function currentBucket() {
   return Math.floor(Date.now() / REPORT_INTERVAL_MS) * REPORT_INTERVAL_MS / 1000;
@@ -59,67 +62,14 @@ export class MetricsCollector {
   }
 
   async countSessionStats() {
-    let totalSessions = 0;
-    const uniquePlayers = new Set();
-    const pattern = `${this.keyPrefix}session:*`;
-    let cursor = "0";
-
     try {
-      do {
-        const [nextCursor, keys] = await this.redis.scan(cursor, "MATCH", pattern, "COUNT", 100);
-        cursor = nextCursor;
-
-        if (keys.length === 0) {
-          continue;
-        }
-
-        totalSessions += keys.length;
-
-        const pipe = this.redis.pipeline();
-        for (const key of keys) {
-          pipe.get(key);
-        }
-
-        const results = await pipe.exec();
-        for (const [, raw] of results) {
-          if (!raw) {
-            continue;
-          }
-
-          try {
-            const session = JSON.parse(raw);
-            if (session.playerId) {
-              uniquePlayers.add(session.playerId);
-            }
-          } catch (error) {
-            console.error("[metrics] parse session error:", error);
-          }
-        }
-      } while (cursor !== "0");
+      const stats = await readSessionMetricsIndex(this.redis, this.keyPrefix);
+      this.onlineSessions = stats.onlineSessions;
+      this.uniquePlayers = stats.uniquePlayers;
+      this.activeSessions5m = stats.activeSessions5m;
     } catch (error) {
       console.error("[metrics] countSessionStats error:", error);
     }
-
-    this.onlineSessions = totalSessions;
-    this.uniquePlayers = uniquePlayers.size;
-  }
-
-  async countActiveSessions() {
-    let count = 0;
-    const pattern = `${this.keyPrefix}session-activity:*`;
-    let cursor = "0";
-
-    try {
-      do {
-        const [nextCursor, keys] = await this.redis.scan(cursor, "MATCH", pattern, "COUNT", 100);
-        cursor = nextCursor;
-        count += keys.length;
-      } while (cursor !== "0");
-    } catch (error) {
-      console.error("[metrics] countActiveSessions error:", error);
-    }
-
-    this.activeSessions5m = count;
   }
 
   /**
@@ -128,10 +78,7 @@ export class MetricsCollector {
   async flush() {
     const bucket = currentBucket();
 
-    await Promise.all([
-      this.countSessionStats(),
-      this.countActiveSessions()
-    ]);
+    await this.countSessionStats();
 
     const qps = this.qps;
     const latencyMs = this.latencyCount > 0 ? Math.round(this.latencySum / this.latencyCount) : 0;
@@ -158,7 +105,7 @@ export class MetricsCollector {
             online_sessions: this.onlineSessions,
             unique_players: this.uniquePlayers,
             active_sessions_5m: this.activeSessions5m,
-            active_window_seconds: ACTIVE_SESSION_WINDOW_SECONDS,
+            active_window_seconds: SESSION_ACTIVITY_WINDOW_SECONDS,
             ...discoveryMetrics,
             ...capacityMetrics,
             ...lifecycleMetrics

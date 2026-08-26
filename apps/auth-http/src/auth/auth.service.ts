@@ -431,14 +431,12 @@ export class AuthService {
     const psKey = this.authStore.prefixedKey(`player-session:${session.playerId}`);
     const currentMappedToken = await this.authStore.redis.get(psKey);
     if (currentMappedToken && currentMappedToken !== accessToken) {
-      await this.authStore.redis.del(this.authStore.prefixedKey(`session:${currentMappedToken}`));
-      await this.authStore.redis.del(this.authStore.prefixedKey(`session-activity:${currentMappedToken}`));
+      await this.authStore.deleteSessionArtifacts(currentMappedToken);
     }
     await this.authStore.publishSessionKick(session.playerId, "password_changed");
     await this.authStore.invalidatePlayerTickets(session.playerId);
 
-    await this.authStore.redis.del(this.authStore.prefixedKey(`session:${accessToken}`));
-    await this.authStore.redis.del(this.authStore.prefixedKey(`session-activity:${accessToken}`));
+    await this.authStore.deleteSessionArtifacts(accessToken, session.playerId);
     await this.authStore.redis.del(psKey);
 
     return {
