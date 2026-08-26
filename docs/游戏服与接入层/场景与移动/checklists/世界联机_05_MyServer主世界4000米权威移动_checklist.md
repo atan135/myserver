@@ -9,7 +9,7 @@
 ## 依赖与边界
 
 - 需求来源：`mybevy/summary/主世界尺度角色摄像机与联机移动需求设计.md`。
-- 实际开发仓库：`H:\project\MyServer`，执行时以 MyServer 当前工作区和 `CLAUDE.md` 为准。
+- 实际开发仓库：`H:\project\MyServer`，执行时以 MyServer 当前工作区和 `AGENTS.md` 为准。
 - 客户端继续使用 `world.main`，服务端继续使用 `grassland_01 / scene_id=1 / spawn_id=1001`。
 - 公共房间继续使用 `main-world-public / movement_demo`。
 - Protobuf 继续使用 `MoveInputReq`、`EntityTransform`、`MovementSnapshotPush`、`MovementRejectPush` 和 `MovementRecoveryState`。
