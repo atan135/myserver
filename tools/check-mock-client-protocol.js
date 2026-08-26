@@ -66,6 +66,33 @@ function readRepoFile(relativePath) {
   return readFileSync(path.join(rootDir, relativePath), "utf8");
 }
 
+function readProtoImportClosure(relativePath) {
+  const visited = new Set();
+  const sources = [];
+
+  function visit(currentPath) {
+    const normalizedPath = currentPath.replaceAll("\\", "/");
+    if (visited.has(normalizedPath)) {
+      return;
+    }
+    visited.add(normalizedPath);
+    const source = readRepoFile(normalizedPath);
+    sources.push(source);
+    for (const match of source.matchAll(/\bimport\s+(?:(?:public|weak)\s+)?"([^"]+)"\s*;/g)) {
+      const importedPath = path.posix.normalize(
+        path.posix.join(path.posix.dirname(normalizedPath), match[1])
+      );
+      if (!importedPath.startsWith("packages/proto/") || importedPath.includes("..")) {
+        throw new Error(`proto import escapes packages/proto: ${normalizedPath} -> ${match[1]}`);
+      }
+      visit(importedPath);
+    }
+  }
+
+  visit(relativePath);
+  return sources.join("\n");
+}
+
 function readFile(filePath) {
   return readFileSync(filePath, "utf8");
 }
@@ -492,6 +519,25 @@ function compareProtoSnapshot(canonicalPath, vendoredPath, label) {
   return [];
 }
 
+function collectCanonicalProtoImports(canonicalDirectory, rootName) {
+  const visited = new Set();
+
+  function visit(currentName) {
+    const normalizedName = path.posix.normalize(currentName.replaceAll("\\", "/"));
+    if (normalizedName.startsWith("../") || normalizedName === ".." || visited.has(normalizedName)) {
+      return;
+    }
+    visited.add(normalizedName);
+    const source = readFileSync(path.join(canonicalDirectory, normalizedName), "utf8");
+    for (const match of source.matchAll(/\bimport\s+(?:(?:public|weak)\s+)?"([^"]+)"\s*;/g)) {
+      visit(path.posix.join(path.posix.dirname(normalizedName), match[1]));
+    }
+  }
+
+  visit(rootName);
+  return [...visited];
+}
+
 function validateLegacyMybevyBuildScript(buildSource, buildPath) {
   const errors = [];
   if (!/compile_protos\s*\(/.test(buildSource)) {
@@ -662,7 +708,10 @@ export function checkMybevyClientProtocolAtRoot(
   if (layout.name === "crate") {
     checkedFiles.push(layout.manifestPath);
     errors.push(...validateCrateMybevyBuildScript(readFile(layout.buildPath), layout.buildPath));
-    for (const protoName of ["game.proto", "chat.proto"]) {
+    for (const protoName of [
+      ...collectCanonicalProtoImports(canonicalProtoDirectory, "game.proto"),
+      "chat.proto"
+    ]) {
       const canonicalPath = path.join(canonicalProtoDirectory, protoName);
       if (!existsSync(canonicalPath)) {
         errors.push(`packages/proto/${protoName} missing`);
@@ -730,7 +779,7 @@ function checkChatSharedProto() {
 
 function main({ serverOnly = false } = {}) {
   const errors = [];
-  const protoSource = readRepoFile("packages/proto/game.proto");
+  const protoSource = readProtoImportClosure("packages/proto/game.proto");
   const chatProtoSource = readRepoFile("packages/proto/chat.proto");
   const adminProtoSource = readRepoFile("packages/proto/admin.proto");
   const gameProtocolRustSource = readRepoFile("packages/game-protocol/src/lib.rs");

@@ -18,13 +18,23 @@ export const RUST_PROTO_TARGETS = Object.freeze([
     name: "game-server",
     manifest: "apps/game-server/Cargo.toml",
     output: "apps/game-server/src/proto",
-    inputs: ["packages/proto/game.proto", "packages/proto/admin.proto", "packages/proto/match.proto"]
+    inputs: [
+      "packages/proto/game.proto",
+      "packages/proto/game_item.proto",
+      "packages/proto/game_activity.proto",
+      "packages/proto/admin.proto",
+      "packages/proto/match.proto"
+    ]
   },
   {
     name: "game-proxy",
     manifest: "apps/game-proxy/Cargo.toml",
     output: "apps/game-proxy/src/proto",
-    inputs: ["packages/proto/game.proto"]
+    inputs: [
+      "packages/proto/game.proto",
+      "packages/proto/game_item.proto",
+      "packages/proto/game_activity.proto"
+    ]
   },
   {
     name: "chat-server",
@@ -36,7 +46,12 @@ export const RUST_PROTO_TARGETS = Object.freeze([
     name: "match-service",
     manifest: "apps/match-service/Cargo.toml",
     output: "apps/match-service/src/proto",
-    inputs: ["packages/proto/game.proto", "packages/proto/match.proto"]
+    inputs: [
+      "packages/proto/game.proto",
+      "packages/proto/game_item.proto",
+      "packages/proto/game_activity.proto",
+      "packages/proto/match.proto"
+    ]
   }
 ]);
 

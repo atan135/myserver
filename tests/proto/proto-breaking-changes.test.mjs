@@ -77,6 +77,21 @@ test("removed field is accepted only when the same message reserves its historic
   assert.deepEqual(diagnostics, []);
 });
 
+test("moving declarations between files in the same package is source-only and non-breaking", () => {
+  const originalFile = "packages/proto/game.proto";
+  const movedFile = "packages/proto/game_activity.proto";
+  const facadeSource = `syntax = "proto3";\n\npackage fixture.compatibility;\n`;
+  const diagnostics = compareProtocolBaselines(
+    snapshot([fileSnapshot(originalFile, releasedSource)]),
+    snapshot([
+      fileSnapshot(originalFile, facadeSource),
+      fileSnapshot(movedFile, releasedSource)
+    ]),
+    inventory([protocol(originalFile), protocol(movedFile)])
+  );
+  assert.deepEqual(diagnostics, []);
+});
+
 test("risk comes from inventory classification rather than a global severity", () => {
   const gameFile = "packages/proto/game.proto";
   const adminFile = "packages/proto/admin.proto";

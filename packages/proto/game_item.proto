@@ -1,0 +1,81 @@
+syntax = "proto3";
+
+package myserver.game;
+
+// ========== 物品基础结构 ==========
+
+message Item {
+  uint64 uid = 1;
+  int32 item_id = 2;
+  uint32 count = 3;
+  bool binded = 4;
+}
+
+// ========== 物品操作 ==========
+
+message ItemEquipReq {
+  uint64 item_uid = 1;
+  string equip_slot = 2;
+}
+
+message ItemEquipRes {
+  bool ok = 1;
+  string error_code = 2;
+  Item unequipped_item = 3;
+}
+
+message ItemUseReq {
+  uint64 item_uid = 1;
+}
+
+message ItemUseRes {
+  bool ok = 1;
+  string error_code = 2;
+  int64 hp_change = 3;
+  repeated int32 new_buff_ids = 4;
+}
+
+message ItemDiscardReq {
+  uint64 item_uid = 1;
+  uint32 count = 2;
+}
+
+message ItemDiscardRes {
+  bool ok = 1;
+  string error_code = 2;
+}
+
+// Message ids 1407 and 1408 are permanently reserved for the retired player-side ItemAdd
+// request/response. They intentionally have no protobuf payload and must never be reused.
+message WarehouseAccessReq {
+  string action = 1;
+  uint64 item_uid = 2;
+  uint32 count = 3;
+}
+
+message WarehouseAccessRes {
+  bool ok = 1;
+  string error_code = 2;
+}
+
+message GetInventoryReq {
+}
+
+message GetInventoryRes {
+  bool ok = 1;
+  string error_code = 2;
+  repeated Item inventory_items = 3;
+  repeated Item warehouse_items = 4;
+}
+
+// ========== 物品推送 ==========
+
+message InventoryUpdatePush {
+  repeated Item inventory_items = 1;
+  repeated Item warehouse_items = 2;
+}
+
+message ItemObtainPush {
+  repeated Item items = 1;
+  string source = 2;
+}

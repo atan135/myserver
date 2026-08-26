@@ -322,19 +322,45 @@ function compareServices(inventory, file, released, candidate, diagnostics) {
   }
 }
 
+function declarationsWithSourceMoves(releasedFile, candidateFile, candidateFiles, kind) {
+  const declarations = new Map((candidateFile?.[kind] ?? []).map((declaration) => [declaration.name, declaration]));
+  for (const releasedDeclaration of releasedFile[kind]) {
+    if (declarations.has(releasedDeclaration.name)) {
+      continue;
+    }
+    const movedDeclaration = candidateFiles
+      .filter((file) => file.package === releasedFile.package)
+      .flatMap((file) => file[kind] ?? [])
+      .find((declaration) => declaration.name === releasedDeclaration.name);
+    if (movedDeclaration) {
+      declarations.set(movedDeclaration.name, movedDeclaration);
+    }
+  }
+  return [...declarations.values()];
+}
+
 export function compareProtocolBaselines(released, candidate, inventory) {
   const diagnostics = [];
   const candidateFiles = mapBy(candidate.files, "path");
   for (const releasedFile of released.files) {
     const candidateFile = candidateFiles.get(releasedFile.path);
     if (!candidateFile) {
-      diagnostics.push(breakingDiagnostic(
-        inventory,
-        "PROTO_FILE_REMOVED",
-        releasedFile.path,
-        { file: releasedFile.path },
-        `proto file ${releasedFile.path} was removed from the candidate baseline`
-      ));
+      const movedMessages = declarationsWithSourceMoves(releasedFile, null, candidate.files, "messages");
+      const movedEnums = declarationsWithSourceMoves(releasedFile, null, candidate.files, "enums");
+      const movedServices = declarationsWithSourceMoves(releasedFile, null, candidate.files, "services");
+      if (
+        movedMessages.length !== releasedFile.messages.length
+        || movedEnums.length !== releasedFile.enums.length
+        || movedServices.length !== releasedFile.services.length
+      ) {
+        diagnostics.push(breakingDiagnostic(
+          inventory,
+          "PROTO_FILE_REMOVED",
+          releasedFile.path,
+          { file: releasedFile.path },
+          `proto file ${releasedFile.path} was removed from the candidate baseline`
+        ));
+      }
       continue;
     }
     if (candidateFile.package !== releasedFile.package) {
@@ -346,9 +372,15 @@ export function compareProtocolBaselines(released, candidate, inventory) {
         `package changed from ${releasedFile.package} to ${candidateFile.package}`
       ));
     }
-    compareMessages(inventory, releasedFile, releasedFile, candidateFile, diagnostics);
-    compareEnums(inventory, releasedFile, releasedFile, candidateFile, diagnostics);
-    compareServices(inventory, releasedFile, releasedFile, candidateFile, diagnostics);
+    const candidateProjection = {
+      ...candidateFile,
+      messages: declarationsWithSourceMoves(releasedFile, candidateFile, candidate.files, "messages"),
+      enums: declarationsWithSourceMoves(releasedFile, candidateFile, candidate.files, "enums"),
+      services: declarationsWithSourceMoves(releasedFile, candidateFile, candidate.files, "services")
+    };
+    compareMessages(inventory, releasedFile, releasedFile, candidateProjection, diagnostics);
+    compareEnums(inventory, releasedFile, releasedFile, candidateProjection, diagnostics);
+    compareServices(inventory, releasedFile, releasedFile, candidateProjection, diagnostics);
   }
   return diagnostics;
 }

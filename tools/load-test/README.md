@@ -92,7 +92,7 @@ The load tool must not keep a hand-written player protocol copy.
 
 | Concern | Source | Consumer boundary |
 | --- | --- | --- |
-| Protobuf message schemas | `packages/proto/game.proto` | `tools/load-test/build.rs` uses the repository's locked `protoc-bin-vendored 3.2.0` and `prost-build 0.13.5` at build time. |
+| Protobuf message schemas | `packages/proto/game.proto` facade plus its imported `game_item.proto` and `game_activity.proto` | `tools/load-test/build.rs` uses the repository's locked `protoc-bin-vendored 3.2.0` and `prost-build 0.13.5` at build time. |
 | 14-byte player packet header, message IDs and packet size checks | `packages/game-protocol` | `game-proxy`, `game-server`, and load-test test doubles consume the same crate. |
 | KCP stream/no-delay profile | `packages/game-protocol::player_kcp_config` | `game-proxy` frontend is the production source; a later KCP load client must call this helper. |
 | Ticket ownership and protocol-version validation | `apps/game-proxy/src/auth.rs`, `apps/game-proxy/src/protocol_version_policy.rs` | The generator treats tickets as opaque secret-provider results. Stage three will verify compatible `AuthReq` construction without reimplementing ticket verification. |
@@ -298,7 +298,7 @@ environment confirmations, manifest, private-config, target-protection, and
 hard-budget gates. Offline tests do not provision a room or send HTTP/KCP.
 
 Compatibility tests consume `packages/game-protocol`, generated
-`packages/proto/game.proto` messages, and the shared protocol-version policy.
+`packages/proto/game.proto` and its imported player message schemas, and the shared protocol-version policy.
 They assert the 14-byte header, message numbers, stream/no-delay KCP profile,
 exact response sequence matching, independent push handling, and that
 `RoomReconnectReq` carries only the current ticket-bound character's push

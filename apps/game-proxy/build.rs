@@ -26,6 +26,8 @@ fn prepare_proto_out_dir(out_dir: &std::path::Path) -> Result<(), Box<dyn std::e
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=../../packages/proto/game.proto");
+    println!("cargo:rerun-if-changed=../../packages/proto/game_item.proto");
+    println!("cargo:rerun-if-changed=../../packages/proto/game_activity.proto");
     println!("cargo:rerun-if-env-changed=MYSERVER_PROTO_OUT_DIR");
 
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR")?);
@@ -46,7 +48,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .map_err(|error| {
             std::io::Error::other(format!(
-                "protocol generation failed with protoc-bin-vendored {PROTOC_BIN_VENDORED_VERSION} and prost-build {PROST_BUILD_VERSION}; input: packages/proto/game.proto; output target: {}; original error: {error}",
+                "protocol generation failed with protoc-bin-vendored {PROTOC_BIN_VENDORED_VERSION} and prost-build {PROST_BUILD_VERSION}; inputs: packages/proto/game.proto, packages/proto/game_item.proto, packages/proto/game_activity.proto; output target: {}; original error: {error}",
                 out_dir.display()
             ))
         })?;

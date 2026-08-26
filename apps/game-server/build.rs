@@ -41,6 +41,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo:rerun-if-changed=tools/csv_codegen.rs");
     println!("cargo:rerun-if-changed=csv");
     println!("cargo:rerun-if-changed=../../packages/proto/game.proto");
+    println!("cargo:rerun-if-changed=../../packages/proto/game_item.proto");
+    println!("cargo:rerun-if-changed=../../packages/proto/game_activity.proto");
     println!("cargo:rerun-if-changed=../../packages/proto/admin.proto");
     println!("cargo:rerun-if-changed=../../packages/proto/match.proto");
     println!("cargo:rerun-if-env-changed=MYSERVER_PROTO_OUT_DIR");
@@ -55,7 +57,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     prepare_proto_out_dir(&proto_out_dir)?;
     let protoc = protoc_bin_vendored::protoc_bin_path().map_err(|error| {
         std::io::Error::other(format!(
-            "protocol generation requires protoc-bin-vendored {PROTOC_BIN_VENDORED_VERSION} for packages/proto/game.proto, packages/proto/admin.proto, and packages/proto/match.proto; output targets are {}; original error: {error}",
+            "protocol generation requires protoc-bin-vendored {PROTOC_BIN_VENDORED_VERSION} for packages/proto/game.proto, packages/proto/game_item.proto, packages/proto/game_activity.proto, packages/proto/admin.proto, and packages/proto/match.proto; output targets are {}; original error: {error}",
             proto_out_dir.display()
         ))
     })?;
@@ -76,7 +78,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .map_err(|error| {
             std::io::Error::other(format!(
-                "protocol generation failed with protoc-bin-vendored {PROTOC_BIN_VENDORED_VERSION}, prost-build {PROST_BUILD_VERSION}, and tonic-build {TONIC_BUILD_VERSION}; inputs: packages/proto/game.proto, packages/proto/admin.proto, packages/proto/match.proto; output target: {}; original error: {error}",
+                "protocol generation failed with protoc-bin-vendored {PROTOC_BIN_VENDORED_VERSION}, prost-build {PROST_BUILD_VERSION}, and tonic-build {TONIC_BUILD_VERSION}; inputs: packages/proto/game.proto, packages/proto/game_item.proto, packages/proto/game_activity.proto, packages/proto/admin.proto, packages/proto/match.proto; output target: {}; original error: {error}",
                 proto_out_dir.display()
             ))
         })?;

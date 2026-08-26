@@ -1,5 +1,5 @@
 {
-  "digest": "sha256:840f8d46f1771504f2ecea9929f38af5079f07fced21ab6eb0f1aaf7148116b0",
+  "digest": "sha256:bf94e2d0657bd3b531b601f8983f775a34c433f824801e0b45bc911f8bfbf9c4",
   "files": [
     {
       "enums": [],
@@ -1484,673 +1484,6 @@
         }
       ],
       "messages": [
-        {
-          "fields": [
-            {
-              "label": "singular",
-              "name": "activity_id",
-              "number": 1,
-              "oneof": "",
-              "type": "string"
-            },
-            {
-              "label": "singular",
-              "name": "version",
-              "number": 2,
-              "oneof": "",
-              "type": "uint32"
-            },
-            {
-              "label": "singular",
-              "name": "stage_id",
-              "number": 3,
-              "oneof": "",
-              "type": "string"
-            },
-            {
-              "label": "singular",
-              "name": "action_type",
-              "number": 4,
-              "oneof": "",
-              "type": "string"
-            },
-            {
-              "label": "singular",
-              "name": "client_request_id",
-              "number": 5,
-              "oneof": "",
-              "type": "string"
-            }
-          ],
-          "name": "ActivityActionReq",
-          "reserved": {
-            "names": [],
-            "numbers": [],
-            "ranges": []
-          }
-        },
-        {
-          "fields": [
-            {
-              "label": "singular",
-              "name": "ok",
-              "number": 1,
-              "oneof": "",
-              "type": "bool"
-            },
-            {
-              "label": "singular",
-              "name": "error_code",
-              "number": 2,
-              "oneof": "",
-              "type": "string"
-            },
-            {
-              "label": "singular",
-              "name": "activity_id",
-              "number": 3,
-              "oneof": "",
-              "type": "string"
-            },
-            {
-              "label": "singular",
-              "name": "version",
-              "number": 4,
-              "oneof": "",
-              "type": "uint32"
-            },
-            {
-              "label": "singular",
-              "name": "stage_id",
-              "number": 5,
-              "oneof": "",
-              "type": "string"
-            },
-            {
-              "label": "singular",
-              "name": "action_type",
-              "number": 6,
-              "oneof": "",
-              "type": "string"
-            },
-            {
-              "label": "singular",
-              "name": "client_request_id",
-              "number": 7,
-              "oneof": "",
-              "type": "string"
-            },
-            {
-              "label": "singular",
-              "name": "processing",
-              "number": 8,
-              "oneof": "",
-              "type": "bool"
-            },
-            {
-              "label": "singular",
-              "name": "duplicate",
-              "number": 9,
-              "oneof": "",
-              "type": "bool"
-            },
-            {
-              "label": "singular",
-              "name": "state_revision",
-              "number": 10,
-              "oneof": "",
-              "type": "uint64"
-            }
-          ],
-          "name": "ActivityActionRes",
-          "reserved": {
-            "names": [],
-            "numbers": [],
-            "ranges": []
-          }
-        },
-        {
-          "fields": [
-            {
-              "label": "singular",
-              "name": "activity_id",
-              "number": 1,
-              "oneof": "",
-              "type": "string"
-            },
-            {
-              "label": "singular",
-              "name": "version",
-              "number": 2,
-              "oneof": "",
-              "type": "uint32"
-            },
-            {
-              "label": "singular",
-              "name": "activity_type",
-              "number": 3,
-              "oneof": "",
-              "type": "string"
-            },
-            {
-              "label": "singular",
-              "name": "action_type",
-              "number": 4,
-              "oneof": "",
-              "type": "string"
-            },
-            {
-              "label": "singular",
-              "name": "stage_id",
-              "number": 5,
-              "oneof": "",
-              "type": "string"
-            },
-            {
-              "label": "singular",
-              "name": "created_at_ms",
-              "number": 6,
-              "oneof": "",
-              "type": "int64"
-            },
-            {
-              "label": "singular",
-              "name": "completed_at_ms",
-              "number": 7,
-              "oneof": "",
-              "type": "int64"
-            },
-            {
-              "label": "singular",
-              "name": "status",
-              "number": 8,
-              "oneof": "",
-              "type": "string"
-            },
-            {
-              "label": "repeated",
-              "name": "rewards",
-              "number": 9,
-              "oneof": "",
-              "type": "ActivityRewardSummary"
-            }
-          ],
-          "name": "ActivityClaimHistoryRecord",
-          "reserved": {
-            "names": [],
-            "numbers": [],
-            "ranges": []
-          }
-        },
-        {
-          "fields": [
-            {
-              "label": "singular",
-              "name": "cursor",
-              "number": 1,
-              "oneof": "",
-              "type": "string"
-            },
-            {
-              "label": "singular",
-              "name": "limit",
-              "number": 2,
-              "oneof": "",
-              "type": "uint32"
-            }
-          ],
-          "name": "ActivityClaimHistoryReq",
-          "reserved": {
-            "names": [],
-            "numbers": [],
-            "ranges": []
-          }
-        },
-        {
-          "fields": [
-            {
-              "label": "singular",
-              "name": "ok",
-              "number": 1,
-              "oneof": "",
-              "type": "bool"
-            },
-            {
-              "label": "singular",
-              "name": "error_code",
-              "number": 2,
-              "oneof": "",
-              "type": "string"
-            },
-            {
-              "label": "repeated",
-              "name": "records",
-              "number": 3,
-              "oneof": "",
-              "type": "ActivityClaimHistoryRecord"
-            },
-            {
-              "label": "singular",
-              "name": "next_cursor",
-              "number": 4,
-              "oneof": "",
-              "type": "string"
-            },
-            {
-              "label": "singular",
-              "name": "has_more",
-              "number": 5,
-              "oneof": "",
-              "type": "bool"
-            }
-          ],
-          "name": "ActivityClaimHistoryRes",
-          "reserved": {
-            "names": [],
-            "numbers": [],
-            "ranges": []
-          }
-        },
-        {
-          "fields": [
-            {
-              "label": "singular",
-              "name": "activity_id",
-              "number": 1,
-              "oneof": "",
-              "type": "string"
-            },
-            {
-              "label": "singular",
-              "name": "version",
-              "number": 2,
-              "oneof": "",
-              "type": "uint32"
-            },
-            {
-              "label": "singular",
-              "name": "stage_id",
-              "number": 3,
-              "oneof": "",
-              "type": "string"
-            },
-            {
-              "label": "singular",
-              "name": "client_request_id",
-              "number": 4,
-              "oneof": "",
-              "type": "string"
-            }
-          ],
-          "name": "ActivityClaimReq",
-          "reserved": {
-            "names": [],
-            "numbers": [],
-            "ranges": []
-          }
-        },
-        {
-          "fields": [
-            {
-              "label": "singular",
-              "name": "ok",
-              "number": 1,
-              "oneof": "",
-              "type": "bool"
-            },
-            {
-              "label": "singular",
-              "name": "error_code",
-              "number": 2,
-              "oneof": "",
-              "type": "string"
-            },
-            {
-              "label": "singular",
-              "name": "activity_id",
-              "number": 3,
-              "oneof": "",
-              "type": "string"
-            },
-            {
-              "label": "singular",
-              "name": "version",
-              "number": 4,
-              "oneof": "",
-              "type": "uint32"
-            },
-            {
-              "label": "singular",
-              "name": "stage_id",
-              "number": 5,
-              "oneof": "",
-              "type": "string"
-            },
-            {
-              "label": "singular",
-              "name": "client_request_id",
-              "number": 6,
-              "oneof": "",
-              "type": "string"
-            },
-            {
-              "label": "singular",
-              "name": "processing",
-              "number": 7,
-              "oneof": "",
-              "type": "bool"
-            },
-            {
-              "label": "singular",
-              "name": "duplicate",
-              "number": 8,
-              "oneof": "",
-              "type": "bool"
-            },
-            {
-              "label": "singular",
-              "name": "state_revision",
-              "number": 9,
-              "oneof": "",
-              "type": "uint64"
-            }
-          ],
-          "name": "ActivityClaimRes",
-          "reserved": {
-            "names": [],
-            "numbers": [],
-            "ranges": []
-          }
-        },
-        {
-          "fields": [
-            {
-              "label": "singular",
-              "name": "activity_id",
-              "number": 1,
-              "oneof": "",
-              "type": "string"
-            },
-            {
-              "label": "singular",
-              "name": "version",
-              "number": 2,
-              "oneof": "",
-              "type": "uint32"
-            }
-          ],
-          "name": "ActivityDetailReq",
-          "reserved": {
-            "names": [],
-            "numbers": [],
-            "ranges": []
-          }
-        },
-        {
-          "fields": [
-            {
-              "label": "singular",
-              "name": "ok",
-              "number": 1,
-              "oneof": "",
-              "type": "bool"
-            },
-            {
-              "label": "singular",
-              "name": "error_code",
-              "number": 2,
-              "oneof": "",
-              "type": "string"
-            },
-            {
-              "label": "singular",
-              "name": "activity",
-              "number": 3,
-              "oneof": "",
-              "type": "ActivitySummary"
-            },
-            {
-              "label": "singular",
-              "name": "progress_json",
-              "number": 4,
-              "oneof": "",
-              "type": "string"
-            },
-            {
-              "label": "singular",
-              "name": "state_revision",
-              "number": 5,
-              "oneof": "",
-              "type": "uint64"
-            }
-          ],
-          "name": "ActivityDetailRes",
-          "reserved": {
-            "names": [],
-            "numbers": [],
-            "ranges": []
-          }
-        },
-        {
-          "fields": [],
-          "name": "ActivityListReq",
-          "reserved": {
-            "names": [],
-            "numbers": [],
-            "ranges": []
-          }
-        },
-        {
-          "fields": [
-            {
-              "label": "singular",
-              "name": "ok",
-              "number": 1,
-              "oneof": "",
-              "type": "bool"
-            },
-            {
-              "label": "singular",
-              "name": "error_code",
-              "number": 2,
-              "oneof": "",
-              "type": "string"
-            },
-            {
-              "label": "singular",
-              "name": "server_time_ms",
-              "number": 3,
-              "oneof": "",
-              "type": "int64"
-            },
-            {
-              "label": "repeated",
-              "name": "activities",
-              "number": 4,
-              "oneof": "",
-              "type": "ActivitySummary"
-            }
-          ],
-          "name": "ActivityListRes",
-          "reserved": {
-            "names": [],
-            "numbers": [],
-            "ranges": []
-          }
-        },
-        {
-          "fields": [
-            {
-              "label": "singular",
-              "name": "activity_id",
-              "number": 1,
-              "oneof": "",
-              "type": "string"
-            },
-            {
-              "label": "singular",
-              "name": "version",
-              "number": 2,
-              "oneof": "",
-              "type": "uint32"
-            }
-          ],
-          "name": "ActivityProgressReq",
-          "reserved": {
-            "names": [],
-            "numbers": [],
-            "ranges": []
-          }
-        },
-        {
-          "fields": [
-            {
-              "label": "singular",
-              "name": "ok",
-              "number": 1,
-              "oneof": "",
-              "type": "bool"
-            },
-            {
-              "label": "singular",
-              "name": "error_code",
-              "number": 2,
-              "oneof": "",
-              "type": "string"
-            },
-            {
-              "label": "singular",
-              "name": "activity_id",
-              "number": 3,
-              "oneof": "",
-              "type": "string"
-            },
-            {
-              "label": "singular",
-              "name": "version",
-              "number": 4,
-              "oneof": "",
-              "type": "uint32"
-            },
-            {
-              "label": "singular",
-              "name": "progress_json",
-              "number": 5,
-              "oneof": "",
-              "type": "string"
-            },
-            {
-              "label": "singular",
-              "name": "state_revision",
-              "number": 6,
-              "oneof": "",
-              "type": "uint64"
-            }
-          ],
-          "name": "ActivityProgressRes",
-          "reserved": {
-            "names": [],
-            "numbers": [],
-            "ranges": []
-          }
-        },
-        {
-          "fields": [
-            {
-              "label": "singular",
-              "name": "reward_type",
-              "number": 1,
-              "oneof": "",
-              "type": "string"
-            },
-            {
-              "label": "singular",
-              "name": "asset_id",
-              "number": 2,
-              "oneof": "",
-              "type": "string"
-            },
-            {
-              "label": "singular",
-              "name": "quantity",
-              "number": 3,
-              "oneof": "",
-              "type": "uint64"
-            }
-          ],
-          "name": "ActivityRewardSummary",
-          "reserved": {
-            "names": [],
-            "numbers": [],
-            "ranges": []
-          }
-        },
-        {
-          "fields": [
-            {
-              "label": "singular",
-              "name": "activity_id",
-              "number": 1,
-              "oneof": "",
-              "type": "string"
-            },
-            {
-              "label": "singular",
-              "name": "version",
-              "number": 2,
-              "oneof": "",
-              "type": "uint32"
-            },
-            {
-              "label": "singular",
-              "name": "activity_type",
-              "number": 3,
-              "oneof": "",
-              "type": "string"
-            },
-            {
-              "label": "singular",
-              "name": "status",
-              "number": 4,
-              "oneof": "",
-              "type": "string"
-            },
-            {
-              "label": "singular",
-              "name": "start_at_ms",
-              "number": 5,
-              "oneof": "",
-              "type": "int64"
-            },
-            {
-              "label": "singular",
-              "name": "end_at_ms",
-              "number": 6,
-              "oneof": "",
-              "type": "int64"
-            },
-            {
-              "label": "singular",
-              "name": "claim_deadline_ms",
-              "number": 7,
-              "oneof": "",
-              "type": "int64"
-            },
-            {
-              "label": "singular",
-              "name": "timezone",
-              "number": 8,
-              "oneof": "",
-              "type": "string"
-            }
-          ],
-          "name": "ActivitySummary",
-          "reserved": {
-            "names": [],
-            "numbers": [],
-            "ranges": []
-          }
-        },
         {
           "fields": [
             {
@@ -4385,53 +3718,6 @@
         },
         {
           "fields": [],
-          "name": "GetInventoryReq",
-          "reserved": {
-            "names": [],
-            "numbers": [],
-            "ranges": []
-          }
-        },
-        {
-          "fields": [
-            {
-              "label": "singular",
-              "name": "ok",
-              "number": 1,
-              "oneof": "",
-              "type": "bool"
-            },
-            {
-              "label": "singular",
-              "name": "error_code",
-              "number": 2,
-              "oneof": "",
-              "type": "string"
-            },
-            {
-              "label": "repeated",
-              "name": "inventory_items",
-              "number": 3,
-              "oneof": "",
-              "type": "Item"
-            },
-            {
-              "label": "repeated",
-              "name": "warehouse_items",
-              "number": 4,
-              "oneof": "",
-              "type": "Item"
-            }
-          ],
-          "name": "GetInventoryRes",
-          "reserved": {
-            "names": [],
-            "numbers": [],
-            "ranges": []
-          }
-        },
-        {
-          "fields": [],
           "name": "GetRolloutDrainStatusReq",
           "reserved": {
             "names": [],
@@ -4665,250 +3951,6 @@
             }
           ],
           "name": "ImportRoomTransferRes",
-          "reserved": {
-            "names": [],
-            "numbers": [],
-            "ranges": []
-          }
-        },
-        {
-          "fields": [
-            {
-              "label": "repeated",
-              "name": "inventory_items",
-              "number": 1,
-              "oneof": "",
-              "type": "Item"
-            },
-            {
-              "label": "repeated",
-              "name": "warehouse_items",
-              "number": 2,
-              "oneof": "",
-              "type": "Item"
-            }
-          ],
-          "name": "InventoryUpdatePush",
-          "reserved": {
-            "names": [],
-            "numbers": [],
-            "ranges": []
-          }
-        },
-        {
-          "fields": [
-            {
-              "label": "singular",
-              "name": "uid",
-              "number": 1,
-              "oneof": "",
-              "type": "uint64"
-            },
-            {
-              "label": "singular",
-              "name": "item_id",
-              "number": 2,
-              "oneof": "",
-              "type": "int32"
-            },
-            {
-              "label": "singular",
-              "name": "count",
-              "number": 3,
-              "oneof": "",
-              "type": "uint32"
-            },
-            {
-              "label": "singular",
-              "name": "binded",
-              "number": 4,
-              "oneof": "",
-              "type": "bool"
-            }
-          ],
-          "name": "Item",
-          "reserved": {
-            "names": [],
-            "numbers": [],
-            "ranges": []
-          }
-        },
-        {
-          "fields": [
-            {
-              "label": "singular",
-              "name": "item_uid",
-              "number": 1,
-              "oneof": "",
-              "type": "uint64"
-            },
-            {
-              "label": "singular",
-              "name": "count",
-              "number": 2,
-              "oneof": "",
-              "type": "uint32"
-            }
-          ],
-          "name": "ItemDiscardReq",
-          "reserved": {
-            "names": [],
-            "numbers": [],
-            "ranges": []
-          }
-        },
-        {
-          "fields": [
-            {
-              "label": "singular",
-              "name": "ok",
-              "number": 1,
-              "oneof": "",
-              "type": "bool"
-            },
-            {
-              "label": "singular",
-              "name": "error_code",
-              "number": 2,
-              "oneof": "",
-              "type": "string"
-            }
-          ],
-          "name": "ItemDiscardRes",
-          "reserved": {
-            "names": [],
-            "numbers": [],
-            "ranges": []
-          }
-        },
-        {
-          "fields": [
-            {
-              "label": "singular",
-              "name": "item_uid",
-              "number": 1,
-              "oneof": "",
-              "type": "uint64"
-            },
-            {
-              "label": "singular",
-              "name": "equip_slot",
-              "number": 2,
-              "oneof": "",
-              "type": "string"
-            }
-          ],
-          "name": "ItemEquipReq",
-          "reserved": {
-            "names": [],
-            "numbers": [],
-            "ranges": []
-          }
-        },
-        {
-          "fields": [
-            {
-              "label": "singular",
-              "name": "ok",
-              "number": 1,
-              "oneof": "",
-              "type": "bool"
-            },
-            {
-              "label": "singular",
-              "name": "error_code",
-              "number": 2,
-              "oneof": "",
-              "type": "string"
-            },
-            {
-              "label": "singular",
-              "name": "unequipped_item",
-              "number": 3,
-              "oneof": "",
-              "type": "Item"
-            }
-          ],
-          "name": "ItemEquipRes",
-          "reserved": {
-            "names": [],
-            "numbers": [],
-            "ranges": []
-          }
-        },
-        {
-          "fields": [
-            {
-              "label": "repeated",
-              "name": "items",
-              "number": 1,
-              "oneof": "",
-              "type": "Item"
-            },
-            {
-              "label": "singular",
-              "name": "source",
-              "number": 2,
-              "oneof": "",
-              "type": "string"
-            }
-          ],
-          "name": "ItemObtainPush",
-          "reserved": {
-            "names": [],
-            "numbers": [],
-            "ranges": []
-          }
-        },
-        {
-          "fields": [
-            {
-              "label": "singular",
-              "name": "item_uid",
-              "number": 1,
-              "oneof": "",
-              "type": "uint64"
-            }
-          ],
-          "name": "ItemUseReq",
-          "reserved": {
-            "names": [],
-            "numbers": [],
-            "ranges": []
-          }
-        },
-        {
-          "fields": [
-            {
-              "label": "singular",
-              "name": "ok",
-              "number": 1,
-              "oneof": "",
-              "type": "bool"
-            },
-            {
-              "label": "singular",
-              "name": "error_code",
-              "number": 2,
-              "oneof": "",
-              "type": "string"
-            },
-            {
-              "label": "singular",
-              "name": "hp_change",
-              "number": 3,
-              "oneof": "",
-              "type": "int64"
-            },
-            {
-              "label": "repeated",
-              "name": "new_buff_ids",
-              "number": 4,
-              "oneof": "",
-              "type": "int32"
-            }
-          ],
-          "name": "ItemUseRes",
           "reserved": {
             "names": [],
             "numbers": [],
@@ -7129,6 +6171,980 @@
             "numbers": [],
             "ranges": []
           }
+        }
+      ],
+      "package": "myserver.game",
+      "path": "packages/proto/game.proto",
+      "services": []
+    },
+    {
+      "enums": [],
+      "messages": [
+        {
+          "fields": [
+            {
+              "label": "singular",
+              "name": "activity_id",
+              "number": 1,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "version",
+              "number": 2,
+              "oneof": "",
+              "type": "uint32"
+            },
+            {
+              "label": "singular",
+              "name": "stage_id",
+              "number": 3,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "action_type",
+              "number": 4,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "client_request_id",
+              "number": 5,
+              "oneof": "",
+              "type": "string"
+            }
+          ],
+          "name": "ActivityActionReq",
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "fields": [
+            {
+              "label": "singular",
+              "name": "ok",
+              "number": 1,
+              "oneof": "",
+              "type": "bool"
+            },
+            {
+              "label": "singular",
+              "name": "error_code",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "activity_id",
+              "number": 3,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "version",
+              "number": 4,
+              "oneof": "",
+              "type": "uint32"
+            },
+            {
+              "label": "singular",
+              "name": "stage_id",
+              "number": 5,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "action_type",
+              "number": 6,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "client_request_id",
+              "number": 7,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "processing",
+              "number": 8,
+              "oneof": "",
+              "type": "bool"
+            },
+            {
+              "label": "singular",
+              "name": "duplicate",
+              "number": 9,
+              "oneof": "",
+              "type": "bool"
+            },
+            {
+              "label": "singular",
+              "name": "state_revision",
+              "number": 10,
+              "oneof": "",
+              "type": "uint64"
+            }
+          ],
+          "name": "ActivityActionRes",
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "fields": [
+            {
+              "label": "singular",
+              "name": "activity_id",
+              "number": 1,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "version",
+              "number": 2,
+              "oneof": "",
+              "type": "uint32"
+            },
+            {
+              "label": "singular",
+              "name": "activity_type",
+              "number": 3,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "action_type",
+              "number": 4,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "stage_id",
+              "number": 5,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "created_at_ms",
+              "number": 6,
+              "oneof": "",
+              "type": "int64"
+            },
+            {
+              "label": "singular",
+              "name": "completed_at_ms",
+              "number": 7,
+              "oneof": "",
+              "type": "int64"
+            },
+            {
+              "label": "singular",
+              "name": "status",
+              "number": 8,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "repeated",
+              "name": "rewards",
+              "number": 9,
+              "oneof": "",
+              "type": "ActivityRewardSummary"
+            }
+          ],
+          "name": "ActivityClaimHistoryRecord",
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "fields": [
+            {
+              "label": "singular",
+              "name": "cursor",
+              "number": 1,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "limit",
+              "number": 2,
+              "oneof": "",
+              "type": "uint32"
+            }
+          ],
+          "name": "ActivityClaimHistoryReq",
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "fields": [
+            {
+              "label": "singular",
+              "name": "ok",
+              "number": 1,
+              "oneof": "",
+              "type": "bool"
+            },
+            {
+              "label": "singular",
+              "name": "error_code",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "repeated",
+              "name": "records",
+              "number": 3,
+              "oneof": "",
+              "type": "ActivityClaimHistoryRecord"
+            },
+            {
+              "label": "singular",
+              "name": "next_cursor",
+              "number": 4,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "has_more",
+              "number": 5,
+              "oneof": "",
+              "type": "bool"
+            }
+          ],
+          "name": "ActivityClaimHistoryRes",
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "fields": [
+            {
+              "label": "singular",
+              "name": "activity_id",
+              "number": 1,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "version",
+              "number": 2,
+              "oneof": "",
+              "type": "uint32"
+            },
+            {
+              "label": "singular",
+              "name": "stage_id",
+              "number": 3,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "client_request_id",
+              "number": 4,
+              "oneof": "",
+              "type": "string"
+            }
+          ],
+          "name": "ActivityClaimReq",
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "fields": [
+            {
+              "label": "singular",
+              "name": "ok",
+              "number": 1,
+              "oneof": "",
+              "type": "bool"
+            },
+            {
+              "label": "singular",
+              "name": "error_code",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "activity_id",
+              "number": 3,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "version",
+              "number": 4,
+              "oneof": "",
+              "type": "uint32"
+            },
+            {
+              "label": "singular",
+              "name": "stage_id",
+              "number": 5,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "client_request_id",
+              "number": 6,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "processing",
+              "number": 7,
+              "oneof": "",
+              "type": "bool"
+            },
+            {
+              "label": "singular",
+              "name": "duplicate",
+              "number": 8,
+              "oneof": "",
+              "type": "bool"
+            },
+            {
+              "label": "singular",
+              "name": "state_revision",
+              "number": 9,
+              "oneof": "",
+              "type": "uint64"
+            }
+          ],
+          "name": "ActivityClaimRes",
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "fields": [
+            {
+              "label": "singular",
+              "name": "activity_id",
+              "number": 1,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "version",
+              "number": 2,
+              "oneof": "",
+              "type": "uint32"
+            }
+          ],
+          "name": "ActivityDetailReq",
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "fields": [
+            {
+              "label": "singular",
+              "name": "ok",
+              "number": 1,
+              "oneof": "",
+              "type": "bool"
+            },
+            {
+              "label": "singular",
+              "name": "error_code",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "activity",
+              "number": 3,
+              "oneof": "",
+              "type": "ActivitySummary"
+            },
+            {
+              "label": "singular",
+              "name": "progress_json",
+              "number": 4,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "state_revision",
+              "number": 5,
+              "oneof": "",
+              "type": "uint64"
+            }
+          ],
+          "name": "ActivityDetailRes",
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "fields": [],
+          "name": "ActivityListReq",
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "fields": [
+            {
+              "label": "singular",
+              "name": "ok",
+              "number": 1,
+              "oneof": "",
+              "type": "bool"
+            },
+            {
+              "label": "singular",
+              "name": "error_code",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "server_time_ms",
+              "number": 3,
+              "oneof": "",
+              "type": "int64"
+            },
+            {
+              "label": "repeated",
+              "name": "activities",
+              "number": 4,
+              "oneof": "",
+              "type": "ActivitySummary"
+            }
+          ],
+          "name": "ActivityListRes",
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "fields": [
+            {
+              "label": "singular",
+              "name": "activity_id",
+              "number": 1,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "version",
+              "number": 2,
+              "oneof": "",
+              "type": "uint32"
+            }
+          ],
+          "name": "ActivityProgressReq",
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "fields": [
+            {
+              "label": "singular",
+              "name": "ok",
+              "number": 1,
+              "oneof": "",
+              "type": "bool"
+            },
+            {
+              "label": "singular",
+              "name": "error_code",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "activity_id",
+              "number": 3,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "version",
+              "number": 4,
+              "oneof": "",
+              "type": "uint32"
+            },
+            {
+              "label": "singular",
+              "name": "progress_json",
+              "number": 5,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "state_revision",
+              "number": 6,
+              "oneof": "",
+              "type": "uint64"
+            }
+          ],
+          "name": "ActivityProgressRes",
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "fields": [
+            {
+              "label": "singular",
+              "name": "reward_type",
+              "number": 1,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "asset_id",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "quantity",
+              "number": 3,
+              "oneof": "",
+              "type": "uint64"
+            }
+          ],
+          "name": "ActivityRewardSummary",
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "fields": [
+            {
+              "label": "singular",
+              "name": "activity_id",
+              "number": 1,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "version",
+              "number": 2,
+              "oneof": "",
+              "type": "uint32"
+            },
+            {
+              "label": "singular",
+              "name": "activity_type",
+              "number": 3,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "status",
+              "number": 4,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "start_at_ms",
+              "number": 5,
+              "oneof": "",
+              "type": "int64"
+            },
+            {
+              "label": "singular",
+              "name": "end_at_ms",
+              "number": 6,
+              "oneof": "",
+              "type": "int64"
+            },
+            {
+              "label": "singular",
+              "name": "claim_deadline_ms",
+              "number": 7,
+              "oneof": "",
+              "type": "int64"
+            },
+            {
+              "label": "singular",
+              "name": "timezone",
+              "number": 8,
+              "oneof": "",
+              "type": "string"
+            }
+          ],
+          "name": "ActivitySummary",
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        }
+      ],
+      "package": "myserver.game",
+      "path": "packages/proto/game_activity.proto",
+      "services": []
+    },
+    {
+      "enums": [],
+      "messages": [
+        {
+          "fields": [],
+          "name": "GetInventoryReq",
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "fields": [
+            {
+              "label": "singular",
+              "name": "ok",
+              "number": 1,
+              "oneof": "",
+              "type": "bool"
+            },
+            {
+              "label": "singular",
+              "name": "error_code",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "repeated",
+              "name": "inventory_items",
+              "number": 3,
+              "oneof": "",
+              "type": "Item"
+            },
+            {
+              "label": "repeated",
+              "name": "warehouse_items",
+              "number": 4,
+              "oneof": "",
+              "type": "Item"
+            }
+          ],
+          "name": "GetInventoryRes",
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "fields": [
+            {
+              "label": "repeated",
+              "name": "inventory_items",
+              "number": 1,
+              "oneof": "",
+              "type": "Item"
+            },
+            {
+              "label": "repeated",
+              "name": "warehouse_items",
+              "number": 2,
+              "oneof": "",
+              "type": "Item"
+            }
+          ],
+          "name": "InventoryUpdatePush",
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "fields": [
+            {
+              "label": "singular",
+              "name": "uid",
+              "number": 1,
+              "oneof": "",
+              "type": "uint64"
+            },
+            {
+              "label": "singular",
+              "name": "item_id",
+              "number": 2,
+              "oneof": "",
+              "type": "int32"
+            },
+            {
+              "label": "singular",
+              "name": "count",
+              "number": 3,
+              "oneof": "",
+              "type": "uint32"
+            },
+            {
+              "label": "singular",
+              "name": "binded",
+              "number": 4,
+              "oneof": "",
+              "type": "bool"
+            }
+          ],
+          "name": "Item",
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "fields": [
+            {
+              "label": "singular",
+              "name": "item_uid",
+              "number": 1,
+              "oneof": "",
+              "type": "uint64"
+            },
+            {
+              "label": "singular",
+              "name": "count",
+              "number": 2,
+              "oneof": "",
+              "type": "uint32"
+            }
+          ],
+          "name": "ItemDiscardReq",
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "fields": [
+            {
+              "label": "singular",
+              "name": "ok",
+              "number": 1,
+              "oneof": "",
+              "type": "bool"
+            },
+            {
+              "label": "singular",
+              "name": "error_code",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            }
+          ],
+          "name": "ItemDiscardRes",
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "fields": [
+            {
+              "label": "singular",
+              "name": "item_uid",
+              "number": 1,
+              "oneof": "",
+              "type": "uint64"
+            },
+            {
+              "label": "singular",
+              "name": "equip_slot",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            }
+          ],
+          "name": "ItemEquipReq",
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "fields": [
+            {
+              "label": "singular",
+              "name": "ok",
+              "number": 1,
+              "oneof": "",
+              "type": "bool"
+            },
+            {
+              "label": "singular",
+              "name": "error_code",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "unequipped_item",
+              "number": 3,
+              "oneof": "",
+              "type": "Item"
+            }
+          ],
+          "name": "ItemEquipRes",
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "fields": [
+            {
+              "label": "repeated",
+              "name": "items",
+              "number": 1,
+              "oneof": "",
+              "type": "Item"
+            },
+            {
+              "label": "singular",
+              "name": "source",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            }
+          ],
+          "name": "ItemObtainPush",
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "fields": [
+            {
+              "label": "singular",
+              "name": "item_uid",
+              "number": 1,
+              "oneof": "",
+              "type": "uint64"
+            }
+          ],
+          "name": "ItemUseReq",
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "fields": [
+            {
+              "label": "singular",
+              "name": "ok",
+              "number": 1,
+              "oneof": "",
+              "type": "bool"
+            },
+            {
+              "label": "singular",
+              "name": "error_code",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "hp_change",
+              "number": 3,
+              "oneof": "",
+              "type": "int64"
+            },
+            {
+              "label": "repeated",
+              "name": "new_buff_ids",
+              "number": 4,
+              "oneof": "",
+              "type": "int32"
+            }
+          ],
+          "name": "ItemUseRes",
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
         },
         {
           "fields": [
@@ -7187,7 +7203,7 @@
         }
       ],
       "package": "myserver.game",
-      "path": "packages/proto/game.proto",
+      "path": "packages/proto/game_item.proto",
       "services": []
     },
     {

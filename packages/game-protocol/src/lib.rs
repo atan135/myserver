@@ -1,6 +1,7 @@
 //! Shared player wire protocol primitives.
 //!
-//! `packages/proto/game.proto` remains the protobuf source of truth.  This
+//! `packages/proto/game.proto` and its imported player schemas remain the
+//! protobuf source of truth.  This
 //! crate owns only the framing and transport settings which must stay aligned
 //! between the player ingress and clients such as the load generator.
 
@@ -27,7 +28,8 @@ macro_rules! message_types {
 }
 
 // These values are the single Rust source for both game services and player
-// tools.  Protobuf body schemas are generated from packages/proto/game.proto.
+// tools. Protobuf body schemas are generated from packages/proto/game.proto
+// and its imported player schema files.
 message_types! {
     AuthReq = 1001, AuthRes = 1002, PingReq = 1003, PingRes = 1004,
     RoomJoinReq = 1101, RoomJoinRes = 1102, RoomLeaveReq = 1103, RoomLeaveRes = 1104,

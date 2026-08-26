@@ -2,6 +2,9 @@ syntax = "proto3";
 
 package myserver.game;
 
+import public "game_item.proto";
+import public "game_activity.proto";
+
 enum MemberRole {
   MEMBER_ROLE_PLAYER = 0;
   MEMBER_ROLE_OBSERVER = 1;
@@ -630,15 +633,6 @@ message ErrorRes {
   string message = 2;
 }
 
-// ========== 物品基础结构 ==========
-
-message Item {
-  uint64 uid = 1;
-  int32 item_id = 2;
-  uint32 count = 3;
-  bool binded = 4;
-}
-
 message AttrPanel {
   int64 hp = 1;
   int64 max_hp = 2;
@@ -653,63 +647,6 @@ message AttrRecord {
   string source = 1;
   string attr_type = 2;
   int32 value = 3;
-}
-
-// ========== 物品操作 ==========
-
-message ItemEquipReq {
-  uint64 item_uid = 1;
-  string equip_slot = 2;
-}
-
-message ItemEquipRes {
-  bool ok = 1;
-  string error_code = 2;
-  Item unequipped_item = 3;
-}
-
-message ItemUseReq {
-  uint64 item_uid = 1;
-}
-
-message ItemUseRes {
-  bool ok = 1;
-  string error_code = 2;
-  int64 hp_change = 3;
-  repeated int32 new_buff_ids = 4;
-}
-
-message ItemDiscardReq {
-  uint64 item_uid = 1;
-  uint32 count = 2;
-}
-
-message ItemDiscardRes {
-  bool ok = 1;
-  string error_code = 2;
-}
-
-// Message ids 1407 and 1408 are permanently reserved for the retired player-side ItemAdd
-// request/response. They intentionally have no protobuf payload and must never be reused.
-message WarehouseAccessReq {
-  string action = 1;
-  uint64 item_uid = 2;
-  uint32 count = 3;
-}
-
-message WarehouseAccessRes {
-  bool ok = 1;
-  string error_code = 2;
-}
-
-message GetInventoryReq {
-}
-
-message GetInventoryRes {
-  bool ok = 1;
-  string error_code = 2;
-  repeated Item inventory_items = 3;
-  repeated Item warehouse_items = 4;
 }
 
 message ElementValues {
@@ -926,135 +863,6 @@ message ApplyCharacterProgressRes {
   repeated CharacterProgressRewardSummary rewards = 8;
 }
 
-// Activity player entry contracts. The character identity comes from the
-// character-bound ticket/connection context and is never accepted in these
-// request bodies. Version zero means the current published version for reads;
-// non-zero versions must be server-issued activity snapshots.
-message ActivitySummary {
-  string activity_id = 1;
-  uint32 version = 2;
-  string activity_type = 3;
-  string status = 4;
-  int64 start_at_ms = 5;
-  int64 end_at_ms = 6;
-  int64 claim_deadline_ms = 7;
-  string timezone = 8;
-}
-
-message ActivityListReq {}
-
-message ActivityListRes {
-  bool ok = 1;
-  string error_code = 2;
-  int64 server_time_ms = 3;
-  repeated ActivitySummary activities = 4;
-}
-
-message ActivityDetailReq {
-  string activity_id = 1;
-  uint32 version = 2;
-}
-
-message ActivityDetailRes {
-  bool ok = 1;
-  string error_code = 2;
-  ActivitySummary activity = 3;
-  string progress_json = 4;
-  uint64 state_revision = 5;
-}
-
-message ActivityProgressReq {
-  string activity_id = 1;
-  uint32 version = 2;
-}
-
-message ActivityProgressRes {
-  bool ok = 1;
-  string error_code = 2;
-  string activity_id = 3;
-  uint32 version = 4;
-  string progress_json = 5;
-  uint64 state_revision = 6;
-}
-
-message ActivityClaimReq {
-  string activity_id = 1;
-  uint32 version = 2;
-  // Server-issued stage identifier; the client cannot define a new stage.
-  string stage_id = 3;
-  // Opaque client retry key, bounded and scoped to the authenticated character.
-  string client_request_id = 4;
-}
-
-message ActivityClaimRes {
-  bool ok = 1;
-  string error_code = 2;
-  string activity_id = 3;
-  uint32 version = 4;
-  string stage_id = 5;
-  string client_request_id = 6;
-  bool processing = 7;
-  bool duplicate = 8;
-  uint64 state_revision = 9;
-}
-
-message ActivityActionReq {
-  string activity_id = 1;
-  uint32 version = 2;
-  // Server-issued stage identifier; empty is valid for activity-wide actions.
-  string stage_id = 3;
-  // Registered action such as list/detail/claim/draw/progress; never arbitrary code.
-  string action_type = 4;
-  // Opaque client retry key; it is not a semantic claim key.
-  string client_request_id = 5;
-}
-
-message ActivityActionRes {
-  bool ok = 1;
-  string error_code = 2;
-  string activity_id = 3;
-  uint32 version = 4;
-  string stage_id = 5;
-  string action_type = 6;
-  string client_request_id = 7;
-  bool processing = 8;
-  bool duplicate = 9;
-  uint64 state_revision = 10;
-}
-
-// Character-bound append-only activity claim/draw history. The cursor is an
-// opaque server-issued keyset token and must not be constructed by clients.
-message ActivityClaimHistoryReq {
-  string cursor = 1;
-  uint32 limit = 2;
-}
-
-message ActivityRewardSummary {
-  string reward_type = 1;
-  string asset_id = 2;
-  uint64 quantity = 3;
-}
-
-message ActivityClaimHistoryRecord {
-  string activity_id = 1;
-  uint32 version = 2;
-  string activity_type = 3;
-  string action_type = 4;
-  string stage_id = 5;
-  int64 created_at_ms = 6;
-  int64 completed_at_ms = 7;
-  string status = 8;
-  repeated ActivityRewardSummary rewards = 9;
-}
-
-message ActivityClaimHistoryRes {
-  bool ok = 1;
-  string error_code = 2;
-  repeated ActivityClaimHistoryRecord records = 3;
-  string next_cursor = 4;
-  bool has_more = 5;
-}
-
 message DebugCharacterTitleReq {
   string action = 1;
   string title_id = 2;
@@ -1079,11 +887,6 @@ message DebugCharacterTitleRes {
 }
 
 // ========== 推送消息 ==========
-
-message InventoryUpdatePush {
-  repeated Item inventory_items = 1;
-  repeated Item warehouse_items = 2;
-}
 
 message CharacterElementsChangePush {
   CharacterPushMeta meta = 1;
@@ -1115,11 +918,6 @@ message AttrChangePush {
 message VisualChangePush {
   uint32 appearance = 1;
   repeated int32 active_buff_ids = 2;
-}
-
-message ItemObtainPush {
-  repeated Item items = 1;
-  string source = 2;
 }
 
 message SessionKickPush {

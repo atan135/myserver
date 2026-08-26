@@ -4,7 +4,13 @@ use std::path::PathBuf;
 use std::process::Command;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    for proto in ["game.proto", "chat.proto", "match.proto"] {
+    for proto in [
+        "game.proto",
+        "game_item.proto",
+        "game_activity.proto",
+        "chat.proto",
+        "match.proto",
+    ] {
         println!("cargo:rerun-if-changed=../../packages/proto/{proto}");
     }
     println!("cargo:rerun-if-changed=proto/loadtest_control.proto");

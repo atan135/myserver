@@ -83,6 +83,98 @@
       ]
     },
     {
+      "file": "packages/proto/game_item.proto",
+      "package": "myserver.game",
+      "classification": [
+        "client_gameplay"
+      ],
+      "transports": [
+        "game-proxy KCP/TCP player packets"
+      ],
+      "owners": [
+        "game-server",
+        "game-proxy"
+      ],
+      "generatedConsumers": [
+        {
+          "path": "apps/game-server/build.rs",
+          "language": "Rust",
+          "generator": "tonic-build"
+        },
+        {
+          "path": "apps/game-proxy/build.rs",
+          "language": "Rust",
+          "generator": "prost-build"
+        },
+        {
+          "path": "apps/match-service/build.rs",
+          "language": "Rust",
+          "generator": "tonic-build"
+        }
+      ],
+      "handwrittenConsumers": [
+        {
+          "path": "tools/mock-client/src/messages.js",
+          "language": "Node.js",
+          "role": "manual protobuf encoding and decoding"
+        }
+      ],
+      "externalConsumers": [
+        {
+          "repository": "mybevy",
+          "location": "resolved from MYSERVER_CLIENT_ROOT",
+          "language": "Rust",
+          "access": "read-only unless the user explicitly authorizes an external repository change"
+        }
+      ]
+    },
+    {
+      "file": "packages/proto/game_activity.proto",
+      "package": "myserver.game",
+      "classification": [
+        "client_gameplay"
+      ],
+      "transports": [
+        "game-proxy KCP/TCP player packets"
+      ],
+      "owners": [
+        "game-server",
+        "game-proxy"
+      ],
+      "generatedConsumers": [
+        {
+          "path": "apps/game-server/build.rs",
+          "language": "Rust",
+          "generator": "tonic-build"
+        },
+        {
+          "path": "apps/game-proxy/build.rs",
+          "language": "Rust",
+          "generator": "prost-build"
+        },
+        {
+          "path": "apps/match-service/build.rs",
+          "language": "Rust",
+          "generator": "tonic-build"
+        }
+      ],
+      "handwrittenConsumers": [
+        {
+          "path": "tools/mock-client/src/messages.js",
+          "language": "Node.js",
+          "role": "manual protobuf encoding and decoding"
+        }
+      ],
+      "externalConsumers": [
+        {
+          "repository": "mybevy",
+          "location": "resolved from MYSERVER_CLIENT_ROOT",
+          "language": "Rust",
+          "access": "read-only unless the user explicitly authorizes an external repository change"
+        }
+      ]
+    },
+    {
       "file": "packages/proto/admin.proto",
       "package": "myserver.admin",
       "classification": [

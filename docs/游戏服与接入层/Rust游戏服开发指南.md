@@ -231,7 +231,7 @@ PLAYER_MSG_RATE_MAX=0
 
 需要看协议字段时，再回到：
 
-- `packages/proto/game.proto`
+- `packages/proto/game.proto`、`packages/proto/game_item.proto`、`packages/proto/game_activity.proto`
 - `packages/proto/admin.proto`
 - `packages/proto/match.proto`
 

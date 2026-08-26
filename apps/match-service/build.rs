@@ -40,6 +40,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     println!(
         "cargo:rerun-if-changed={}",
+        proto_dir.join("game_item.proto").display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        proto_dir.join("game_activity.proto").display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
         proto_dir.join("match.proto").display()
     );
     println!("cargo:rerun-if-env-changed=MYSERVER_PROTO_OUT_DIR");
@@ -48,7 +56,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     prepare_proto_out_dir(&out_dir)?;
     let protoc = protoc_bin_vendored::protoc_bin_path().map_err(|error| {
         std::io::Error::other(format!(
-            "protocol generation requires protoc-bin-vendored {PROTOC_BIN_VENDORED_VERSION} for packages/proto/game.proto and packages/proto/match.proto; output target is {}; original error: {error}",
+            "protocol generation requires protoc-bin-vendored {PROTOC_BIN_VENDORED_VERSION} for packages/proto/game.proto, packages/proto/game_item.proto, packages/proto/game_activity.proto, and packages/proto/match.proto; output target is {}; original error: {error}",
             out_dir.display()
         ))
     })?;
@@ -65,7 +73,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .map_err(|error| {
             std::io::Error::other(format!(
-                "protocol generation failed with protoc-bin-vendored {PROTOC_BIN_VENDORED_VERSION}, prost-build {PROST_BUILD_VERSION}, and tonic-build {TONIC_BUILD_VERSION}; inputs: packages/proto/game.proto, packages/proto/match.proto; output target: {}; original error: {error}",
+                "protocol generation failed with protoc-bin-vendored {PROTOC_BIN_VENDORED_VERSION}, prost-build {PROST_BUILD_VERSION}, and tonic-build {TONIC_BUILD_VERSION}; inputs: packages/proto/game.proto, packages/proto/game_item.proto, packages/proto/game_activity.proto, packages/proto/match.proto; output target: {}; original error: {error}",
                 out_dir.display()
             ))
         })?;
