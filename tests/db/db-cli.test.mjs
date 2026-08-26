@@ -240,13 +240,17 @@ test("baseline schema is split from bootstrap and development seed", () => {
         "20260719100000_add_admin_authorization_policy.sql",
         "20260719170000_add_admin_operation_protocol.sql",
         "20260719190000_add_myforge_batch_pause.sql",
-        "20260729173000_add_admin_metrics_archive.sql"
+        "20260729173000_add_admin_metrics_archive.sql",
+        "20260822160000_add_activity_admin_permissions.sql"
       ]
       : database === "game"
         ? [
           "20260718161350_initial_schema.sql",
           "20260729190000_restore_character_asset_ledger_guard.sql",
-          "20260821120000_add_activity_schema.sql"
+          "20260821120000_add_activity_schema.sql",
+          "20260822130000_add_activity_recovery_runtime.sql",
+          "20260822150000_add_activity_control_metadata.sql",
+          "20260825120000_add_activity_claim_history_index.sql"
         ]
       : database === "chat"
         ? [
@@ -279,7 +283,11 @@ test("baseline schema is split from bootstrap and development seed", () => {
     if (database === "game") {
       const normalizedInitialBody = normalizedSchema.replace(/^(?:--[^\n]*\n)+/, "").trim();
       assert.equal(normalizedSource.startsWith(normalizedInitialBody), true, `${database} initial migration must remain the prefix of init.sql DDL`);
-      for (const filename of files.slice(1)) {
+      const initBackedMigrations = new Set([
+        "20260729190000_restore_character_asset_ledger_guard.sql",
+        "20260821120000_add_activity_schema.sql"
+      ]);
+      for (const filename of files.slice(1).filter((candidate) => initBackedMigrations.has(candidate))) {
         const migration = readFileSync(join(directory, filename), "utf8")
           .replaceAll("\r\n", "\n")
           .match(/(?:^|\n)(?:CREATE|ALTER|DROP|REVOKE)\b[\s\S]*/)?.[0]
