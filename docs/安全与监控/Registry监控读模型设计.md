@@ -183,16 +183,16 @@ index 与 payload/heartbeat 发生竞争时，发现结果宁可少一个实例�
 
 ## 5. PostgreSQL 归档职责
 
-Redis 只提供最近 `1m`、`5m`、`15m`、`1h` 查询，API 不接受超过一小时的 Redis history window。`metrics_archive`（auth 库）保存服务聚合后的长期数据：一条 `service_name + bucket_time` 记录对应一个 5 秒 bucket，`qps`、`latency_ms`、`online_value` 和低基数扩展字段沿用当前表语义。
+Redis 只提供最近 `1m`、`5m`、`15m`、`1h` 查询，API 不接受超过一小时的 Redis history window。`metrics_archive`（auth 库）保存服务聚合后的长期数据：一条 `service_name + bucket_time` 记录对应一分钟，`bucket_time` 是分钟起点。`qps` 是该分钟请求数除以 60，`latency_ms` 按请求数加权，`online_value` 取该分钟样本平均值；样本数、请求总数、在线峰值和低基数扩展字段写入 `extra`。
 
-归档 worker 是后台任务，不在 HTTP 请求处理器中执行。它按 service 的 `history-index` 用 `ZRANGEBYSCORE` 分批读取已达到 `METRICS_ARCHIVE_AFTER_SECONDS=3600` 的 bucket：
+归档核心由后台调度器和受权限保护的手动接口共用，二者先竞争同一个带 token 校验和续租的 Redis 锁。后台调度器在 `admin-api` 启动后立即执行，此后默认每 5 分钟执行一次。归档按 service 的 `history-index` 用 `ZRANGEBYSCORE` 分批读取已达到 `METRICS_ARCHIVE_AFTER_SECONDS=3600` 的 5 秒 bucket：
 
-1. pipeline 读取 bucket hash，聚合实例 JSON。
-2. 对 `metrics_archive` 执行幂等 upsert。
-3. 仅在数据库提交成功后，`UNLINK` 对应 history hash 并 `ZREM` index member。
-4. 数据库失败或 Redis 局部读取失败时保留原 bucket，记录失败并在下一轮重试。
+1. pipeline 读取 bucket hash，先聚合同一 5 秒桶的实例 JSON，再合并为分钟记录。
+2. 对 `metrics_archive` 按 `service_name + bucket_time` 执行幂等 upsert。
+3. 仅在数据库提交成功后，`UNLINK` 对应的 5 秒 history hash 并 `ZREM` index member。
+4. PostgreSQL 失败或某一分钟内存在 Redis 局部读取/解析失败时保留该分钟全部源 bucket，记录失败并在下一轮重试。
 
-归档默认每 5 分钟执行一次；4,500 秒 retention 留出 15 分钟缓冲。归档积压超过 10 分钟触发 warning，超过 15 分钟触发 critical。长期归档只保存服务聚合值，不承诺按实例重放；需要按实例长期审计时必须另行设计数据库表和数据保留策略。
+4,500 秒 retention 为一小时查询窗口之外留出 15 分钟归档缓冲。长期归档只保存服务分钟聚合值，不承诺按实例重放；PostgreSQL 自动删除策略当前未实现，需要按实例长期审计或限制长期保留周期时必须另行设计表和清理策略。
 
 ## 6. API 读模型与局部降级
 
