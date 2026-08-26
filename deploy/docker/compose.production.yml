@@ -388,6 +388,10 @@ services:
       DISALLOW_LEGACY_DIRECT_CONFIG: "true"
       SERVICE_INSTANCE_ID: admin-api-1
       SERVICE_BUILD_VERSION: ${RELEASE_ID:?set RELEASE_ID}
+      METRICS_ARCHIVE_ENABLED: "true"
+      METRICS_ARCHIVE_INTERVAL_SECONDS: "300"
+      METRICS_ARCHIVE_LOCK_TTL_SECONDS: "240"
+      METRICS_ARCHIVE_BATCH_SIZE: "240"
     depends_on:
       postgres:
         condition: service_healthy

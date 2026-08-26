@@ -6,6 +6,7 @@ import { AuthHttpClient } from "./auth-http-client.js";
 import { AdminSessionStore } from "./auth/admin-session-store.js";
 import { AdminPolicyService } from "./auth/admin-policy.service.js";
 import { createMetricsCollector } from "./metrics.js";
+import { MetricsArchiveScheduler } from "./services/metrics-archive-scheduler.js";
 import { getConfig } from "./config.js";
 import { GameAdminClient } from "./game-admin-client.js";
 import { RegistryClient } from "./registry-client.js";
@@ -59,6 +60,7 @@ import {
   ADMIN_HIGH_RISK_OPERATIONS,
   ADMIN_OPERATION_SAFETY,
   ADMIN_METRICS,
+  ADMIN_METRICS_ARCHIVE_SCHEDULER,
   ADMIN_NATS,
   ADMIN_POLICY,
   ADMIN_REDIS,
@@ -240,6 +242,15 @@ class GameDbPoolShutdown implements OnModuleDestroy {
       inject: [ADMIN_NATS, ADMIN_CONFIG],
       useFactory: (nats: any, config: any) =>
         createMetricsCollector(nats, "admin-api", config.serviceInstanceId)
+    },
+    {
+      provide: ADMIN_METRICS_ARCHIVE_SCHEDULER,
+      inject: [ADMIN_REDIS, ADMIN_DB_POOL, ADMIN_CONFIG],
+      useFactory: (redis: any, dbPool: any, config: any) => {
+        const scheduler = new MetricsArchiveScheduler(redis, dbPool, config);
+        scheduler.start();
+        return scheduler;
+      }
     }
   ]
 })

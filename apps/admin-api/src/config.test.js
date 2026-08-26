@@ -55,6 +55,9 @@ const CONFIG_ENV_KEYS = [
   "METRICS_MAX_INSTANCES_PER_SERVICE",
   "METRICS_HISTORY_RETENTION_SECONDS",
   "METRICS_ARCHIVE_AFTER_SECONDS",
+  "METRICS_ARCHIVE_ENABLED",
+  "METRICS_ARCHIVE_INTERVAL_SECONDS",
+  "METRICS_ARCHIVE_LOCK_TTL_SECONDS",
   "METRICS_ARCHIVE_BATCH_SIZE",
   "APP_ENV",
   "SERVICE_NAME",
@@ -749,14 +752,20 @@ test("admin-api validates bounded monitoring v2 read model configuration", async
     METRICS_MAX_INSTANCES_PER_SERVICE: "64",
     METRICS_HISTORY_RETENTION_SECONDS: "4500",
     METRICS_ARCHIVE_AFTER_SECONDS: "3600",
-    METRICS_ARCHIVE_BATCH_SIZE: "128"
+    METRICS_ARCHIVE_ENABLED: "true",
+    METRICS_ARCHIVE_INTERVAL_SECONDS: "300",
+    METRICS_ARCHIVE_LOCK_TTL_SECONDS: "240",
+    METRICS_ARCHIVE_BATCH_SIZE: "240"
   }, (config) => {
     assert.equal(config.metricsKeyPrefix, "metrics:");
     assert.equal(config.monitoringSnapshotCacheTtlMs, 3000);
     assert.equal(config.monitoringServiceReadConcurrency, 4);
     assert.equal(config.monitoringRedisTimeoutMs, 1000);
     assert.equal(config.metricsArchiveAfterSeconds, 3600);
-    assert.equal(config.metricsArchiveBatchSize, 128);
+    assert.equal(config.metricsArchiveEnabled, true);
+    assert.equal(config.metricsArchiveIntervalSeconds, 300);
+    assert.equal(config.metricsArchiveLockTtlSeconds, 240);
+    assert.equal(config.metricsArchiveBatchSize, 240);
   });
 
   await assert.rejects(
@@ -766,6 +775,14 @@ test("admin-api validates bounded monitoring v2 read model configuration", async
   await assert.rejects(
     withEnv({ MONITORING_SERVICE_READ_CONCURRENCY: "0" }, () => {}),
     /MONITORING_SERVICE_READ_CONCURRENCY/
+  );
+  await assert.rejects(
+    withEnv({ METRICS_ARCHIVE_INTERVAL_SECONDS: "900" }, () => {}),
+    /METRICS_ARCHIVE_INTERVAL_SECONDS/
+  );
+  await assert.rejects(
+    withEnv({ METRICS_ARCHIVE_LOCK_TTL_SECONDS: "301", METRICS_ARCHIVE_INTERVAL_SECONDS: "300" }, () => {}),
+    /METRICS_ARCHIVE_LOCK_TTL_SECONDS/
   );
 });
 

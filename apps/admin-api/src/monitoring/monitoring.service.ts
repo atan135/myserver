@@ -15,7 +15,7 @@ import {
 import { badRequest } from "../common/http-exception.js";
 import { ApiHttpException } from "../common/http-exception.js";
 import { log } from "../logger.js";
-import { runArchiveTask } from "../services/archive.js";
+import { runArchiveTaskWithLock } from "../services/archive.js";
 import { ADMIN_CONFIG, ADMIN_DB_POOL, ADMIN_REDIS } from "../tokens.js";
 import {
   discoverGameProxyAdminEndpoints,
@@ -143,12 +143,16 @@ export class MonitoringService {
 
   async archive() {
     try {
-      const result = await runArchiveTask(this.redis, this.dbPool, this.monitoringOptions());
+      const result = await runArchiveTaskWithLock(this.redis, this.dbPool, this.monitoringOptions());
       return {
         ok: true,
         archived: result.archived,
         failed: result.failed,
-        duration_ms: result.duration_ms
+        source_buckets: result.source_buckets,
+        resolution_seconds: result.resolution_seconds,
+        duration_ms: result.duration_ms,
+        skipped: result.skipped === true,
+        reason: result.reason || null
       };
     } catch (error: any) {
       console.error("[monitoring] archive error:", error);
@@ -260,7 +264,8 @@ export class MonitoringService {
       ),
       metricsHistoryRetentionSeconds: boundedNumber(this.config.metricsHistoryRetentionSeconds, 4500, 3600, 86400),
       metricsArchiveAfterSeconds: boundedNumber(this.config.metricsArchiveAfterSeconds, 3600, 60, 86399),
-      metricsArchiveBatchSize: boundedNumber(this.config.metricsArchiveBatchSize, 128, 1, 720)
+      metricsArchiveBatchSize: boundedNumber(this.config.metricsArchiveBatchSize, 240, 12, 720),
+      metricsArchiveLockTtlMs: boundedNumber(this.config.metricsArchiveLockTtlSeconds, 240, 30, 3600) * 1000
     };
   }
 

@@ -706,8 +706,12 @@ async function handleArchive() {
   archiveLoading.value = true;
   try {
     const response = await monitoringApi.triggerArchive();
+    if (response.data?.skipped) {
+      ElMessage.info("已有归档任务正在执行");
+      return;
+    }
     const archived = response.data?.archived ?? 0;
-    ElMessage.success(`归档完成，写入 ${archived} 条`);
+    ElMessage.success(`归档完成，写入 ${archived} 条分钟数据`);
   } catch (error) {
     ElMessage.error(error.response?.data?.message || "归档失败");
   } finally {

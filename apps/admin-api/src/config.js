@@ -433,6 +433,23 @@ function validateDiscoveryConfig(config) {
       "Invalid admin-api metrics config: METRICS_ARCHIVE_AFTER_SECONDS must be less than METRICS_HISTORY_RETENTION_SECONDS"
     );
   }
+  if (
+    config.metricsArchiveEnabled &&
+    config.metricsArchiveIntervalSeconds >=
+      config.metricsHistoryRetentionSeconds - config.metricsArchiveAfterSeconds
+  ) {
+    throw new Error(
+      "Invalid admin-api metrics config: METRICS_ARCHIVE_INTERVAL_SECONDS must be less than the archive retention buffer"
+    );
+  }
+  if (
+    config.metricsArchiveEnabled &&
+    config.metricsArchiveLockTtlSeconds > config.metricsArchiveIntervalSeconds
+  ) {
+    throw new Error(
+      "Invalid admin-api metrics config: METRICS_ARCHIVE_LOCK_TTL_SECONDS must not exceed METRICS_ARCHIVE_INTERVAL_SECONDS"
+    );
+  }
 }
 
 function collectConfiguredLegacyDirectConfigNames(envNames) {
@@ -627,11 +644,26 @@ export function getConfig() {
       60,
       86399
     ),
+    metricsArchiveEnabled: parseBoolean(process.env.METRICS_ARCHIVE_ENABLED, true),
+    metricsArchiveIntervalSeconds: parseBoundedPositiveInteger(
+      "METRICS_ARCHIVE_INTERVAL_SECONDS",
+      process.env.METRICS_ARCHIVE_INTERVAL_SECONDS,
+      300,
+      30,
+      3600
+    ),
+    metricsArchiveLockTtlSeconds: parseBoundedPositiveInteger(
+      "METRICS_ARCHIVE_LOCK_TTL_SECONDS",
+      process.env.METRICS_ARCHIVE_LOCK_TTL_SECONDS,
+      240,
+      30,
+      3600
+    ),
     metricsArchiveBatchSize: parseBoundedPositiveInteger(
       "METRICS_ARCHIVE_BATCH_SIZE",
       process.env.METRICS_ARCHIVE_BATCH_SIZE,
-      128,
-      1,
+      240,
+      12,
       720
     ),
     natsUrl: process.env.NATS_URL || "nats://127.0.0.1:4222",
