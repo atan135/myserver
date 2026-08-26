@@ -1,5 +1,7 @@
 # 正式 Release 上线说明
 
+日志边界：当前发布流程以 Docker `local` driver 提供的有限日志窗口为准，排障入口是 `docker logs`。普通运行日志采集器属于 v2 目标态，完成后应按[服务端日志采集与留存设计](../../安全与监控/服务端日志采集与留存设计.md)作为独立运维组件纳入发布准入和回滚保留范围；在采集器落地前，不把 `/data/myserver/log` 当作已可用的发布产物或日志事实源。
+
 ## 1. 适用范围
 
 本文是 MyServer 单机 Docker 正式上线的执行手册，适用于 schema v2 `images.lock.json` 的 release。它覆盖 `Rust`、`Node`、PostgreSQL、Redis、NATS、Caddy 和独立的 `migration-runner`，不适用于名称含 `-docker-test-` 的验证镜像。

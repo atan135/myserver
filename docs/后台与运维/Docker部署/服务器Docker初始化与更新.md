@@ -41,6 +41,8 @@ docker info
 }
 ```
 
+上述 `local` driver 只负责 Docker 侧的固定大小短期缓冲。当前尚未部署普通运行日志采集器，日志查看仍以 `docker logs` 为准；采集器完成后，目标是持续读取 Docker 日志并按 UTC 日期写入 `/data/myserver/log`。完整职责、补采和丢失边界见[服务端日志采集与留存设计](../../安全与监控/服务端日志采集与留存设计.md)。
+
 可设置 `vm.overcommit_memory=1` 以满足 Redis 建议。小型 swap 只能作为防止宿主机立刻失联的最后缓冲，不能用来掩盖内存预算错误；一旦出现持续 swap in/out，应降载或调整配额而非继续运行。
 
 ### 2.2 网络边界
@@ -67,7 +69,7 @@ docker info
   release/        # 已审阅的 release bundle，按 release ID 分目录
   secrets/        # 仅服务器本地，0700 目录、0600 文件
   backups/
-  logs/
+  log/             # v2 目标：采集器按服务/实例/UTC 日期写入；当前为预留目录
   sockets/        # 临时 local socket，不备份、不跨主机复制
 ```
 
@@ -176,7 +178,7 @@ DISALLOW_LEGACY_DIRECT_CONFIG=true
 以下条件全部满足后，才允许开放玩家和运营流量：
 
 - 所有容器均使用 `images.lock.json` 中的 digest，且运行镜像与 release ID 一致。
-- PostgreSQL、Redis、NATS 可用，且磁盘、内存、日志目录和数据目录均有剩余空间。
+- PostgreSQL、Redis、NATS 可用，且磁盘、内存、`/data/myserver/log`（如已启用采集器）、Docker 日志和数据目录均有剩余空间。
 - registry 自身可访问；每个应注册服务都有正确的 service name、instance ID、endpoint、visibility 和 heartbeat。
 - 所有关键依赖可通过 registry 发现，未使用 `GAME_PROXY_HOST`、`GAME_SERVER_ADMIN_HOST`、`MATCH_SERVICE_ADDR` 等 local fallback。
 - `game-proxy` 的 Redis route store 使用生产要求的 backend；玩家入口的 advertised host/port 为客户端可达地址，而内部 endpoint 不泄露到登录响应。
@@ -200,7 +202,7 @@ Redis 保持 `maxmemory-policy noeviction`，因此达到 `maxmemory` 后会拒�
 
 1. 确认 admin-api 和归档任务只读 metrics v2，保存当前 v2 snapshot/history 连续性证据。
 2. 发布并确认 metrics-collector 启动日志为 `metrics_legacy_write_enabled=0`，观察至少两个 5 秒上报周期，确认 legacy 最新 bucket 不再前移。
-3. 按[Registry 监控读模型设计](../../../安全与监控/Registry监控读模型设计.md#82-legacy-清理工具)先执行 dry-run，复核目标、排除分类和数量。
+3. 按[Registry 监控读模型设计](../../安全与监控/Registry监控读模型设计.md#82-legacy-清理工具)先执行 dry-run，复核目标、排除分类和数量。
 4. 获得明确线上变更授权后，用限速 `UNLINK` 工具释放 legacy Hash，持续观察 Redis CPU、延迟和 `used_memory/maxmemory`；内存降至 75% 以下后停止扩大删除速率。
 5. 验证 Redis OOM 错误不再增长，再按依赖顺序恢复 `game-server`、`match-service`、`chat-server` 和 `auth-http`，确认 worker lease、registry heartbeat、readiness/health 与重启计数稳定。
 
@@ -251,7 +253,7 @@ Redis 保持 `maxmemory-policy noeviction`，因此达到 `maxmemory` 后会拒�
 - Redis：本部署以 AOF 为恢复来源，RDB snapshot 已禁用；备份 AOF 持久文件。其恢复不能替代 PostgreSQL 恢复。恢复后须核对 registry、session/ticket 失效策略和 route store 一致性。
 - NATS：当前使用 Core NATS，不应把它当作持久业务队列或备份来源。
 - 配置与 release bundle：备份受版本控制的非敏感配置和 `images.lock.json`；secret 按 secret manager 的独立恢复流程处理。
-- 每日巡检：磁盘、inode、Docker 日志、容器重启次数、OOM、CPU steal、内存/Swap、PostgreSQL 连接和慢查询、Redis 内存、NATS 连接、registry heartbeat、备份最近成功时间。
+- 每日巡检：磁盘、inode、Docker 日志、`/data/myserver/log` 采集器输出（启用后）、容器重启次数、OOM、CPU steal、内存/Swap、PostgreSQL 连接和慢查询、Redis 内存、NATS 连接、registry heartbeat、备份最近成功时间。
 
 ## 6. 单机限制
 

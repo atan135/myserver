@@ -14,6 +14,8 @@
 /home/gameops/script/ops-disk-report.sh
 ```
 
+当前 `ops-logs.sh` 直接读取目标容器的 `docker logs`，对应 Docker `local` driver 的有限保留窗口。普通运行日志采集器完成 v2 Checklist 后，日常排障入口应优先切换为采集器在 `/data/myserver/log` 的按日输出；`docker logs` 仍保留为采集延迟、重启或落盘故障时的短期兜底。采集器尚未落地前，不要假定该目录已有完整日志。
+
 `ops-restart.sh` 只重启现有容器，不重新读取 Compose 定义、环境文件或镜像。`ops-replace.sh` 使用当前 release 的 Compose 定义执行单服务 `up -d --no-deps`，不会连带重建依赖。两者先确认目标容器已运行且其可用 healthcheck 已通过，再复用当前 release 的统一 readiness 收敛函数；不能以容器 `running` 或单次 health 成功作为整个操作的完成条件。其余参数由脚本白名单校验，避免将服务名传递为任意 Docker 参数。
 
 `ops-retire.sh` 是 game-server 滚动替换的部署平台 stop hook。候选实例 Ready 后先启动该脚本；它精确核验 Compose service/project、旧实例 ID 和完整镜像 Git revision，并将 project 纳入确认串，再将旧容器 restart policy 临时改为 `no`，然后只等待正式 admin-api 两人审批和 break-glass 链触发的 graceful shutdown。drain 后旧实例发布 unhealthy，不再进入玩家路由或普通 healthy discovery；shutdown 路径只通过隔离的 live admin discovery 访问 heartbeat 仍活跃、service/instance identity 精确匹配且声明 `admin`/`admin`/`tcp` 传输元数据的同一实例，再以实际连接、签名断言认证和停机响应确认控制口可用，不会把旧实例重新加入业务流量。endpoint 的 `healthy` 是整体 readiness 的投影，drain 后允许为 false；连接、认证或响应失败仍会 fail-closed。脚本不接受或读取管理员 token、nonce，也不调用 admin-api。只有同一容器以 exit code 0 且非 OOM 退出时才保留 stopped；失败会恢复原 restart policy 和运行期望。异常中断遗留的 pending journal 会阻止 deploy/restart/replace/rollback，必须使用相同 instance/revision/project/confirm 加 `--recover` 精确恢复。即使旧容器已经干净退出，`--recover` 也会恢复 `unless-stopped` 并重新启动旧实例，清除 journal 后本次 retire 即告结束；确认候选状态后必须发起新的 retire 周期，不能把 recover 当成继续等待。该 stop hook 不负责自动创建候选实例，当前 release runner 也不因此自动具备 old/new 灰度编排。
