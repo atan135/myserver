@@ -23,7 +23,6 @@ import { AdminBreakglassService } from "./operations/admin-breakglass.service.js
 import { AdminHighRiskOperationService } from "./operations/admin-high-risk-operation.service.js";
 import { AdminOperationSafetyService } from "./operations/admin-operation-safety.service.js";
 import { AdminOperationController } from "./operations/admin-operation.controller.js";
-import { RolesGuard } from "./auth/roles.guard.js";
 import { AdminsController } from "./admins/admins.controller.js";
 import { AuditController } from "./audit/audit.controller.js";
 import { AssetLedgerController } from "./assets/asset-ledger.controller.js";
@@ -111,7 +110,6 @@ class GameDbPoolShutdown implements OnModuleDestroy {
     AdminOperationSafetyService,
     JwtAuthGuard,
     AdminPolicyGuard,
-    RolesGuard,
     GameDbPoolShutdown,
     MonitoringService,
     RoomTransferService,

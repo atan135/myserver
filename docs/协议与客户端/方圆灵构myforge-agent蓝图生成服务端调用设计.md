@@ -1088,7 +1088,7 @@ myforge_task_cancelled
 
 ## 12. HTTP API 和响应
 
-所有 HTTP 路由位于 /api/v1，使用现有 JwtAuthGuard、RolesGuard 和统一响应格式。成功响应包含 ok: true；失败响应沿用：
+所有 HTTP 路由位于 /api/v1，使用现有 JwtAuthGuard、AdminPolicyGuard 和统一响应格式。成功响应包含 ok: true；失败响应沿用：
 
 ~~~json
 {

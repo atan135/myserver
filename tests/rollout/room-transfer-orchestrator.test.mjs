@@ -3,6 +3,7 @@ import http from "node:http";
 import test from "node:test";
 
 import {
+  GameServerTransferClient,
   ProxyAdminClient,
   ROOM_TRANSFER_FAILURE_INJECTION,
   ROOM_TRANSFER_STAGE,
@@ -340,8 +341,26 @@ test("proxy admin client sends actor header for auditable writes", async () => {
   try {
     const proxy = new ProxyAdminClient({
       baseUrl: `http://127.0.0.1:${port}`,
-      token: "proxy-token",
+      readToken: "proxy-read-token",
       actor: "ops@example.com",
+      assertionProvider: async ({ method, path }) => ({
+        version: 1,
+        operationId: "test-operation",
+        requestId: "test-request",
+        traceId: "test-trace",
+        issuer: "test",
+        keyId: "test-v1",
+        actorId: "7",
+        permission: "proxy.route.write",
+        scope: {},
+        target: { targetType: "room", targetIds: ["room-1"] },
+        service: "game-proxy",
+        instanceId: "proxy-1",
+        issuedAtMs: 1,
+        expiresAtMs: 9999999999999,
+        payloadSha256: `${method}:${path}`,
+        signature: "test"
+      }),
       timeoutMs: 500
     });
 
@@ -368,7 +387,7 @@ test("proxy admin client sends actor header for auditable writes", async () => {
 
     assert.equal(requests.length, 3);
     assert.equal(requests[0].url, "/room-routes");
-    assert.equal(requests[0].authorization, "Bearer proxy-token");
+    assert.equal(requests[0].authorization, "Bearer proxy-read-token");
     assert.equal(requests[0].actor, "ops@example.com");
     assert(requests[1].url.startsWith("/room-route/upsert?"));
     assert.equal(requests[1].actor, "ops@example.com");
@@ -380,6 +399,22 @@ test("proxy admin client sends actor header for auditable writes", async () => {
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }
+});
+
+test("proxy admin client rejects writes without a signed assertion provider", async () => {
+  const proxy = new ProxyAdminClient({ baseUrl: "http://127.0.0.1:1", readToken: "read-token" });
+  await assert.rejects(
+    () => proxy.upsertCharacterRoute({ characterId: "chr-1", preferredServerId: "game-server-new", rolloutEpoch: "rollout-1" }),
+    (error) => error.code === "ADMIN_ASSERTION_REQUIRED"
+  );
+});
+
+test("game-server transfer client rejects writes without a signed assertion provider", async () => {
+  const server = new GameServerTransferClient({ host: "127.0.0.1", port: 1 });
+  await assert.rejects(
+    () => server.freezeRoomForTransfer({ rolloutEpoch: "rollout-1", roomId: "room-1" }),
+    (error) => error.code === "ADMIN_ASSERTION_REQUIRED"
+  );
 });
 
 test("proxy admin client missing route plus required metadata stops before upsert", async () => {
@@ -401,7 +436,7 @@ test("proxy admin client missing route plus required metadata stops before upser
   });
   clients.proxy = new ProxyAdminClient({
     baseUrl: `http://127.0.0.1:${port}`,
-    token: "proxy-token",
+    readToken: "proxy-read-token",
     actor: "ops@example.com",
     timeoutMs: 500
   });

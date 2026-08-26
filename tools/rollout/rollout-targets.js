@@ -120,7 +120,6 @@ export function controlTargetSpec(options, target) {
       protocols: GAME_SERVER_ADMIN_PROTOCOLS,
       host: options.oldAdminHost,
       port: options.oldAdminPort,
-      tokenKey: "oldAdminToken"
     };
   }
   if (target === "newGameServerAdmin") {
@@ -132,7 +131,6 @@ export function controlTargetSpec(options, target) {
       protocols: GAME_SERVER_ADMIN_PROTOCOLS,
       host: options.newAdminHost,
       port: options.newAdminPort,
-      tokenKey: "newAdminToken"
     };
   }
   if (target === "gameProxyAdmin") {
@@ -143,7 +141,6 @@ export function controlTargetSpec(options, target) {
       instanceId: options.proxyInstanceId || "",
       protocols: GAME_PROXY_ADMIN_PROTOCOLS,
       url: options.proxyAdminUrl,
-      tokenKey: "proxyAdminToken"
     };
   }
   throw new Error(`unknown rollout control target: ${target}`);

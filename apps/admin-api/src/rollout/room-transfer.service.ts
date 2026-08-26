@@ -13,6 +13,18 @@ type RoomTransferInput = {
   newServerId: string;
   proxyInstanceId: string;
   backupReference: string;
+  characterId?: string;
+  requestId: string;
+  actorId: number | string;
+};
+
+type CharacterRouteInput = {
+  worldId: string;
+  characterId: string;
+  currentRoomId?: string;
+  preferredServerId?: string;
+  rolloutEpoch: string;
+  proxyInstanceId: string;
   requestId: string;
   actorId: number | string;
 };
@@ -60,6 +72,7 @@ export class RoomTransferService {
   ) {}
 
   normalizeInput(body: any, actorId: number | string): RoomTransferInput {
+    const characterId = typeof body?.characterId === "string" ? body.characterId.trim() : "";
     return {
       worldId: requireIdentifier(body?.worldId ?? body?.world_id, "worldId"),
       rolloutEpoch: requireIdentifier(body?.rolloutEpoch ?? body?.rollout_epoch, "rolloutEpoch"),
@@ -68,6 +81,7 @@ export class RoomTransferService {
       newServerId: requireIdentifier(body?.newServerId ?? body?.new_server_id, "newServerId"),
       proxyInstanceId: requireIdentifier(body?.proxyInstanceId ?? body?.proxy_instance_id, "proxyInstanceId"),
       backupReference: requireIdentifier(body?.backupReference ?? body?.backup_reference, "backupReference"),
+      ...(characterId ? { characterId: requireIdentifier(characterId, "characterId") } : {}),
       requestId: requireIdentifier(body?.requestId ?? body?.request_id, "requestId"),
       actorId: requireIdentifier(actorId, "actorId")
     };
@@ -121,6 +135,9 @@ export class RoomTransferService {
       };
       const proxyAssertionProvider = async ({ method, path }: any) => {
         const instanceId = requireIdentifier(targets.proxy.instanceId, "game-proxy instanceId");
+        const characterRoute = String(path).startsWith("/character-route/");
+        const targetType = characterRoute ? "character" : "room";
+        const targetIds = characterRoute && input.characterId ? [input.characterId] : [input.roomId];
         const payload = Buffer.from(`${String(method).toUpperCase()}\n${path}`, "utf8");
         return this.assertions.issue({
           actorId: input.actorId,
@@ -129,12 +146,12 @@ export class RoomTransferService {
             worldId: input.worldId,
             serviceName: "game-proxy",
             instanceId,
-            targetType: "room",
-            targetIds: [input.roomId],
+            targetType,
+            targetIds,
             targetCount: 1
           },
-          target: { targetType: "room", targetIds: [input.roomId], worldId: input.worldId },
-          requestId: downstreamRequestId(input.requestId, "proxy_route_upsert", instanceId),
+          target: { targetType, targetIds, worldId: input.worldId },
+          requestId: downstreamRequestId(input.requestId, characterRoute ? "proxy_character_route_upsert" : "proxy_route_upsert", instanceId),
           traceId: `trace-${input.requestId}`
         }, "game-proxy", instanceId, payload);
       };
@@ -150,22 +167,66 @@ export class RoomTransferService {
       });
       const proxy = new rollout.ProxyAdminClient({
         baseUrl: endpointUrl(targets.proxy),
-        token: this.config.gameProxyAdminReadToken || this.config.gameProxyAdminToken,
+        readToken: this.config.gameProxyAdminReadToken || this.config.gameProxyAdminToken,
         assertionProvider: proxyAssertionProvider,
         timeoutMs: this.config.gameProxyAdminRequestTimeoutMs
       });
-      return await rollout.orchestrateRoomTransfer({
+      const transfer = await rollout.orchestrateRoomTransfer({
         rolloutEpoch: input.rolloutEpoch,
         roomId: input.roomId,
         oldServerId: input.oldServerId,
         newServerId: input.newServerId,
         requireExistingRouteMetadata: false
       }, { oldServer, newServer, proxy });
+      if (transfer.ok && input.characterId) {
+        await proxy.upsertCharacterRoute({
+          characterId: input.characterId,
+          currentRoomId: input.roomId,
+          preferredServerId: input.newServerId,
+          rolloutEpoch: input.rolloutEpoch
+        });
+      }
+      return transfer;
     } catch (error: any) {
       if (typeof error?.code === "string" && error.code) {
         throw error;
       }
       throw controlPlaneError("ROLLOUT_DOWNSTREAM_FAILED", error?.message || "Room transfer downstream request failed");
+    }
+  }
+
+  async upsertCharacterRoute(input: CharacterRouteInput) {
+    const target = await this.resolveProxyTarget(input.proxyInstanceId);
+    try {
+      const rollout = await import(new URL("../../../../tools/rollout/rollout-transfer.js", import.meta.url).href);
+      const proxy = new rollout.ProxyAdminClient({
+        baseUrl: endpointUrl(target),
+        readToken: this.config.gameProxyAdminReadToken || this.config.gameProxyAdminToken,
+        assertionProvider: async ({ method, path }: any) => {
+          const instanceId = requireIdentifier(target.instanceId, "game-proxy instanceId");
+          const payload = Buffer.from(`${String(method).toUpperCase()}\n${path}`, "utf8");
+          return this.assertions.issue({
+            actorId: input.actorId,
+            permission: "proxy.route.write",
+            scope: {
+              worldId: input.worldId,
+              serviceName: "game-proxy",
+              instanceId,
+              targetType: "character",
+              targetIds: [input.characterId],
+              targetCount: 1
+            },
+            target: { targetType: "character", targetIds: [input.characterId], worldId: input.worldId },
+            requestId: downstreamRequestId(input.requestId, "proxy_character_route_upsert", instanceId),
+            traceId: `trace-${input.requestId}`
+          }, "game-proxy", instanceId, payload);
+        },
+        timeoutMs: this.config.gameProxyAdminRequestTimeoutMs
+      });
+      return await proxy.upsertCharacterRoute(input);
+    } catch (error: any) {
+      if (typeof error?.code === "string" && error.code) throw error;
+      throw controlPlaneError("ROLLOUT_DOWNSTREAM_FAILED", error?.message || "Character route update failed");
     }
   }
 
@@ -182,5 +243,15 @@ export class RoomTransferService {
       throw controlPlaneError("ROLLOUT_TARGET_NOT_FOUND", "One or more rollout targets are not discoverable");
     }
     return { old, new: next, proxy };
+  }
+
+  private async resolveProxyTarget(instanceId: string) {
+    if (!this.config.registryDiscoveryEnabled || !this.redis) {
+      throw controlPlaneError("SERVICE_DISCOVERY_REQUIRED", "Character route updates require registry discovery");
+    }
+    const proxyEndpoints = await discoverGameProxyAdminEndpoints(this.redis, this.config);
+    const target = proxyEndpoints.find((endpoint: any) => endpoint.instanceId === instanceId && endpoint.healthy !== false);
+    if (!target) throw controlPlaneError("ROLLOUT_TARGET_NOT_FOUND", "game-proxy target is not discoverable");
+    return target;
   }
 }

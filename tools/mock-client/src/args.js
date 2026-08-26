@@ -46,6 +46,7 @@ const DEFAULT_OPTIONS = {
   httpBaseUrl: "http://127.0.0.1:3000",
   adminBaseUrl: "http://127.0.0.1:3001",
   adminToken: process.env.MYSERVER_ADMIN_TOKEN || process.env.ADMIN_API_TOKEN || "",
+  worldId: process.env.MYSERVER_WORLD_ID || "default-world",
   gameServerInstanceId: process.env.MYSERVER_GAME_SERVER_INSTANCE_ID || "",
   backupReference: process.env.MYSERVER_CONTROL_BACKUP_REFERENCE || "",
   adminLogLimit: 20,
@@ -169,9 +170,6 @@ const DEFAULT_OPTIONS = {
   ...createDefaultRolloutTargetOptions(),
   oldServerId: "game-server-old",
   newServerId: "game-server-new",
-  oldAdminToken: process.env.MYSERVER_OLD_GAME_ADMIN_TOKEN || process.env.GAME_ADMIN_TOKEN || "",
-  newAdminToken: process.env.MYSERVER_NEW_GAME_ADMIN_TOKEN || process.env.GAME_ADMIN_TOKEN || "",
-  proxyAdminToken: process.env.PROXY_ADMIN_TOKEN || "",
   proxyAdminActor: process.env.MYSERVER_PROXY_ADMIN_ACTOR || "mock-client",
   redirectTargetHost: "",
   redirectTargetPort: 0,
@@ -227,6 +225,9 @@ export function parseArgs(argv) {
         break;
       case "--game-server-instance-id":
         ({ value: result.gameServerInstanceId, nextIndex: index } = collectOptionValue(argv, index));
+        break;
+      case "--world-id":
+        ({ value: result.worldId, nextIndex: index } = collectOptionValue(argv, index));
         break;
       case "--backup-reference":
         ({ value: result.backupReference, nextIndex: index } = collectOptionValue(argv, index));
@@ -427,9 +428,6 @@ export function parseArgs(argv) {
         result.oldAdminPort = Number.parseInt(collectOptionValue(argv, index).value, 10);
         index = collectOptionValue(argv, index).nextIndex;
         break;
-      case "--old-admin-token":
-        ({ value: result.oldAdminToken, nextIndex: index } = collectOptionValue(argv, index));
-        break;
       case "--new-admin-instance-id":
         ({ value: result.newAdminInstanceId, nextIndex: index } = collectOptionValue(argv, index));
         break;
@@ -443,9 +441,6 @@ export function parseArgs(argv) {
         result.newAdminPort = Number.parseInt(collectOptionValue(argv, index).value, 10);
         index = collectOptionValue(argv, index).nextIndex;
         break;
-      case "--new-admin-token":
-        ({ value: result.newAdminToken, nextIndex: index } = collectOptionValue(argv, index));
-        break;
       case "--proxy-instance-id":
         ({ value: result.proxyInstanceId, nextIndex: index } = collectOptionValue(argv, index));
         break;
@@ -454,9 +449,6 @@ export function parseArgs(argv) {
         break;
       case "--proxy-admin-url":
         ({ value: result.proxyAdminUrl, nextIndex: index } = collectOptionValue(argv, index));
-        break;
-      case "--proxy-admin-token":
-        ({ value: result.proxyAdminToken, nextIndex: index } = collectOptionValue(argv, index));
         break;
       case "--proxy-admin-actor":
         ({ value: result.proxyAdminActor, nextIndex: index } = collectOptionValue(argv, index));

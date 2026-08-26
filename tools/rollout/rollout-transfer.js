@@ -663,7 +663,6 @@ export class GameServerTransferClient {
     }
     this.host = options.host;
     this.port = options.port;
-    this.token = options.token || "";
     this.assertionProvider = typeof options.assertionProvider === "function"
       ? options.assertionProvider
       : null;
@@ -734,9 +733,12 @@ export class GameServerTransferClient {
   }
 
   async sendRequest(messageType, body, expectedMessageType) {
-    const assertion = this.assertionProvider
-      ? await this.assertionProvider({ messageType, payload: body })
-      : null;
+    if (!this.assertionProvider) {
+      const error = new Error("A signed admin operation assertion is required for game-server writes");
+      error.code = "ADMIN_ASSERTION_REQUIRED";
+      throw error;
+    }
+    const assertion = await this.assertionProvider({ messageType, payload: body });
     return await new Promise((resolve, reject) => {
       const socket = net.createConnection({ host: this.host, port: this.port });
       let buffer = Buffer.alloc(0);
@@ -761,13 +763,15 @@ export class GameServerTransferClient {
         const authPacket = encodePacket(
           this.authMessageType,
           0,
-          assertion ? Buffer.from('{"mode":"assertion"}', "utf8") : Buffer.from(this.token, "utf8")
+          Buffer.from('{"mode":"assertion"}', "utf8")
         );
-        const assertionPacket = assertion
-          ? encodePacket(MESSAGE_TYPE.ADMIN_OPERATION_ASSERTION_REQ, 0, Buffer.from(JSON.stringify(assertion), "utf8"))
-          : null;
+        const assertionPacket = encodePacket(
+          MESSAGE_TYPE.ADMIN_OPERATION_ASSERTION_REQ,
+          0,
+          Buffer.from(JSON.stringify(assertion), "utf8")
+        );
         const packet = encodePacket(messageType, this.nextSeq(), body);
-        socket.write(Buffer.concat(assertionPacket ? [authPacket, assertionPacket, packet] : [authPacket, packet]), (error) => {
+        socket.write(Buffer.concat([authPacket, assertionPacket, packet]), (error) => {
           if (error) {
             finish(error);
           }
@@ -820,7 +824,7 @@ export class ProxyAdminClient {
       throw new Error("proxy admin client requires a resolved game-proxy.admin URL");
     }
     this.baseUrl = options.baseUrl.replace(/\/+$/, "");
-    this.token = options.token || "";
+    this.readToken = options.readToken || "";
     this.actor = options.actor || "";
     this.assertionProvider = typeof options.assertionProvider === "function"
       ? options.assertionProvider
@@ -878,14 +882,18 @@ export class ProxyAdminClient {
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
     try {
       const method = String(init.method || "GET").toUpperCase();
-      const assertion = method === "GET" || !this.assertionProvider
-        ? null
-        : await this.assertionProvider({ method, path });
+      const isWrite = method !== "GET" && method !== "HEAD";
+      if (isWrite && !this.assertionProvider) {
+        const error = new Error("A signed admin operation assertion is required for proxy writes");
+        error.code = "ADMIN_ASSERTION_REQUIRED";
+        throw error;
+      }
+      const assertion = isWrite ? await this.assertionProvider({ method, path }) : null;
       const response = await fetch(`${this.baseUrl}${path}`, {
         ...init,
         signal: controller.signal,
         headers: {
-          ...(this.token ? { authorization: `Bearer ${this.token}` } : {}),
+          ...(this.readToken ? { authorization: `Bearer ${this.readToken}` } : {}),
           ...(this.actor ? { "x-admin-actor": this.actor } : {}),
           ...(assertion ? { "x-admin-operation-assertion": Buffer.from(JSON.stringify(assertion), "utf8").toString("base64url") } : {}),
           ...(init.headers || {})

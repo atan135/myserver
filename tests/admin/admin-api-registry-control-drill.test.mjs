@@ -24,7 +24,7 @@ register("ts-node/esm", pathToFileURL("./"));
 
 const { GmController } = await import("../../apps/admin-api/src/gm/gm.controller.js");
 const { JwtAuthGuard } = await import("../../apps/admin-api/src/auth/jwt-auth.guard.js");
-const { RolesGuard } = await import("../../apps/admin-api/src/auth/roles.guard.js");
+const { AdminPolicyGuard } = await import("../../apps/admin-api/src/auth/admin-policy.guard.js");
 const { HttpExceptionFilter } = await import("../../apps/admin-api/src/common/http-exception.filter.js");
 const { MonitoringController } = await import("../../apps/admin-api/src/monitoring/monitoring.controller.js");
 const { MonitoringService } = await import("../../apps/admin-api/src/monitoring/monitoring.service.js");
@@ -32,7 +32,9 @@ const {
   ADMIN_CONFIG,
   ADMIN_DB_POOL,
   ADMIN_GAME_ADMIN_CLIENT,
+  ADMIN_HIGH_RISK_OPERATIONS,
   ADMIN_NATS,
+  ADMIN_POLICY,
   ADMIN_REDIS,
   ADMIN_SESSION_STORE,
   ADMIN_STORE
@@ -132,6 +134,33 @@ class MemoryRegistryRedis {
       .filter((key) => matchesGlob(key, pattern))
       .sort();
     return ["0", keys];
+  }
+
+  async zrangebyscore(key) {
+    const match = String(key).match(/service:([^:]+):instance-index$/);
+    if (!match) return [];
+    const serviceName = match[1];
+    return [...this.hashes.keys()]
+      .map((entry) => entry.match(/service:([^:]+):instances:([^:]+)$/))
+      .filter((entry) => entry && entry[1] === serviceName)
+      .map((entry) => entry[2]);
+  }
+
+  pipeline() {
+    const commands = [];
+    return {
+      hget: (key, field) => { commands.push(["hget", key, field]); return this; },
+      exists: (key) => { commands.push(["exists", key]); return this; },
+      ttl: (key) => { commands.push(["ttl", key]); return this; },
+      exec: async () => {
+        const values = await Promise.all(commands.map(([method, ...args]) => method === "ttl" ? 60 : this[method](...args)));
+        return values.map((value) => [null, value]);
+      }
+    };
+  }
+
+  async ttl() {
+    return 60;
   }
 }
 
@@ -351,7 +380,9 @@ function makeAdminStore() {
 }
 
 async function createAdminHttpTestApp({ config, redis, adminStore = makeAdminStore() }) {
-  const gameAdminClient = new GameAdminClient(config, redis);
+  const assertions = { issue: async () => ({ version: 1, operationId: "test", requestId: "test", traceId: "test", issuer: "test", keyId: "test", actorId: "1", permission: "gm.send_item", scope: {}, target: {}, service: "game-server", instanceId: "game-server-gm", issuedAtMs: 1, expiresAtMs: Date.now() + 10000, payloadSha256: "test", signature: "test" }) };
+  const gameAdminClient = new GameAdminClient(config, redis, assertions);
+  gameAdminClient.sendItem = async () => ({ ok: true, instanceId: "game-server-gm" });
   const nats = {
     publishes: [],
     async publishJson(subject, payload) {
@@ -380,6 +411,7 @@ async function createAdminHttpTestApp({ config, redis, adminStore = makeAdminSto
         }
       : null;
   };
+  adminStore.findCharacterById = async (characterId) => ({ id: characterId, worldId: "world-1" });
   adminStore.appendSecurityAuditLog ??= async () => {};
 
   class AdminRegistryControlDrillModule {}
@@ -394,9 +426,11 @@ async function createAdminHttpTestApp({ config, redis, adminStore = makeAdminSto
       { provide: ADMIN_NATS, useValue: nats },
       { provide: ADMIN_STORE, useValue: adminStore },
       { provide: ADMIN_SESSION_STORE, useValue: sessionStore },
+      { provide: ADMIN_POLICY, useValue: { authorize: async () => ({ allowed: true, code: "ALLOWED" }) } },
+      { provide: ADMIN_HIGH_RISK_OPERATIONS, useValue: { run: async (input) => ({ state: "executed", result: await input.execute() }) } },
       { provide: ADMIN_GAME_ADMIN_CLIENT, useValue: gameAdminClient },
       JwtAuthGuard,
-      RolesGuard
+      { provide: AdminPolicyGuard, useValue: { canActivate: () => true } }
     ]
   })(AdminRegistryControlDrillModule);
 
@@ -497,6 +531,7 @@ test("admin-api HTTP status and GM routes use registry game-server.admin under s
       targetInstanceId: "game-server-gm"
     }
   });
+  if (gmResponse.statusCode !== 200) console.log("gmResponse", gmResponse.statusCode, gmResponse.body);
   assert.equal(gmResponse.statusCode, 200);
   const gmResult = parseJsonResponse(gmResponse);
 

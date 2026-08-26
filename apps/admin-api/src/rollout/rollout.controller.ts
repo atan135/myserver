@@ -75,6 +75,25 @@ function gameServerInstanceListPolicyScope() {
   };
 }
 
+function gameServerRedirectPolicyScope(request: any) {
+  const instanceId = requireInstanceId(request?.params?.instanceId);
+  const body = request?.body || {};
+  const roomId = typeof body.roomId === "string" ? body.roomId.trim() : "";
+  if (!roomId) {
+    const error: any = new Error("roomId is required");
+    error.code = "ROLLOUT_INPUT_INVALID";
+    throw error;
+  }
+  return {
+    worldId: typeof body.worldId === "string" && body.worldId.trim() ? body.worldId.trim() : "*",
+    serviceName: "game-server",
+    instanceId,
+    targetType: "room",
+    targetIds: [roomId],
+    targetCount: 1
+  };
+}
+
 function gameServerAssertionContext(
   req: any,
   body: any,
@@ -310,6 +329,91 @@ export class RolloutController {
     }
   }
 
+  @Post("game-server/:instanceId/redirect")
+  @UseGuards(JwtAuthGuard, AdminPolicyGuard)
+  @Permissions("game.room.transfer")
+  @PolicyScopeResolver(gameServerRedirectPolicyScope)
+  @HttpCode(HttpStatus.OK)
+  async redirectGameServer(
+    @Param("instanceId") rawInstanceId: string,
+    @Body() body: any,
+    @Req() req: any
+  ) {
+    try {
+      const instanceId = requireInstanceId(rawInstanceId);
+      const scope = gameServerRedirectPolicyScope({ params: { instanceId }, body });
+      const requiredText = (value: unknown, field: string) => {
+        const normalized = typeof value === "string" ? value.trim() : "";
+        if (!normalized) {
+          const error: any = new Error(`${field} is required`);
+          error.code = "ROLLOUT_INPUT_INVALID";
+          throw error;
+        }
+        return normalized;
+      };
+      const targetPort = Number(body?.targetPort);
+      if (!Number.isInteger(targetPort) || targetPort < 1 || targetPort > 65535) {
+        const error: any = new Error("targetPort is invalid");
+        error.code = "ROLLOUT_INPUT_INVALID";
+        throw error;
+      }
+      const roomId = requiredText(body?.roomId, "roomId");
+      const rolloutEpoch = requiredText(body?.rolloutEpoch, "rolloutEpoch");
+      const targetHost = requiredText(body?.targetHost, "targetHost");
+      const targetServerId = requiredText(body?.targetServerId, "targetServerId");
+      const operation = await this.highRiskOperations.run({
+        request: req,
+        permission: "game.room.transfer",
+        scope,
+        targetSummary: { targetType: "room", targetIds: [roomId], worldId: scope.worldId, instanceId },
+        payload: {
+          action: "server_redirect",
+          roomId,
+          rolloutEpoch,
+          instanceId,
+          targetServerId,
+          targetPort,
+          transport: body?.transport || "tcp",
+          retryAfterMs: Number(body?.retryAfterMs || 0)
+        },
+        impactSummary: { action: "server_redirect", roomId, instanceId, targetServerId },
+        reason: body?.reason,
+        execute: () => this.gameAdminClient.triggerServerRedirect({
+          roomId,
+          rolloutEpoch,
+          reason: body?.reason || "rollout_redirect",
+          targetHost,
+          targetPort,
+          targetServerId,
+          transport: body?.transport || "tcp",
+          retryAfterMs: Number(body?.retryAfterMs || 0)
+        }, {
+          targetInstanceId: instanceId,
+          requireRegistryTarget: true,
+          assertionContext: {
+            actorId: req.admin?.sub,
+            permission: "game.room.transfer",
+            scope,
+            target: { targetType: "room", targetIds: [roomId], worldId: scope.worldId },
+            requestId: requestId(body),
+            traceId: `trace-${requestId(body)}`
+          }
+        }),
+        resultSummary: (result: any) => ({
+          action: "server_redirect",
+          roomId,
+          instanceId,
+          targetServerId,
+          ok: result?.ok === true,
+          errorCode: result?.errorCode || ""
+        })
+      });
+      return operation.state === "executed" ? operation.result : operation.response;
+    } catch (error: any) {
+      throw rolloutError(error);
+    }
+  }
+
   @Post("room-transfer")
   @UseGuards(JwtAuthGuard, AdminPolicyGuard)
   @Permissions("game.room.transfer")
@@ -336,7 +440,8 @@ export class RolloutController {
           oldServerId: input.oldServerId,
           newServerId: input.newServerId,
           proxyInstanceId: input.proxyInstanceId,
-          backupReference: input.backupReference
+          backupReference: input.backupReference,
+          ...(input.characterId ? { characterId: input.characterId } : {})
         },
         payload: {
           worldId: input.worldId,
@@ -345,7 +450,8 @@ export class RolloutController {
           oldServerId: input.oldServerId,
           newServerId: input.newServerId,
           proxyInstanceId: input.proxyInstanceId,
-          backupReference: input.backupReference
+          backupReference: input.backupReference,
+          ...(input.characterId ? { characterId: input.characterId } : {})
         },
         impactSummary: {
           targetType: "room",

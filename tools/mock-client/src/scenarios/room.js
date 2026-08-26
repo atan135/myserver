@@ -25,15 +25,6 @@ import {
   summarizeRedirectReconnectResult,
   validateServerRedirectPush
 } from "../server-redirect-reconnect.js";
-import {
-  GameServerTransferClient,
-  ProxyAdminClient,
-  orchestrateRoomTransfer
-} from "../../../rollout/rollout-transfer.js";
-import {
-  resolveAndApplyRolloutControlTargets,
-  validateControlTargetOptions
-} from "../../../rollout/rollout-targets.js";
 
 const DRAIN_MODE_REJECT_NEW_ROOM_ERROR = "SERVER_DRAINING_REJECT_NEW_ROOM";
 const PROCESS_EXIT_POLL_MS = 200;
@@ -243,6 +234,40 @@ async function postGameServerControl(options, action, body) {
     throw new Error(`${action} game-server control request failed with status ${response.status}: ${JSON.stringify(payload)}`);
   }
   return payload;
+}
+
+async function postAdminControl(options, path, body) {
+  const baseUrl = String(options.adminBaseUrl || "").replace(/\/+$/, "");
+  const token = String(options.adminToken || "").trim();
+  if (!baseUrl || !token) {
+    throw new Error("adminBaseUrl and adminToken are required for admin control-plane writes");
+  }
+  const response = await fetch(`${baseUrl}${path}`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+    body: JSON.stringify(body)
+  });
+  const payload = await response.json().catch(() => ({ ok: false, error: "INVALID_CONTROL_PLANE_RESPONSE" }));
+  if (!response.ok) {
+    throw new Error(`admin control-plane request failed with status ${response.status}: ${JSON.stringify(payload)}`);
+  }
+  return payload;
+}
+
+async function runAdminControlOperation(options, path, input, label) {
+  const requestId = `mock-client-${label}-${randomUUID()}`;
+  const explicitBackupReference = String(options.backupReference || "").trim();
+  const backupReference = explicitBackupReference || `${requestId}-recovery`;
+  const body = { ...input, requestId, backupReference };
+  const preflight = await postAdminControl(options, path, body);
+  if (!preflight?.preflight?.nonce || !preflight?.preflight?.summarySha256) {
+    throw new Error(`${label} control-plane preflight response is invalid`);
+  }
+  return postAdminControl(options, path, {
+    ...body,
+    preflightNonce: preflight.preflight.nonce,
+    preflightSummarySha256: preflight.preflight.summarySha256
+  });
 }
 
 export async function runGameServerControlOperation(options, action, input) {
@@ -580,114 +605,30 @@ async function reconnectAfterRedirect(options, login, redirect) {
   }
 }
 
-async function runRoomTransferForRedirect(options, redirect) {
-  const rolloutEpoch = options.rolloutEpoch || redirect.rolloutEpoch;
-  if (!rolloutEpoch) {
-    throw new Error("server-redirect-transfer-reconnect requires --rollout-epoch or a redirect rollout epoch");
-  }
-  const targetErrors = validateControlTargetOptions(options, { requireNew: true, requireProxy: true });
-  if (targetErrors.length > 0) {
-    throw new Error(targetErrors.join("; "));
-  }
-  if (
-    !options.resolvedControlTargets?.oldGameServerAdmin ||
-    !options.resolvedControlTargets?.newGameServerAdmin ||
-    !options.resolvedControlTargets?.gameProxyAdmin
-  ) {
-    await resolveAndApplyRolloutControlTargets(options, { requireNew: true, requireProxy: true });
-  }
-
-  const oldServer = new GameServerTransferClient({
-    host: options.oldAdminHost,
-    port: options.oldAdminPort,
-    token: options.oldAdminToken,
-    timeoutMs: options.timeoutMs
-  });
-  const newServer = new GameServerTransferClient({
-    host: options.newAdminHost,
-    port: options.newAdminPort,
-    token: options.newAdminToken,
-    timeoutMs: options.timeoutMs
-  });
-  const proxy = new ProxyAdminClient({
-    baseUrl: options.proxyAdminUrl,
-    token: options.proxyAdminToken,
-    actor: options.proxyAdminActor,
-    timeoutMs: options.timeoutMs
-  });
-
-  const transfer = await orchestrateRoomTransfer(
-    {
-      rolloutEpoch,
-      roomId: options.roomId,
-      oldServerId: options.oldServerId,
-      newServerId: options.newServerId
-    },
-    { oldServer, newServer, proxy }
-  );
-  console.log("serverRedirectTransferResult:", JSON.stringify(transfer, null, 2));
-  if (!transfer.ok) {
-    throw new Error(`redirect transfer failed at ${transfer.stage}: ${transfer.errorCode || transfer.error || "ERROR"}`);
-  }
-  return transfer;
-}
-
-async function bindRedirectCharacterRoute(options, login, redirect, transfer) {
-  const proxy = new ProxyAdminClient({
-    baseUrl: options.proxyAdminUrl,
-    token: options.proxyAdminToken,
-    actor: options.proxyAdminActor,
-    timeoutMs: options.timeoutMs
-  });
-  const result = await proxy.upsertCharacterRoute({
-    characterId: login.characterId,
-    currentRoomId: options.roomId,
-    preferredServerId: options.newServerId,
-    rolloutEpoch: transfer.rolloutEpoch || options.rolloutEpoch || redirect.rolloutEpoch || ""
-  });
-  console.log("serverRedirectCharacterRouteResult:", JSON.stringify({
-    ok: result.ok,
-    characterId: login.characterId,
-    currentRoomId: options.roomId,
-    preferredServerId: options.newServerId,
-    rolloutEpoch: transfer.rolloutEpoch || options.rolloutEpoch || redirect.rolloutEpoch || ""
-  }, null, 2));
-  return result;
-}
-
 async function triggerRedirectForCurrentRoom(options) {
   const rolloutEpoch = options.rolloutEpoch;
   if (!rolloutEpoch) {
     throw new Error("server-redirect-transfer-reconnect requires --rollout-epoch before redirect trigger");
   }
-  const targetErrors = validateControlTargetOptions(options, { requireNew: false, requireProxy: false });
-  if (targetErrors.length > 0) {
-    throw new Error(targetErrors.join("; "));
-  }
-  if (!options.resolvedControlTargets?.oldGameServerAdmin) {
-    await resolveAndApplyRolloutControlTargets(options, { requireNew: false, requireProxy: false });
-  }
-
-  const oldServer = new GameServerTransferClient({
-    host: options.oldAdminHost,
-    port: options.oldAdminPort,
-    token: options.oldAdminToken,
-    timeoutMs: options.timeoutMs
-  });
   const targetHost = options.redirectTargetHost || options.gameHost || options.host;
   const targetPort = options.redirectTargetPort || options.port;
   const targetServerId = options.redirectTargetServerId || options.newServerId || "game-proxy";
-
-  const result = await oldServer.triggerServerRedirect({
-    rolloutEpoch,
-    roomId: options.roomId,
-    reason: options.redirectReason || "rollout_redirect",
-    targetHost,
-    targetPort,
-    targetServerId,
-    transport: options.redirectTransport || "tcp",
-    retryAfterMs: Number.isFinite(options.redirectRetryAfterMs) ? options.redirectRetryAfterMs : 0
-  });
+  const result = await runAdminControlOperation(
+    options,
+    `/api/v1/rollouts/game-server/${encodeURIComponent(options.oldServerId)}/redirect`,
+    {
+      worldId: options.worldId,
+      roomId: options.roomId,
+      rolloutEpoch,
+      reason: options.redirectReason || "rollout_redirect",
+      targetHost,
+      targetPort,
+      targetServerId,
+      transport: options.redirectTransport || "tcp",
+      retryAfterMs: Number.isFinite(options.redirectRetryAfterMs) ? options.redirectRetryAfterMs : 0
+    },
+    "server-redirect"
+  );
   console.log("serverRedirectTriggerResult:", JSON.stringify(result, null, 2));
   if (!result.ok) {
     throw new Error(`trigger server redirect failed: ${result.errorCode}`);
@@ -1839,6 +1780,8 @@ export async function runServerRedirectReconnect(options) {
       timeoutMs: options.timeoutMs
     }, null, 2));
 
+    await triggerRedirectForCurrentRoom(options);
+
     const redirect = await oldClient.readUntil(
       options.timeoutMs,
       (packet) => packet.messageType === MESSAGE_TYPE.SERVER_REDIRECT_PUSH,
@@ -1872,7 +1815,24 @@ export async function runServerRedirectTransferReconnect(options) {
       timeoutMs: options.timeoutMs
     }, null, 2));
 
-    await triggerRedirectForCurrentRoom(options);
+    const transferRequest = await runAdminControlOperation(
+      options,
+      "/api/v1/rollouts/room-transfer",
+      {
+        worldId: options.worldId,
+        rolloutEpoch: options.rolloutEpoch,
+        roomId: options.roomId,
+        oldServerId: options.oldServerId,
+        newServerId: options.newServerId,
+        proxyInstanceId: options.proxyInstanceId,
+        characterId: login.characterId,
+        reason: options.redirectReason || "rollout_redirect"
+      },
+      "server-redirect-transfer"
+    );
+    if (!transferRequest?.ok) {
+      throw new Error(`redirect transfer failed: ${transferRequest?.errorCode || JSON.stringify(transferRequest)}`);
+    }
 
     const redirect = await oldClient.readUntil(
       options.timeoutMs,
@@ -1882,8 +1842,7 @@ export async function runServerRedirectTransferReconnect(options) {
     validateServerRedirectPush(redirect, options.roomId);
 
     oldClient.close();
-    const transfer = await runRoomTransferForRedirect(options, redirect);
-    await bindRedirectCharacterRoute(options, login, redirect, transfer);
+    const transfer = transferRequest.result || transferRequest;
     const reconnect = await reconnectAfterRedirect(options, login, redirect);
 
     const result = {

@@ -18,6 +18,8 @@ const MESSAGE_TYPE = {
   GET_ROLLOUT_DRAIN_STATUS_RES: 1610,
   REQUEST_SERVER_SHUTDOWN_REQ: 1617,
   REQUEST_SERVER_SHUTDOWN_RES: 1618,
+  TRIGGER_SERVER_REDIRECT_REQ: 1611,
+  TRIGGER_SERVER_REDIRECT_RES: 1612,
   ADMIN_OPERATION_ASSERTION_REQ: 2098,
   ADMIN_AUTH_REQ: 2099,
   // GM Commands
@@ -110,6 +112,23 @@ function encodeRequestServerShutdownReq(reason) {
   return encodeStringField(1, reason);
 }
 
+function encodeUInt64Field(fieldNumber, value) {
+  return Buffer.concat([encodeVarint(fieldNumber << 3), encodeVarint(BigInt(value || 0))]);
+}
+
+function encodeTriggerServerRedirectReq(request) {
+  return Buffer.concat([
+    encodeStringField(1, request.roomId),
+    encodeStringField(2, request.rolloutEpoch),
+    encodeStringField(3, request.reason || "rollout_redirect"),
+    encodeStringField(4, request.targetHost),
+    encodeUInt64Field(5, request.targetPort),
+    encodeStringField(6, request.targetServerId || ""),
+    encodeStringField(7, request.transport || "tcp"),
+    encodeUInt64Field(8, request.retryAfterMs)
+  ]);
+}
+
 function decodeVarint(bytes, startOffset) {
   let value = 0n;
   let shift = 0n;
@@ -178,6 +197,18 @@ function protobufBytesList(fields, number) {
   const value = fields.get(number);
   if (Buffer.isBuffer(value)) return [value];
   return Array.isArray(value) ? value.filter((item) => Buffer.isBuffer(item)) : [];
+}
+
+function decodeTriggerServerRedirectRes(body) {
+  const fields = decodeSimpleProtobuf(body);
+  return {
+    ok: protobufBool(fields, 1),
+    roomId: protobufString(fields, 2),
+    errorCode: protobufString(fields, 3),
+    deliveredCount: Number(fields.get(4) || 0n),
+    failedCount: Number(fields.get(5) || 0n),
+    onlineMemberCount: Number(fields.get(6) || 0n)
+  };
 }
 
 function protobufCount(fields, number) {
@@ -722,6 +753,29 @@ export class GameAdminClient {
         instance_id: endpointSummary?.instanceId || "",
         endpoint: endpointSummary
       };
+    } catch (error) {
+      throw attachEndpointToError(error, endpoint);
+    }
+  }
+
+  async triggerServerRedirect(request, options = {}) {
+    const payload = encodeTriggerServerRedirectReq(request);
+    const endpoint = await this.resolveAdminEndpoint({ ...options, requireExplicitTarget: true });
+    try {
+      const requestOptions = await this.writeRequestOptions(
+        endpoint,
+        MESSAGE_TYPE.TRIGGER_SERVER_REDIRECT_REQ,
+        payload,
+        options
+      );
+      const body = await sendRequest(
+        this.config,
+        MESSAGE_TYPE.TRIGGER_SERVER_REDIRECT_REQ,
+        payload,
+        MESSAGE_TYPE.TRIGGER_SERVER_REDIRECT_RES,
+        requestOptions
+      );
+      return decodeTriggerServerRedirectRes(body);
     } catch (error) {
       throw attachEndpointToError(error, endpoint);
     }
