@@ -696,6 +696,8 @@ export function parseArgs(argv) {
       case "--json-output":
         result.jsonOutput = true;
         break;
+      default:
+        throw new Error(`unknown argument: ${arg}`);
     }
   }
 

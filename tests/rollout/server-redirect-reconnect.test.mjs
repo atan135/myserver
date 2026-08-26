@@ -137,3 +137,9 @@ test("server redirect reconnect cli options parse policy and delayed reconnect",
   assert.equal(options.redirectRetryAfterMs, 250);
   assert.equal(options.allowRedirectJoinFallback, true);
 });
+
+test("mock-client rejects legacy direct admin token arguments", () => {
+  assert.throws(() => parseArgs(["--old-admin-token", "legacy"]), /unknown argument: --old-admin-token/);
+  assert.throws(() => parseArgs(["--new-admin-token", "legacy"]), /unknown argument: --new-admin-token/);
+  assert.throws(() => parseArgs(["--proxy-admin-token", "legacy"]), /unknown argument: --proxy-admin-token/);
+});

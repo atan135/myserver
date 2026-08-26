@@ -18,17 +18,6 @@ type RoomTransferInput = {
   actorId: number | string;
 };
 
-type CharacterRouteInput = {
-  worldId: string;
-  characterId: string;
-  currentRoomId?: string;
-  preferredServerId?: string;
-  rolloutEpoch: string;
-  proxyInstanceId: string;
-  requestId: string;
-  actorId: number | string;
-};
-
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$/;
 
 function controlPlaneError(code: string, message = code) {
@@ -195,41 +184,6 @@ export class RoomTransferService {
     }
   }
 
-  async upsertCharacterRoute(input: CharacterRouteInput) {
-    const target = await this.resolveProxyTarget(input.proxyInstanceId);
-    try {
-      const rollout = await import(new URL("../../../../tools/rollout/rollout-transfer.js", import.meta.url).href);
-      const proxy = new rollout.ProxyAdminClient({
-        baseUrl: endpointUrl(target),
-        readToken: this.config.gameProxyAdminReadToken || this.config.gameProxyAdminToken,
-        assertionProvider: async ({ method, path }: any) => {
-          const instanceId = requireIdentifier(target.instanceId, "game-proxy instanceId");
-          const payload = Buffer.from(`${String(method).toUpperCase()}\n${path}`, "utf8");
-          return this.assertions.issue({
-            actorId: input.actorId,
-            permission: "proxy.route.write",
-            scope: {
-              worldId: input.worldId,
-              serviceName: "game-proxy",
-              instanceId,
-              targetType: "character",
-              targetIds: [input.characterId],
-              targetCount: 1
-            },
-            target: { targetType: "character", targetIds: [input.characterId], worldId: input.worldId },
-            requestId: downstreamRequestId(input.requestId, "proxy_character_route_upsert", instanceId),
-            traceId: `trace-${input.requestId}`
-          }, "game-proxy", instanceId, payload);
-        },
-        timeoutMs: this.config.gameProxyAdminRequestTimeoutMs
-      });
-      return await proxy.upsertCharacterRoute(input);
-    } catch (error: any) {
-      if (typeof error?.code === "string" && error.code) throw error;
-      throw controlPlaneError("ROLLOUT_DOWNSTREAM_FAILED", error?.message || "Character route update failed");
-    }
-  }
-
   private async resolveTargets(input: RoomTransferInput) {
     if (!this.config.registryDiscoveryEnabled || !this.redis) {
       throw controlPlaneError("SERVICE_DISCOVERY_REQUIRED", "Room transfer requires registry discovery");
@@ -245,13 +199,4 @@ export class RoomTransferService {
     return { old, new: next, proxy };
   }
 
-  private async resolveProxyTarget(instanceId: string) {
-    if (!this.config.registryDiscoveryEnabled || !this.redis) {
-      throw controlPlaneError("SERVICE_DISCOVERY_REQUIRED", "Character route updates require registry discovery");
-    }
-    const proxyEndpoints = await discoverGameProxyAdminEndpoints(this.redis, this.config);
-    const target = proxyEndpoints.find((endpoint: any) => endpoint.instanceId === instanceId && endpoint.healthy !== false);
-    if (!target) throw controlPlaneError("ROLLOUT_TARGET_NOT_FOUND", "game-proxy target is not discoverable");
-    return target;
-  }
 }

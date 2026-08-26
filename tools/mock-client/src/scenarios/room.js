@@ -1815,6 +1815,8 @@ export async function runServerRedirectTransferReconnect(options) {
       timeoutMs: options.timeoutMs
     }, null, 2));
 
+    await triggerRedirectForCurrentRoom(options);
+
     const transferRequest = await runAdminControlOperation(
       options,
       "/api/v1/rollouts/room-transfer",
