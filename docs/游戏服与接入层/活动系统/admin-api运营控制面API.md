@@ -443,7 +443,7 @@ curl -sS -X POST "$BASE/api/v1/activities/$ACTIVITY_ID/preflight" \
 
 ### 5. 发布不可变版本
 
-只有预检通过且版本基线仍未变化时才发布：
+活动发布属于高风险操作。除了上一步的活动配置预检外，必须先用唯一 `requestId` 请求发布接口取得控制面预检，再由操作者确认影响摘要，最后复用同一 `requestId`、`preflightNonce` 和 `preflightSummarySha256` 执行。第一次请求只创建预检，不会发布版本：
 
 ```bash
 curl -sS -X POST "$BASE/api/v1/activities/$ACTIVITY_ID/publish" \
@@ -452,11 +452,28 @@ curl -sS -X POST "$BASE/api/v1/activities/$ACTIVITY_ID/publish" \
   -d '{
     "version": 2,
     "ifMatch": "W/\"activity/<activityId>/<revision-after-step-3>\"",
-    "reason": "预检通过，发布夏日登录活动"
+    "reason": "预检通过，发布夏日登录活动",
+    "requestId": "activity-publish-20260901-0001"
   }'
 ```
 
-成功响应会返回 `status: "published"`、`snapshot`、`configDigest`，以及配置刷新通知结果：`notification.status` 为 `sent` 或 `failed`。数据库版本已经发布后，Redis 刷新通知失败不会回滚版本；自动化程序应告警并检查各 `game-server` 实例的刷新指标。
+响应中的 `preflight.nonce`、`preflight.summarySha256` 和 `preflight.impactSummary` 仅用于本次确认。确认后执行第二次请求：
+
+```bash
+curl -sS -X POST "$BASE/api/v1/activities/$ACTIVITY_ID/publish" \
+  -H "Authorization: Bearer $MYSERVER_ADMIN_JWT" \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "version": 2,
+    "ifMatch": "W/\"activity/<activityId>/<revision-after-step-3>\"",
+    "reason": "预检通过，发布夏日登录活动",
+    "requestId": "activity-publish-20260901-0001",
+    "preflightNonce": "<response.preflight.nonce>",
+    "preflightSummarySha256": "<response.preflight.summarySha256>"
+  }'
+```
+
+成功响应会返回 `status: "published"`、`snapshot`、`configDigest`，以及配置刷新通知结果：`notification.status` 为 `sent` 或 `failed`。如果执行结果为 `execution_uncertain`，不要直接重试，应先查询操作审计和活动详情。数据库版本已经发布后，Redis 刷新通知失败不会回滚版本；自动化程序应告警并检查各 `game-server` 实例的刷新指标。
 
 ### 6. 发布后核验和记录查询
 
@@ -488,7 +505,7 @@ curl -G -sS "$BASE/api/v1/activities/$ACTIVITY_ID/records" \
 
 ### 7. 下线当前发布版本
 
-下线前重新 GET 详情，使用最新的当前版本和 ETag。不要沿用发布响应之前缓存的值：
+下线同样属于高风险操作。下线前重新 GET 详情，使用最新的当前版本和 ETag；先请求一次下线接口取得预检，再复用同一 `requestId`、nonce 和摘要执行。不要沿用发布响应之前缓存的值：
 
 ```bash
 curl -sS -X POST "$BASE/api/v1/activities/$ACTIVITY_ID/offline" \
@@ -497,11 +514,12 @@ curl -sS -X POST "$BASE/api/v1/activities/$ACTIVITY_ID/offline" \
   -d '{
     "version": 2,
     "ifMatch": "W/\"activity/<activityId>/<revision-after-publish>\"",
-    "reason": "活动结束，按计划下线"
+    "reason": "活动结束，按计划下线",
+    "requestId": "activity-offline-20260908-0001"
   }'
 ```
 
-下线不会删除配置、玩家状态、领取记录、抽奖记录或奖励流水。响应状态为 `offline`，并带有 `offlineReason`；下线后的活动不能再领取，即使 `claimDeadline` 尚未到达。
+第一次响应为控制面预检时，将 `preflight.nonce` 和 `preflight.summarySha256` 写入第二次请求的 `preflightNonce`、`preflightSummarySha256`。执行成功后下线不会删除配置、玩家状态、领取记录、抽奖记录或奖励流水。响应状态为 `offline`，并带有 `offlineReason`；下线后的活动不能再领取，即使 `claimDeadline` 尚未到达。若返回 `execution_uncertain`，先核对审计和详情，不要直接重试。
 
 ### 8. 修改已发布或已下线活动：fork 新草稿并发布新版本
 
