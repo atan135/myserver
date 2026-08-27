@@ -8,6 +8,7 @@ use std::sync::Arc;
 use futures_util::StreamExt;
 use redis::AsyncCommands;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tokio::sync::RwLock;
 use tracing::{info, warn};
 
@@ -1247,8 +1248,10 @@ pub async fn run_redis_route_store_update_listener(
             }
         };
         let Some(notification) = parse_route_store_update_notification(&payload) else {
+            let payload_digest = format!("{:x}", Sha256::digest(payload.as_bytes()));
             warn!(
-                payload = %payload,
+                payload_len = payload.len(),
+                payload_sha256 = %payload_digest,
                 "ignored malformed proxy route store update notification"
             );
             continue;

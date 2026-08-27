@@ -162,7 +162,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         config::RouteStoreBackend::Redis => {
             tracing::info!(
-                redis_url = %config.route_store_redis_url,
+                redis_url_configured = !config.route_store_redis_url.is_empty(),
                 key_prefix = %config.route_store_key_prefix,
                 "using redis proxy route store"
             );

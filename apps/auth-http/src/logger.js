@@ -7,6 +7,63 @@ import log4js from "log4js";
 let configured = false;
 let logger = null;
 
+const MAX_LOG_STRING_BYTES = 512;
+const MAX_LOG_ARRAY_ITEMS = 32;
+const MAX_LOG_OBJECT_KEYS = 64;
+const MAX_LOG_DEPTH = 4;
+const SENSITIVE_FIELD_PATTERN = /(authorization|ticket|token|secret|password|private.?key|signing.?key|content|body|attachments?|payload)/i;
+const SENSITIVE_TEXT_PATTERN = /(?:GAME_ADMIN_TOKEN|AUTH_(?:JWT|INTERNAL)_SECRET|\b(?:authorization|ticket|token|secret|password|content|body|attachments?|payload)\b)/i;
+const ENDPOINT_PATTERN = /\b(redis|rediss|postgres|postgresql|nats|tcp|https?):\/\/[^\s"'`,;]+/gi;
+const REDACTED_ERROR_DETAIL = "[REDACTED_ERROR_DETAIL]";
+const ERROR_DETAIL_FIELDS = new Set(["error", "lasterror", "message", "detail", "details", "cause"]);
+const STABLE_ERROR_IDENTITY_FIELDS = new Set(["code", "errorcode", "errorcategory"]);
+const STABLE_ERROR_IDENTITY_PATTERN = /^[A-Z][A-Z0-9_]{0,127}$/;
+
+function truncateUtf8(value, maxBytes = MAX_LOG_STRING_BYTES) {
+  let result = "";
+  let bytes = 0;
+  for (const character of String(value ?? "")) {
+    const characterBytes = Buffer.byteLength(character, "utf8");
+    if (bytes + characterBytes > maxBytes) return `${result}[TRUNCATED]`;
+    result += character;
+    bytes += characterBytes;
+  }
+  return result;
+}
+
+function sanitizeLogText(value) {
+  const text = String(value ?? "");
+  if (SENSITIVE_TEXT_PATTERN.test(text)) return "[REDACTED_SENSITIVE_DETAIL]";
+  return truncateUtf8(text.replace(ENDPOINT_PATTERN, "$1://[REDACTED_ENDPOINT]"));
+}
+
+function sanitizeLogValue(value, fieldName = "", depth = 0) {
+  if (value instanceof Error) {
+    return { name: truncateUtf8(value.name, 64), ...(value.code ? { code: sanitizeLogValue(value.code, "code", depth + 1) } : {}), message: REDACTED_ERROR_DETAIL };
+  }
+  const normalized = String(fieldName || "").replace(/[_-]/g, "").toLowerCase();
+  if (STABLE_ERROR_IDENTITY_FIELDS.has(normalized)) {
+    return typeof value === "string" && STABLE_ERROR_IDENTITY_PATTERN.test(value) ? value : "[INVALID_ERROR_IDENTITY]";
+  }
+  if (ERROR_DETAIL_FIELDS.has(normalized)) return REDACTED_ERROR_DETAIL;
+  if (SENSITIVE_FIELD_PATTERN.test(fieldName)) return "[REDACTED]";
+  if (value === null || value === undefined || typeof value === "boolean" || typeof value === "number") return value;
+  if (typeof value === "string") return sanitizeLogText(value);
+  if (value instanceof Date) return value.toISOString();
+  if (depth >= MAX_LOG_DEPTH) return "[TRUNCATED_DEPTH]";
+  if (Array.isArray(value)) return value.slice(0, MAX_LOG_ARRAY_ITEMS).map((item) => sanitizeLogValue(item, "", depth + 1));
+  if (typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).slice(0, MAX_LOG_OBJECT_KEYS).map(([key, item]) => [key, sanitizeLogValue(item, key, depth + 1)]));
+  }
+  return sanitizeLogText(value);
+}
+
+export function formatLogPayload(message, extra = {}) {
+  const safeMessage = sanitizeLogText(message);
+  const safeExtra = sanitizeLogValue(extra);
+  return Object.keys(safeExtra || {}).length === 0 ? safeMessage : `${safeMessage} ${JSON.stringify(safeExtra)}`;
+}
+
 export const requestContext = new AsyncLocalStorage();
 
 function normalizeLevel(level) {
@@ -80,9 +137,7 @@ export function log(level, message, extra = {}) {
   const activeLogger = getLogger();
   const ctx = requestContext.getStore();
   const prefix = ctx?.requestId ? `[${ctx.requestId}] ` : "";
-  const payload = Object.keys(extra).length === 0
-    ? `${prefix}${message}`
-    : `${prefix}${message} ${JSON.stringify(extra)}`;
+  const payload = formatLogPayload(`${prefix}${message}`, extra);
 
   if (typeof activeLogger[level] === "function") {
     activeLogger[level](payload);

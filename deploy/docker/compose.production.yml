@@ -106,6 +106,7 @@ services:
       CSV_DIR: /app/csv
       CSV_RELOAD_ENABLED: "true"
       DB_ENABLED: "true"
+      GAME_ADMIN_AUDIT_PATH: /var/log/myserver/admin-audit.jsonl
       LOG_ENABLE_FILE: "false"
       REGISTRY_ENABLED: "true"
       DISCOVERY_REQUIRED: "true"
@@ -121,7 +122,7 @@ services:
       - ${GAME_CSV_DIR:?set GAME_CSV_DIR}:/app/csv:ro
       - ${GAME_SCENE_DIR:?set GAME_SCENE_DIR}:/app/scene:ro
       - game-sockets:/run/myserver
-      - game-audit:/var/log/myserver
+      - game-server-audit:/var/log/myserver
     depends_on:
       game-socket-init:
         condition: service_completed_successfully
@@ -327,6 +328,7 @@ services:
       SERVICE_ADMIN_ADVERTISED_HOST: game-proxy
       SERVICE_TCP_FALLBACK_ADVERTISED_HOST: ${GAME_PROXY_ADVERTISED_HOST:?set GAME_PROXY_ADVERTISED_HOST}
       PROXY_ROUTE_STORE_BACKEND: redis
+      PROXY_ADMIN_AUDIT_PATH: /var/log/myserver/admin-audit.jsonl
       LOG_ENABLE_FILE: "false"
       REGISTRY_ENABLED: "true"
       DISCOVERY_REQUIRED: "true"
@@ -341,7 +343,7 @@ services:
       - "${GAME_PROXY_UDP_PORT:-4000}:4000/udp"
     volumes:
       - game-sockets:/run/myserver
-      - game-audit:/var/log/myserver
+      - game-proxy-audit:/var/log/myserver
     depends_on:
       redis:
         condition: service_healthy
@@ -491,7 +493,8 @@ volumes:
   redis-data:
   nats-data:
   game-sockets:
-  game-audit:
+  game-server-audit:
+  game-proxy-audit:
   caddy-data:
   caddy-config:
 

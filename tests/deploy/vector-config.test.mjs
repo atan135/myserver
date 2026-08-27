@@ -43,6 +43,9 @@ test("Vector bundle has the frozen source, sink, and metadata contract", async (
   assert.match(config, /message_sha256/);
   assert.match(config, /invalid_utf8/);
   assert.match(config, /parse_regex\(\.message/);
+  const sourceBlock = config.match(/sources:[\s\S]*?transforms:/)?.[0] ?? "";
+  assert.match(sourceBlock, /type:\s*docker_logs/);
+  assert.doesNotMatch(sourceBlock, /type:\s*file/);
   for (const service of services) assert.match(config, new RegExp(`"${service}"`));
   for (const field of [
     "service",
@@ -70,6 +73,7 @@ test("Vector bundle has the frozen source, sink, and metadata contract", async (
   assert.match(unit, /^ExecStart=\/usr\/bin\/vector --config \/etc\/vector\/vector\.yaml$/m);
   assert.match(unit, /^ProtectSystem=strict$/m);
   assert.match(unit, /^ReadWritePaths=\/var\/lib\/vector \/data\/myserver\/log$/m);
+  assert.doesNotMatch(unit, /\/var\/log\/myserver/);
   await access(path.join(vectorDir, "vector.yaml"));
   await access(path.join(vectorDir, "vector.service"));
 });
@@ -118,6 +122,7 @@ test("release bundle copies the Vector assets", async () => {
 
 test("production preflight and log operations preserve the Vector-first contract", async () => {
   const preflight = await readFile(path.join(scriptDir, "vector-preflight.sh"), "utf8");
+  const scanner = await readFile(path.join(scriptDir, "scan-log-sensitive-patterns.mjs"), "utf8");
   const logs = await readFile(path.join(root, "deploy/docker/scripts/ops-logs.sh"), "utf8");
   const releaseRunner = await readFile(path.join(scriptDir, "server-apply-release.sh"), "utf8");
   assert.match(preflight, /docker inspect --format '\{\{\.HostConfig\.LogConfig\.Type\}\}'/);
@@ -127,6 +132,9 @@ test("production preflight and log operations preserve the Vector-first contract
   assert.match(preflight, /\/var\/run\/docker\.sock/);
   assert.match(preflight, /runuser -u vector -- test -w/);
   assert.match(preflight, /vector_api_unreachable/);
+  assert.match(scanner, /never[\s\S]+reads env files/);
+  assert.match(scanner, /JSON\\.stringify.*extra/);
+  assert.match(scanner, /raw credential\/URL\/payload\/stack field/);
   assert.match(logs, /VECTOR_LOG_ROOT=\/data\/myserver\/log/);
   assert.match(logs, /vector_fallback=true/);
   assert.match(logs, /docker logs/);
@@ -134,4 +142,19 @@ test("production preflight and log operations preserve the Vector-first contract
   assert.match(logs, /--date/);
   assert.match(releaseRunner, /vector_preflight.*--allow-missing/);
   assert.match(releaseRunner, /assert_chat_server_replica_count 1[\s\S]+vector_preflight.*--release-dir/);
+});
+
+test("production admin audit paths and volumes are isolated per service", async () => {
+  const compose = await readFile(path.join(root, "deploy/docker/compose.production.yml"), "utf8");
+  const gameServer = compose.match(/  game-server:[\s\S]*?(?=\n  [a-z0-9-]+:|\nvolumes:)/)?.[0] ?? "";
+  const gameProxy = compose.match(/  game-proxy:[\s\S]*?(?=\n  [a-z0-9-]+:|\nvolumes:)/)?.[0] ?? "";
+  assert.match(gameServer, /GAME_ADMIN_AUDIT_PATH: \/var\/log\/myserver\/admin-audit\.jsonl/);
+  assert.match(gameServer, /game-server-audit:\/var\/log\/myserver/);
+  assert.match(gameProxy, /PROXY_ADMIN_AUDIT_PATH: \/var\/log\/myserver\/admin-audit\.jsonl/);
+  assert.match(gameProxy, /game-proxy-audit:\/var\/log\/myserver/);
+  assert.doesNotMatch(gameServer, /game-server-audit:\/var\/log\/myserver:ro/);
+  assert.doesNotMatch(gameProxy, /game-proxy-audit:\/var\/log\/myserver:ro/);
+  assert.doesNotMatch(compose, /game-audit/);
+  assert.match(compose, /\n  game-server-audit:\r?\n/);
+  assert.match(compose, /\n  game-proxy-audit:\r?\n/);
 });

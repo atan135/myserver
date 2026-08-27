@@ -2,6 +2,7 @@ import { spawnSync } from "node:child_process";
 
 const testFiles = [
   "src/config.test.js",
+  "src/logger.test.js",
   "src/registry-client.test.js",
   "src/service-discovery.test.js",
   "src/client-service-response.test.js",

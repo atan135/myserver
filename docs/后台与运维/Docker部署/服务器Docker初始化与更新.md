@@ -47,7 +47,7 @@ docker info
 
 部署后的查询入口按数据职责划分：普通日志优先读 `/data/myserver/log/<service>/<UTC 日期>/` 已关闭 `.jsonl` 分片，Vector 不可用时退回 `docker logs`；admin/security audit 读 PostgreSQL 审计表或 admin-api 审计查询，数据库迁移/部署审计读各库 `_myserver_migration_audit` 与 SQLx history；metrics 读 metrics v2 存储。普通日志、审计和 metrics 不能相互充当事实源。
 
-release bundle 的 `vector/` 目录固定提供 Vector `0.47.0` 版本清单、YAML 配置和 systemd unit，配套 `scripts/verify-vector.sh`、`scripts/install-vector.sh`、`scripts/vector-preflight.sh`、`scripts/vector-status.sh`。安装前必须离线校验 bundle 文件；安装器验证宿主机 `/usr/bin/vector` 版本，只写 `/etc/vector`、`/var/lib/vector`、`/data/myserver/log` 和 unit 文件，不自动启动 Vector。业务发布前必须通过 preflight 的实际 Docker `local` driver、容器挂载隔离、checkpoint/queue 可写和采集延迟检查。升级/回滚需保留已校验的上一版本二进制和同一 checkpoint，详细契约见[服务端日志采集与留存设计](../../安全与监控/服务端日志采集与留存设计.md)。
+release bundle 的 `vector/` 目录固定提供 Vector `0.47.0` 版本清单、YAML 配置和 systemd unit，配套 `scripts/verify-vector.sh`、`scripts/install-vector.sh`、`scripts/vector-preflight.sh`、`scripts/vector-status.sh`。安装前必须离线校验 bundle 文件；安装器验证宿主机 `/usr/bin/vector` 版本，只写 `/etc/vector`、`/var/lib/vector`、`/data/myserver/log` 和 unit 文件，不自动启动 Vector。业务发布前必须通过 preflight 的实际 Docker `local` driver、容器挂载隔离、checkpoint/queue 可写和采集延迟检查；仓库/CI 中的 `scripts/docker/scan-log-sensitive-patterns.mjs` 只读取受控源码和配置，不读取 secrets、Docker 私有目录或运行日志。升级/回滚需保留已校验的上一版本二进制和同一 checkpoint，详细契约见[服务端日志采集与留存设计](../../安全与监控/服务端日志采集与留存设计.md)。
 
 阶段 3 另携带 `scripts/rotate-vector-files.sh`。Vector file sink 活动文件统一为 `.jsonl.open`；轮转器默认 dry-run，只有获批的 `--apply` 才会短暂停止/启动 Vector，完成 flush、fsync、递增 shard 原子 rename。归档巡检只允许读取已关闭 `.jsonl`，禁止读取 `.open` 或通过移动活动文件规避轮转。
 
@@ -87,7 +87,7 @@ Vector v2 的容量契约为单分片 `256 MiB`、本地默认保留 `14` 个 UT
 
 当前生产 Compose 使用命名 volume，实际数据位于 Docker `data-root` 下；Docker 使用独立 `containerd.service` 时，镜像 content store 与 overlayfs 快照还会位于 containerd `root`。两者都必须位于 `/data/myserver/`，不能只配置 Docker `data-root` 后默认让 `/var/lib/containerd` 占用系统根分区。不得使用匿名 volume，也不得手工修改 `/data/myserver/docker` 或 `/data/myserver/containerd` 中的受管内容。Caddy 的状态数据保存自动 HTTPS 证书和 ACME 账户，必须跨容器重建保留。若后续改为 bind mount，先用已锁定镜像确认容器运行 UID/GID，再仅对对应目录授予最小权限；不要猜测 UID 后执行递归 `chown`。数据目录不放入 Git、不随 release 清理，也不作为镜像构建上下文。
 
-admin audit 目录必须按服务隔离：目标 Compose 使用 `game-server-audit` 和 `game-proxy-audit` 两个 named volume，并分别将 `GAME_ADMIN_AUDIT_PATH`、`PROXY_ADMIN_AUDIT_PATH` 设置为 `/var/log/myserver/admin-audit.jsonl`。当前 Compose 仍使用共享 `game-audit`，属于待实施修复；在修复完成前不得把该共享目录视为安全的审计隔离边界。
+admin audit 目录按服务隔离：生产 Compose 使用 `game-server-audit` 和 `game-proxy-audit` 两个 named volume，并分别将 `GAME_ADMIN_AUDIT_PATH`、`PROXY_ADMIN_AUDIT_PATH` 设置为 `/var/log/myserver/admin-audit.jsonl`。该目录只供对应服务写入，不能把普通 Vector 输出或另一服务的 audit volume 作为审计事实源。
 
 `secrets/` 保存 production env 文件、Compose secret 文件、registry 拉取凭据引用和 TLS 私钥。它们不能同步回开发机、上传到镜像仓库、写入 `images.lock.json` 或通过 `docker inspect` 的环境变量明文暴露。优先使用 Compose secrets 或外部 secret manager；若暂时使用 env file，文件权限必须为 `0600`，且仅由受控运维账号读取。
 
