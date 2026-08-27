@@ -41,7 +41,7 @@ docker info
 }
 ```
 
-上述 `local` driver 只负责 Docker 侧的固定大小短期缓冲。当前尚未部署 Vector，日志查看仍以 `docker logs` 为准；Vector 完成后，目标是持续读取 Docker 日志并按 UTC 日期写入 `/data/myserver/log`。完整职责、补采和丢失边界见[服务端日志采集与留存设计](../../安全与监控/服务端日志采集与留存设计.md)。
+上述 `local` driver 只负责 Docker 侧的固定大小短期缓冲。Vector `0.47.0` 已随 release bundle 部署定义，目标宿主机启动后持续读取 Docker 日志并按 UTC 日期写入 `/data/myserver/log`；未完成目标机启动或输出不可用时，日志查看回退为 `docker logs`。完整职责、补采和丢失边界见[服务端日志采集与留存设计](../../安全与监控/服务端日志采集与留存设计.md)。
 
 阶段 1 冻结普通日志采集 allowlist：`game-server`、`game-proxy`、`auth-http`、`admin-api`、`chat-server`、`match-service`、`mail-service`、`announce-service`、`metrics-collector`。未知 service 不得写入 Vector 输出根目录，Vector 自身不纳入该 allowlist。`metrics-collector` 的 metrics 数据仍由其 Redis/PostgreSQL 链路负责；只有它的 console 运行日志进入 Vector。
 
@@ -79,7 +79,7 @@ release bundle 的 `vector/` 目录固定提供 Vector `0.47.0` 版本清单、Y
   release/        # 已审阅的 release bundle，按 release ID 分目录
   secrets/        # 仅服务器本地，0700 目录、0600 文件
   backups/
-  log/             # v2 目标：Vector 按服务/实例/UTC 日期写入；当前为预留目录
+  log/             # Vector 按服务/实例/UTC 日期写入；单分片256 MiB，默认保留14日
   sockets/        # 临时 local socket，不备份、不跨主机复制
 ```
 

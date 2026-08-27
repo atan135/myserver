@@ -6,11 +6,13 @@
 
 Vector v2 默认容量契约：Docker `local` 每容器 `20m x 3`，Vector 单分片 `256 MiB`、本地保留 `14` 个 UTC 日期目录、磁盘/内存队列上限分别为 `1 GiB`/`64 MiB`；`/data` 低于 `20%` 告警、低于 `10%` 保护、低于 `5%` 需要运维扩容或转移。Vector 停止、Docker API 不可用或 checkpoint 损坏时，发布不得删除输出和 checkpoint；恢复只补采 Docker 窗口内可获得记录，窗口外缺口必须显式报告。
 
-阶段 2 release bundle 额外包含 `vector/vector.yaml`、`vector/vector.service` 和三个 Vector 运维脚本；版本固定为 Vector `0.47.0`，目标路径为 `/usr/bin/vector`、`/etc/vector`、`/var/lib/vector`。发布服务器先运行 `scripts/verify-vector.sh --source <release>/vector --offline`，再由受控 root 窗口执行 `scripts/install-vector.sh --source <release>/vector` 与 `vector validate`；该步骤不自动启动服务，正式启用顺序由阶段 4 准入定义。
+阶段 2 release bundle 额外包含 `vector/vector.yaml`、`vector/vector.service`、`vector-alerts.sh`、`vector-recovery-check.sh` 及状态/准入脚本；版本固定为 Vector `0.47.0`，目标路径为 `/usr/bin/vector`、`/etc/vector`、`/var/lib/vector`。发布服务器先运行 `scripts/verify-vector.sh --source <release>/vector --offline`，再由受控 root 窗口执行 `scripts/install-vector.sh --source <release>/vector` 与 `vector validate`；该步骤不自动启动服务，正式启用顺序由阶段 4 准入定义。
 
 阶段 3 追加 `scripts/rotate-vector-files.sh`。file sink 只写 `.jsonl.open`；轮转器在 `256 MiB` 阈值按服务/实例/容器计算递增 shard，获批 `--apply` 后短暂停止 Vector、flush/fsync 并原子 rename 为关闭 `.jsonl`，再从 checkpoint 恢复。首次上线和回滚不得删除 `.jsonl`、`.jsonl.open` 或 `/var/lib/vector` 状态。
 
 同一阶段携带 `vector/prune-vector-files.mjs`。本机保留策略默认只读，过期分片只有在远端 `archive-manifest.jsonl` 的大小/SHA-256 校验通过且获得 `--apply --confirm vector-retention-v2` 后才删除；删除前写入 retention action 记录，活动 `.open` 和未归档文件永不清理。
+
+首次上线顺序固定为：创建并检查 `/data/myserver/log`、`/var/lib/vector` owner/mode 和非符号链接；离线校验并安装 Vector；启动 systemd unit；运行 `vector-preflight.sh`、`vector-status.sh`、`vector-alerts.sh` 和 `vector-recovery-check.sh` 验证补采、实时延迟、队列与磁盘；再启动/更新业务服务；最后才启用归档清理。回滚顺序为停止清理、保留输出和 checkpoint、必要时回退已校验 Vector 二进制，再用 `docker logs` 诊断 Docker 缓冲窗口；不得删除容器或状态文件来掩盖缺口。后续归档只读取关闭 `.jsonl`，以大小/JSONL 完整性/SHA-256 manifest 校验成功后才移动或压缩；传输失败有界重试，重复归档按 manifest 幂等处理，恢复演练和线上实际延迟/磁盘/fallback 观察结果单独留证。
 
 ## 1. 适用范围
 

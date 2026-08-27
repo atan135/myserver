@@ -145,7 +145,7 @@ docs/                 # 当前正式设计文档
 
 Node.js 服务使用 `log4js`，Rust 异步服务使用 `tracing + tracing-subscriber + tracing-appender`。
 
-当前生产 Docker Compose 以 console 日志为主，业务服务的 `LOG_ENABLE_FILE` 默认关闭；Docker `local` logging driver 的固定大小/文件数轮转只是短期缓冲。目标态由[服务端日志采集与留存设计](./docs/安全与监控/服务端日志采集与留存设计.md)定义：宿主机受控服务运行的 Vector 持续读取 Docker 日志，按 UTC 日期和固定大小分片写入宿主机 `/data/myserver/log`，再由独立工具负责后续压缩或远端归档。Vector 尚未落地前，日常日志入口仍是 `docker logs`，不要将目标目录或 Docker 私有日志文件视为已经可用的长期接口。
+当前生产 Docker Compose 以 console 日志为主，业务服务的 `LOG_ENABLE_FILE` 默认关闭；Docker `local` logging driver 的固定大小/文件数轮转只是短期缓冲。宿主机受控 Vector `0.47.0` 已纳入 release bundle 和 systemd unit，通过 `docker_logs` 持续读取九个 allowlist 服务，按 UTC 日期、实例和容器前缀写入 `/data/myserver/log`，单分片上限 `256 MiB`、默认本地保留 `14` 个 UTC 日期目录；`vector-status.sh`、`vector-alerts.sh` 和 `vector-preflight.sh` 提供状态、指标、缺口和磁盘保护诊断。Vector 输出是日常排障主入口，未启动、延迟或落盘失败时仅回退到 Docker `local` driver 的 `docker logs` 有限窗口；不得读取 Docker 私有日志文件或把 `/data/myserver/log` 当作跨主机永久归档。首次上线、回滚和后续归档顺序以[服务端日志采集与留存设计](./docs/安全与监控/服务端日志采集与留存设计.md)及 Docker 运维文档为准；本 Windows 工作区未执行 Linux Docker/systemd live 演练，需用户单独确认后在 WSL/目标环境执行。
 
 常见配置来源：
 

@@ -17,7 +17,7 @@
 /home/gameops/script/ops-disk-report.sh
 ```
 
-`ops-logs.sh` 默认读取 Vector 在 `/data/myserver/log/<service>/<UTC 日期>/` 的已关闭 JSONL 分片，并支持 `--date` 和 `--follow` 查看活动分片。目录缺失、路径不安全或没有可读分片时，会在 stderr 输出明确的 `vector_fallback` 原因，再回退到 Docker `local` driver 的有限 `docker logs` 窗口。Vector 尚未落地前，不要假定该目录已有完整日志。
+`ops-logs.sh` 默认读取 Vector 在 `/data/myserver/log/<service>/<UTC 日期>/` 的已关闭 JSONL 分片，并支持 `--date` 和 `--follow` 查看活动分片。目录缺失、路径不安全或没有可读分片时，会在 stderr 输出明确的 `vector_fallback` 原因，再回退到 Docker `local` driver 的有限 `docker logs` 窗口。目标宿主机未安装/未启动 Vector 或输出不可用时，不要假定该目录已有完整日志。
 
 Vector 生产 allowlist 固定为：`game-server`、`game-proxy`、`auth-http`、`admin-api`、`chat-server`、`match-service`、`mail-service`、`announce-service`、`metrics-collector`。未知服务和 Vector 自身不得写入业务日志根目录。普通日志查询读取 `/data/myserver/log/<service>/<UTC 日期>/` 的已关闭 `.jsonl` 分片；admin/security audit 查询 PostgreSQL `admin_audit_logs`、`security_audit_logs` 或 admin-api 审计入口；数据库迁移/部署审计查询各库 `_myserver_migration_audit` 与 SQLx history；metrics 查询 `metrics-collector` 的 Redis/PostgreSQL metrics v2。`metrics-collector` 的 console 运行日志会进入 Vector，但不等同于 metrics 数据。
 

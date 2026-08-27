@@ -163,6 +163,15 @@ test("production preflight and log operations preserve the Vector-first contract
   }
 });
 
+test("deployment docs describe the landed Vector state without stale target-only wording", async () => {
+  const ops = await readFile(path.join(root, "deploy/docker/OPS.md"), "utf8");
+  const agents = await readFile(path.join(root, "AGENTS.md"), "utf8");
+  assert.doesNotMatch(ops, /Vector 尚未落地前/);
+  assert.doesNotMatch(ops, /当前尚未部署 Vector/);
+  assert.match(ops, /目标宿主机未安装\/未启动 Vector 或输出不可用/);
+  assert.match(agents, /Vector `0\.47\.0` 已纳入 release bundle/);
+});
+
 test("production admin audit paths and volumes are isolated per service", async () => {
   const compose = await readFile(path.join(root, "deploy/docker/compose.production.yml"), "utf8");
   const gameServer = compose.match(/  game-server:[\s\S]*?(?=\n  [a-z0-9-]+:|\nvolumes:)/)?.[0] ?? "";
