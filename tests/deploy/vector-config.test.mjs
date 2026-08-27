@@ -122,6 +122,8 @@ test("release bundle copies the Vector assets", async () => {
   assert.match(retention, /vector-retention-v2/);
   assert.match(retention, /retention-actions\.jsonl/);
   assert.match(retention, /not_archived/);
+  assert.match(retention, /--test-mode/);
+  assert.match(retention, /testMode && apply/);
   assert.match(verifier, /vector-alerts\.sh/);
   assert.match(verifier, /vector-recovery-check\.sh/);
   assert.match(verifier, /--log-format json/);

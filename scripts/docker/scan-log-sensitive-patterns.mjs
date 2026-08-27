@@ -11,7 +11,10 @@ const files = [
   "deploy/docker/vector/vector.service",
   "deploy/docker/compose.production.yml",
   "deploy/docker/scripts/ops-logs.sh",
-  "scripts/docker/vector-status.sh"
+  "scripts/docker/vector-status.sh",
+  "scripts/docker/vector-alerts.sh",
+  "scripts/docker/vector-recovery-check.sh",
+  "scripts/docker/vector-preflight.sh"
 ];
 const forbidden = [
   [/JSON\.stringify\(extra\)/, "raw Node logger extra serialization"],

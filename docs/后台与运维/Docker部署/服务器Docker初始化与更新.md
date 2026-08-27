@@ -83,7 +83,7 @@ release bundle 的 `vector/` 目录固定提供 Vector `0.47.0` 版本清单、Y
   sockets/        # 临时 local socket，不备份、不跨主机复制
 ```
 
-Vector v2 的容量契约为单分片 `256 MiB`、本地默认保留 `14` 个 UTC 日期目录、磁盘队列 `1 GiB`、内存队列 `64 MiB`。`/data` 剩余空间低于 `20%` 告警，低于 `10%` 进入 Vector 保护模式，低于 `5%` 立即由运维扩容或转移数据；保护动作不删除未归档分片。
+Vector v2 的容量契约为单分片 `256 MiB`、本地默认保留 `14` 个 UTC 日期目录、磁盘队列 `1 GiB`、内存队列 `64 MiB`。`/data` 剩余空间低于 `20%` 告警，低于 `10%` 进入 Vector 保护模式，低于 `5%` 立即由运维扩容或转移数据；保护动作不删除未归档分片。`scripts/vector-alerts.sh` 输出 `vector.alert.v1`，暴露磁盘可用率、接收/发送累计计数、队列深度、重试、错误和丢弃计数；保护动作只暂停低优先级归档并保留未归档日志，不能无限增长或静默清理。Vector systemd unit 使用 JSON 格式记录自身诊断，`internal_metrics` 与 `vector-status.sh` 提供接收/发送、队列、重试、错误和丢弃计数。`scripts/vector-recovery-check.sh` 可在临时目录离线检查重启、网络/API 短断、只读磁盘、队列溢出、轮转清理和停机恢复契约，不启动 Docker/systemd；线上故障注入需单独获批。
 
 当前生产 Compose 使用命名 volume，实际数据位于 Docker `data-root` 下；Docker 使用独立 `containerd.service` 时，镜像 content store 与 overlayfs 快照还会位于 containerd `root`。两者都必须位于 `/data/myserver/`，不能只配置 Docker `data-root` 后默认让 `/var/lib/containerd` 占用系统根分区。不得使用匿名 volume，也不得手工修改 `/data/myserver/docker` 或 `/data/myserver/containerd` 中的受管内容。Caddy 的状态数据保存自动 HTTPS 证书和 ACME 账户，必须跨容器重建保留。若后续改为 bind mount，先用已锁定镜像确认容器运行 UID/GID，再仅对对应目录授予最小权限；不要猜测 UID 后执行递归 `chown`。数据目录不放入 Git、不随 release 清理，也不作为镜像构建上下文。
 

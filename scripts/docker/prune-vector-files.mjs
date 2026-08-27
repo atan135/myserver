@@ -12,12 +12,14 @@ const logRoot = get("--log-root", "/data/myserver/log");
 const stateDir = get("--state-dir", "/var/lib/vector");
 const retentionDays = Number(get("--retention-days", "14"));
 const apply = args.includes("--apply");
+const testMode = args.includes("--test-mode");
 const confirm = get("--confirm", "");
 const allowlist = new Set([
   "game-server", "game-proxy", "auth-http", "admin-api", "chat-server",
   "match-service", "mail-service", "announce-service", "metrics-collector"
 ]);
-if (logRoot !== "/data/myserver/log" || stateDir !== "/var/lib/vector" || !Number.isInteger(retentionDays) || retentionDays < 1 || retentionDays > 3650) {
+if ((!testMode && (logRoot !== "/data/myserver/log" || stateDir !== "/var/lib/vector")) ||
+    (testMode && apply) || !Number.isInteger(retentionDays) || retentionDays < 1 || retentionDays > 3650) {
   throw new Error("retention paths or days violate the Vector contract");
 }
 if (apply && confirm !== "vector-retention-v2") throw new Error("--apply requires --confirm vector-retention-v2");
