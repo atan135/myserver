@@ -20,11 +20,16 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 [[ "$source_dir" == /* && -d "$source_dir" && ! -L "$source_dir" ]] || usage
-for file in vector.yaml vector.service; do
+for file in vector.yaml vector.service vector-version.txt; do
   [[ -f "$source_dir/$file" && ! -L "$source_dir/$file" ]] || { echo "Missing Vector file: $file" >&2; exit 65; }
 done
 
 config="$source_dir/vector.yaml"
+required_version="$(tr -d '[:space:]' < "$source_dir/vector-version.txt")"
+[[ "$required_version" == 0.47.0 ]] || {
+  echo 'Vector version manifest must pin 0.47.0.' >&2
+  exit 65
+}
 for token in \
   'type: docker_logs' 'type: file' 'codec: json' 'method: newline_delimited' \
   'data_dir: /var/lib/vector' '/data/myserver/log/{{ service }}/{{ captured_at | format_timestamp' \

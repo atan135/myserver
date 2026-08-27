@@ -5,6 +5,7 @@
 ```bash
 /home/gameops/script/ops-status.sh
 /home/gameops/script/ops-logs.sh auth-http --tail 200
+/data/myserver/release/current/scripts/vector-preflight.sh
 /home/gameops/script/ops-health.sh
 /home/gameops/script/ops-restart.sh auth-http --confirm auth-http
 /home/gameops/script/ops-replace.sh auth-http --confirm auth-http
@@ -14,13 +15,13 @@
 /home/gameops/script/ops-disk-report.sh
 ```
 
-当前 `ops-logs.sh` 直接读取目标容器的 `docker logs`，对应 Docker `local` driver 的有限保留窗口。Vector 完成 v2 Checklist 后，日常排障入口应优先切换为 Vector 在 `/data/myserver/log` 的按日输出；`docker logs` 仍保留为 Vector 延迟、重启或落盘故障时的短期兜底。Vector 尚未落地前，不要假定该目录已有完整日志。
+`ops-logs.sh` 默认读取 Vector 在 `/data/myserver/log/<service>/<UTC 日期>/` 的已关闭 JSONL 分片，并支持 `--date` 和 `--follow` 查看活动分片。目录缺失、路径不安全或没有可读分片时，会在 stderr 输出明确的 `vector_fallback` 原因，再回退到 Docker `local` driver 的有限 `docker logs` 窗口。Vector 尚未落地前，不要假定该目录已有完整日志。
 
 Vector 生产 allowlist 固定为：`game-server`、`game-proxy`、`auth-http`、`admin-api`、`chat-server`、`match-service`、`mail-service`、`announce-service`、`metrics-collector`。未知服务和 Vector 自身不得写入业务日志根目录。普通日志查询读取 `/data/myserver/log/<service>/<UTC 日期>/` 的已关闭 `.jsonl` 分片；admin/security audit 查询 PostgreSQL `admin_audit_logs`、`security_audit_logs` 或 admin-api 审计入口；数据库迁移/部署审计查询各库 `_myserver_migration_audit` 与 SQLx history；metrics 查询 `metrics-collector` 的 Redis/PostgreSQL metrics v2。`metrics-collector` 的 console 运行日志会进入 Vector，但不等同于 metrics 数据。
 
 Vector v2 默认参数为单分片 `256 MiB`、本地保留 `14` 个 UTC 日期目录、磁盘队列 `1 GiB`、内存队列 `64 MiB`；Docker `local` 兜底为 `20m x 3`。`/data` 可用空间低于 `20%` 告警、低于 `10%` 保护、低于 `5%` 立即扩容或转移。停止、API 不可用、磁盘满或 checkpoint 损坏时，先查看 Vector 状态/诊断和 checkpoint，再用 `docker logs` 回溯；不得删除输出或静默宣称无缺口。
 
-Vector 版本固定为 `0.47.0`，配置和 unit 位于 release bundle 的 `vector/`，安装目标为 `/etc/vector/vector.yaml`、`/etc/systemd/system/vector.service`、`/var/lib/vector` 和 `/data/myserver/log`。安装/升级前执行 `verify-vector.sh --offline` 与 `vector validate`，再执行 `install-vector.sh`；安装器不启动服务。`vector-status.sh` 是状态、checkpoint、活动分片和磁盘检查入口；回滚保留上一已校验二进制并复用 checkpoint。
+Vector 版本固定为 `0.47.0`，配置、unit 和 `vector-version.txt` 位于 release bundle 的 `vector/`，安装目标为 `/etc/vector/vector.yaml`、`/etc/systemd/system/vector.service`、`/var/lib/vector` 和 `/data/myserver/log`。安装/升级前执行 `verify-vector.sh --offline` 与 `vector validate`，再执行 `install-vector.sh`；安装器验证 `/usr/bin/vector` 版本、初始化 `buffer`/`checkpoints`/`queue` 目录但不启动服务。启动 Vector 后，在业务发布前执行 `vector-preflight.sh --release-dir /data/myserver/release/current`；它会检查 systemd/API、目录挂载与权限、实际容器 `local` driver `20m x 3`、Docker socket/日志根目录隔离和采集延迟。`vector-status.sh` 是状态、checkpoint、活动分片和磁盘检查入口；回滚保留上一已校验二进制并复用 checkpoint。
 
 达到 `256 MiB` 的活动 `.jsonl.open` 由 `rotate-vector-files.sh` 处理。默认 dry-run；仅在获批后使用 `--apply`，脚本持有轮转锁，停止 Vector 触发 flush/close，执行 fsync 和递增 shard 原子 rename，再启动 Vector。归档只能消费无 `.open` 后缀的已关闭分片，不能直接移动活动文件。
 

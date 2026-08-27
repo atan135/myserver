@@ -119,6 +119,11 @@ fi
   echo "Readiness source release is incomplete: ${readiness_source_release_id:-$release_id}" >&2
   exit 65
 }
+vector_preflight="$release_dir/scripts/vector-preflight.sh"
+[[ -x "$vector_preflight" ]] || {
+  echo "Release is missing Vector preflight: $vector_preflight" >&2
+  exit 65
+}
 export RELEASE_READINESS_PROBE_FILE="$readiness_source_dir/scripts/release-readiness-probe.mjs"
 source "$readiness_source_dir/scripts/readiness-convergence.sh"
 readiness_compose=(docker compose --env-file "$readiness_source_dir/compose.production.env" \
@@ -127,6 +132,11 @@ release_compose_command() {
   "${readiness_compose[@]}" "$@"
 }
 "${compose[@]}" config --quiet
+
+# Vector must already be healthy before any business container is observed or
+# replaced. Missing containers are allowed here because this is also the first
+# release on a host; a strict driver/output check runs after application start.
+"$vector_preflight" --release-dir "$release_dir" --allow-missing
 
 previous_release_dir="$(readlink -f "$release_root/current" 2>/dev/null || true)"
 previous_release_id=""
@@ -294,6 +304,7 @@ fi
 "${compose[@]}" up -d --no-deps game-server match-service chat-server mail-service announce-service \
   metrics-collector game-proxy auth-http admin-api
 assert_chat_server_replica_count 1
+"$vector_preflight" --release-dir "$release_dir"
 
 if wait_for_release_readiness; then
   :

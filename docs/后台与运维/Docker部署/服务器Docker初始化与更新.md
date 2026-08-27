@@ -47,7 +47,7 @@ docker info
 
 部署后的查询入口按数据职责划分：普通日志优先读 `/data/myserver/log/<service>/<UTC 日期>/` 已关闭 `.jsonl` 分片，Vector 不可用时退回 `docker logs`；admin/security audit 读 PostgreSQL 审计表或 admin-api 审计查询，数据库迁移/部署审计读各库 `_myserver_migration_audit` 与 SQLx history；metrics 读 metrics v2 存储。普通日志、审计和 metrics 不能相互充当事实源。
 
-release bundle 的 `vector/` 目录固定提供 Vector `0.47.0` YAML 配置和 systemd unit，配套 `scripts/verify-vector.sh`、`scripts/install-vector.sh`、`scripts/vector-status.sh`。安装前必须离线校验 bundle 文件；安装器只写 `/etc/vector`、`/var/lib/vector`、`/data/myserver/log` 和 unit 文件，不自动启动 Vector。升级/回滚需保留已校验的上一版本二进制和同一 checkpoint，详细契约见[服务端日志采集与留存设计](../../安全与监控/服务端日志采集与留存设计.md)。
+release bundle 的 `vector/` 目录固定提供 Vector `0.47.0` 版本清单、YAML 配置和 systemd unit，配套 `scripts/verify-vector.sh`、`scripts/install-vector.sh`、`scripts/vector-preflight.sh`、`scripts/vector-status.sh`。安装前必须离线校验 bundle 文件；安装器验证宿主机 `/usr/bin/vector` 版本，只写 `/etc/vector`、`/var/lib/vector`、`/data/myserver/log` 和 unit 文件，不自动启动 Vector。业务发布前必须通过 preflight 的实际 Docker `local` driver、容器挂载隔离、checkpoint/queue 可写和采集延迟检查。升级/回滚需保留已校验的上一版本二进制和同一 checkpoint，详细契约见[服务端日志采集与留存设计](../../安全与监控/服务端日志采集与留存设计.md)。
 
 阶段 3 另携带 `scripts/rotate-vector-files.sh`。Vector file sink 活动文件统一为 `.jsonl.open`；轮转器默认 dry-run，只有获批的 `--apply` 才会短暂停止/启动 Vector，完成 flush、fsync、递增 shard 原子 rename。归档巡检只允许读取已关闭 `.jsonl`，禁止读取 `.open` 或通过移动活动文件规避轮转。
 

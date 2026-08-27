@@ -41,6 +41,7 @@ test("Vector bundle has the frozen source, sink, and metadata contract", async (
   assert.match(config, /\.timestamp \?\? null/);
   assert.match(config, /strlen\(\.message\) > 1048576/);
   assert.match(config, /message_sha256/);
+  assert.match(config, /invalid_utf8/);
   assert.match(config, /parse_regex\(\.message/);
   for (const service of services) assert.match(config, new RegExp(`"${service}"`));
   for (const field of [
@@ -74,7 +75,7 @@ test("Vector bundle has the frozen source, sink, and metadata contract", async (
 });
 
 test("Vector installation and diagnostics scripts are present and shell-parseable when bash is available", async (t) => {
-  const scripts = ["install-vector.sh", "verify-vector.sh", "vector-status.sh", "rotate-vector-files.sh"];
+  const scripts = ["install-vector.sh", "verify-vector.sh", "vector-status.sh", "vector-preflight.sh", "rotate-vector-files.sh"];
   for (const name of scripts) await access(path.join(scriptDir, name));
   if (process.platform === "win32") {
     t.skip("Windows Node cannot pass native drive paths to the available bash shim");
@@ -99,9 +100,11 @@ test("release bundle copies the Vector assets", async () => {
   const retention = await readFile(path.join(scriptDir, "prune-vector-files.mjs"), "utf8");
   assert.match(bundler, /deploy\/docker\/vector\/vector\.yaml/);
   assert.match(bundler, /deploy\/docker\/vector\/vector\.service/);
-  for (const name of ["install-vector.sh", "verify-vector.sh", "vector-status.sh", "rotate-vector-files.sh", "prune-vector-files.mjs"]) {
+  for (const name of ["install-vector.sh", "verify-vector.sh", "vector-status.sh", "vector-preflight.sh", "rotate-vector-files.sh", "prune-vector-files.mjs"]) {
     assert.match(bundler, new RegExp(`scripts/docker/${name.replace(".", "\\.")}`));
   }
+  assert.match(bundler, /deploy\/docker\/vector\/vector-version\.txt/);
+  assert.match(await readFile(path.join(vectorDir, "vector-version.txt"), "utf8"), /^0\.47\.0\s*$/);
   assert.match(rotation, /268435456/);
   assert.match(rotation, /systemctl stop vector\.service/);
   assert.match(rotation, /sync -f/);
@@ -111,4 +114,24 @@ test("release bundle copies the Vector assets", async () => {
   assert.match(retention, /vector-retention-v2/);
   assert.match(retention, /retention-actions\.jsonl/);
   assert.match(retention, /not_archived/);
+});
+
+test("production preflight and log operations preserve the Vector-first contract", async () => {
+  const preflight = await readFile(path.join(scriptDir, "vector-preflight.sh"), "utf8");
+  const logs = await readFile(path.join(root, "deploy/docker/scripts/ops-logs.sh"), "utf8");
+  const releaseRunner = await readFile(path.join(scriptDir, "server-apply-release.sh"), "utf8");
+  assert.match(preflight, /docker inspect --format '\{\{\.HostConfig\.LogConfig\.Type\}\}'/);
+  assert.match(preflight, /max-size/);
+  assert.match(preflight, /max-file/);
+  assert.match(preflight, /logging_driver_/);
+  assert.match(preflight, /\/var\/run\/docker\.sock/);
+  assert.match(preflight, /runuser -u vector -- test -w/);
+  assert.match(preflight, /vector_api_unreachable/);
+  assert.match(logs, /VECTOR_LOG_ROOT=\/data\/myserver\/log/);
+  assert.match(logs, /vector_fallback=true/);
+  assert.match(logs, /docker logs/);
+  assert.match(logs, /\.jsonl\.open/);
+  assert.match(logs, /--date/);
+  assert.match(releaseRunner, /vector_preflight.*--allow-missing/);
+  assert.match(releaseRunner, /assert_chat_server_replica_count 1[\s\S]+vector_preflight.*--release-dir/);
 });

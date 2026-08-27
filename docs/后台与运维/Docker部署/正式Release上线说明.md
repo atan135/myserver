@@ -127,6 +127,11 @@ docker compose --profile ops --env-file compose.production.env -f compose.produc
 ```bash
 cd /data/myserver/release/<release-id>
 
+sudo ./scripts/verify-vector.sh --source ./vector --offline
+sudo ./scripts/install-vector.sh --source ./vector --enable
+sudo systemctl start vector.service
+sudo ./scripts/vector-preflight.sh --release-dir /data/myserver/release/<release-id> --allow-missing
+
 docker compose --env-file compose.production.env -f compose.production.yml \
   up -d postgres redis nats
 docker compose --env-file compose.production.env -f compose.production.yml ps
@@ -139,6 +144,7 @@ docker compose --profile ops --env-file compose.production.env -f compose.produc
 docker compose --env-file compose.production.env -f compose.production.yml \
   up -d game-server match-service chat-server mail-service announce-service \
   metrics-collector game-proxy auth-http admin-api
+sudo ./scripts/vector-preflight.sh --release-dir /data/myserver/release/<release-id>
 
 source ./scripts/readiness-convergence.sh
 release_compose_command() {

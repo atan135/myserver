@@ -25,7 +25,7 @@ while [[ $# -gt 0 ]]; do
     *) usage >&2; exit 64 ;;
   esac
 done
-[[ "$log_root" == /data/myserver/log && "$max_bytes" =~ ^[0-9]+$ && "$max_bytes" -gt 0 ]] || {
+[[ "$log_root" == /data/myserver/log && "$max_bytes" == 268435456 ]] || {
   echo 'Rotation paths and size must remain under the Vector contract.' >&2; exit 65;
 }
 for command in find stat sort sync mv flock; do
