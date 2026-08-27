@@ -43,6 +43,10 @@ docker info
 
 上述 `local` driver 只负责 Docker 侧的固定大小短期缓冲。当前尚未部署 Vector，日志查看仍以 `docker logs` 为准；Vector 完成后，目标是持续读取 Docker 日志并按 UTC 日期写入 `/data/myserver/log`。完整职责、补采和丢失边界见[服务端日志采集与留存设计](../../安全与监控/服务端日志采集与留存设计.md)。
 
+阶段 1 冻结普通日志采集 allowlist：`game-server`、`game-proxy`、`auth-http`、`admin-api`、`chat-server`、`match-service`、`mail-service`、`announce-service`、`metrics-collector`。未知 service 不得写入 Vector 输出根目录，Vector 自身不纳入该 allowlist。`metrics-collector` 的 metrics 数据仍由其 Redis/PostgreSQL 链路负责；只有它的 console 运行日志进入 Vector。
+
+部署后的查询入口按数据职责划分：普通日志优先读 `/data/myserver/log/<service>/<UTC 日期>/` 已关闭 `.jsonl` 分片，Vector 不可用时退回 `docker logs`；admin/security audit 读 PostgreSQL 审计表或 admin-api 审计查询，数据库迁移/部署审计读各库 `_myserver_migration_audit` 与 SQLx history；metrics 读 metrics v2 存储。普通日志、审计和 metrics 不能相互充当事实源。
+
 可设置 `vm.overcommit_memory=1` 以满足 Redis 建议。小型 swap 只能作为防止宿主机立刻失联的最后缓冲，不能用来掩盖内存预算错误；一旦出现持续 swap in/out，应降载或调整配额而非继续运行。
 
 ### 2.2 网络边界
@@ -72,6 +76,8 @@ docker info
   log/             # v2 目标：Vector 按服务/实例/UTC 日期写入；当前为预留目录
   sockets/        # 临时 local socket，不备份、不跨主机复制
 ```
+
+Vector v2 的容量契约为单分片 `256 MiB`、本地默认保留 `14` 个 UTC 日期目录、磁盘队列 `1 GiB`、内存队列 `64 MiB`。`/data` 剩余空间低于 `20%` 告警，低于 `10%` 进入 Vector 保护模式，低于 `5%` 立即由运维扩容或转移数据；保护动作不删除未归档分片。
 
 当前生产 Compose 使用命名 volume，实际数据位于 Docker `data-root` 下；Docker 使用独立 `containerd.service` 时，镜像 content store 与 overlayfs 快照还会位于 containerd `root`。两者都必须位于 `/data/myserver/`，不能只配置 Docker `data-root` 后默认让 `/var/lib/containerd` 占用系统根分区。不得使用匿名 volume，也不得手工修改 `/data/myserver/docker` 或 `/data/myserver/containerd` 中的受管内容。Caddy 的状态数据保存自动 HTTPS 证书和 ACME 账户，必须跨容器重建保留。若后续改为 bind mount，先用已锁定镜像确认容器运行 UID/GID，再仅对对应目录授予最小权限；不要猜测 UID 后执行递归 `chown`。数据目录不放入 Git、不随 release 清理，也不作为镜像构建上下文。
 
