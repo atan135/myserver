@@ -79,7 +79,9 @@ sinks:
     type: file
     inputs:
       - allowlist
-    path: '/data/myserver/log/{{ service }}/{{ captured_at | format_timestamp(format: "%Y-%m-%d") }}/{{ instance_id }}.{{ container_id_prefix }}.jsonl'
+    path: '/data/myserver/log/{{ service }}/{{ captured_at | format_timestamp(format: "%Y-%m-%d") }}/{{ instance_id }}.{{ container_id_prefix }}.jsonl.open'
+    timezone: UTC
+    idle_timeout_secs: 30
     encoding:
       codec: json
     framing:
@@ -88,7 +90,6 @@ sinks:
       type: disk
       max_size: 1073741824
       when_full: drop_newest
-      data_dir: /var/lib/vector/buffer
     healthcheck:
       enabled: true
 

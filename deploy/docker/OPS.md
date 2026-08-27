@@ -22,6 +22,10 @@ Vector v2 默认参数为单分片 `256 MiB`、本地保留 `14` 个 UTC 日期�
 
 Vector 版本固定为 `0.47.0`，配置和 unit 位于 release bundle 的 `vector/`，安装目标为 `/etc/vector/vector.yaml`、`/etc/systemd/system/vector.service`、`/var/lib/vector` 和 `/data/myserver/log`。安装/升级前执行 `verify-vector.sh --offline` 与 `vector validate`，再执行 `install-vector.sh`；安装器不启动服务。`vector-status.sh` 是状态、checkpoint、活动分片和磁盘检查入口；回滚保留上一已校验二进制并复用 checkpoint。
 
+达到 `256 MiB` 的活动 `.jsonl.open` 由 `rotate-vector-files.sh` 处理。默认 dry-run；仅在获批后使用 `--apply`，脚本持有轮转锁，停止 Vector 触发 flush/close，执行 fsync 和递增 shard 原子 rename，再启动 Vector。归档只能消费无 `.open` 后缀的已关闭分片，不能直接移动活动文件。
+
+`prune-vector-files.mjs` 默认 dry-run，仅列出超过 14 个 UTC 日期且已在 `archive-manifest.jsonl` 中以大小/SHA-256 确认的关闭分片。删除需显式 `--apply --confirm vector-retention-v2`，并先追加 `retention-actions.jsonl`；未归档或活动文件不会被删除。
+
 `ops-restart.sh` 只重启现有容器，不重新读取 Compose 定义、环境文件或镜像。`ops-replace.sh` 使用当前 release 的 Compose 定义执行单服务 `up -d --no-deps`，不会连带重建依赖。两者先确认目标容器已运行且其可用 healthcheck 已通过，再复用当前 release 的统一 readiness 收敛函数；不能以容器 `running` 或单次 health 成功作为整个操作的完成条件。其余参数由脚本白名单校验，避免将服务名传递为任意 Docker 参数。
 
 `ops-retire.sh` 是 game-server 滚动替换的部署平台 stop hook。候选实例 Ready 后先启动该脚本；它精确核验 Compose service/project、旧实例 ID 和完整镜像 Git revision，并将 project 纳入确认串，再将旧容器 restart policy 临时改为 `no`，然后只等待正式 admin-api 两人审批和 break-glass 链触发的 graceful shutdown。drain 后旧实例发布 unhealthy，不再进入玩家路由或普通 healthy discovery；shutdown 路径只通过隔离的 live admin discovery 访问 heartbeat 仍活跃、service/instance identity 精确匹配且声明 `admin`/`admin`/`tcp` 传输元数据的同一实例，再以实际连接、签名断言认证和停机响应确认控制口可用，不会把旧实例重新加入业务流量。endpoint 的 `healthy` 是整体 readiness 的投影，drain 后允许为 false；连接、认证或响应失败仍会 fail-closed。脚本不接受或读取管理员 token、nonce，也不调用 admin-api。只有同一容器以 exit code 0 且非 OOM 退出时才保留 stopped；失败会恢复原 restart policy 和运行期望。异常中断遗留的 pending journal 会阻止 deploy/restart/replace/rollback，必须使用相同 instance/revision/project/confirm 加 `--recover` 精确恢复。即使旧容器已经干净退出，`--recover` 也会恢复 `unless-stopped` 并重新启动旧实例，清除 journal 后本次 retire 即告结束；确认候选状态后必须发起新的 retire 周期，不能把 recover 当成继续等待。该 stop hook 不负责自动创建候选实例，当前 release runner 也不因此自动具备 old/new 灰度编排。

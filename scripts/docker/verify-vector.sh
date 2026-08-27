@@ -28,6 +28,7 @@ config="$source_dir/vector.yaml"
 for token in \
   'type: docker_logs' 'type: file' 'codec: json' 'method: newline_delimited' \
   'data_dir: /var/lib/vector' '/data/myserver/log/{{ service }}/{{ captured_at | format_timestamp' \
+  '.jsonl.open' \
   'max_size: 1073741824' 'when_full: drop_newest' 'auto_partial_merge: true' \
   'com.docker.compose.service' 'com.myserver.service-instance-id' 'com.myserver.release-id' \
   'metrics-collector' 'parse_status' 'unknown'; do

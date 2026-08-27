@@ -132,6 +132,8 @@ install -m 0644 deploy/docker/infrastructure-images.json "$output/infrastructure
 cp -a deploy/docker/config/. "$output/config/"
 install -m 0644 deploy/docker/vector/vector.yaml "$output/vector/vector.yaml"
 install -m 0644 deploy/docker/vector/vector.service "$output/vector/vector.service"
+install -m 0755 scripts/docker/rotate-vector-files.sh "$output/vector/rotate-vector-files.sh"
+install -m 0755 scripts/docker/prune-vector-files.mjs "$output/vector/prune-vector-files.mjs"
 cp -a deploy/docker/postgres-bootstrap/. "$output/postgres-bootstrap/"
 cp -a db/. "$output/db/"
 cp -a apps/game-server/csv "$output/apps/game-server/csv"
@@ -143,6 +145,8 @@ install -m 0755 scripts/docker/install-ops-scripts.sh "$output/scripts/install-o
 install -m 0755 scripts/docker/install-vector.sh "$output/scripts/install-vector.sh"
 install -m 0755 scripts/docker/verify-vector.sh "$output/scripts/verify-vector.sh"
 install -m 0755 scripts/docker/vector-status.sh "$output/scripts/vector-status.sh"
+install -m 0755 scripts/docker/rotate-vector-files.sh "$output/scripts/rotate-vector-files.sh"
+install -m 0755 scripts/docker/prune-vector-files.mjs "$output/scripts/prune-vector-files.mjs"
 install -m 0755 scripts/docker/server-apply-release.sh "$output/scripts/server-apply-release.sh"
 for script in \
   ops-common.sh ops-deploy.sh ops-disk-report.sh ops-health.sh ops-logs.sh \

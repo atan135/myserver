@@ -49,6 +49,10 @@ docker info
 
 release bundle 的 `vector/` 目录固定提供 Vector `0.47.0` YAML 配置和 systemd unit，配套 `scripts/verify-vector.sh`、`scripts/install-vector.sh`、`scripts/vector-status.sh`。安装前必须离线校验 bundle 文件；安装器只写 `/etc/vector`、`/var/lib/vector`、`/data/myserver/log` 和 unit 文件，不自动启动 Vector。升级/回滚需保留已校验的上一版本二进制和同一 checkpoint，详细契约见[服务端日志采集与留存设计](../../安全与监控/服务端日志采集与留存设计.md)。
 
+阶段 3 另携带 `scripts/rotate-vector-files.sh`。Vector file sink 活动文件统一为 `.jsonl.open`；轮转器默认 dry-run，只有获批的 `--apply` 才会短暂停止/启动 Vector，完成 flush、fsync、递增 shard 原子 rename。归档巡检只允许读取已关闭 `.jsonl`，禁止读取 `.open` 或通过移动活动文件规避轮转。
+
+同一 bundle 的 `vector/prune-vector-files.mjs` 只读扫描过期关闭分片；只有远端归档 manifest 的路径、大小和 SHA-256 匹配，并且命令带 `--apply --confirm vector-retention-v2` 时才允许删除，删除前追加 `/var/lib/vector/retention-actions.jsonl`。它不删除未归档分片、活动文件、符号链接或未知服务目录。
+
 可设置 `vm.overcommit_memory=1` 以满足 Redis 建议。小型 swap 只能作为防止宿主机立刻失联的最后缓冲，不能用来掩盖内存预算错误；一旦出现持续 swap in/out，应降载或调整配额而非继续运行。
 
 ### 2.2 网络边界

@@ -8,6 +8,10 @@ Vector v2 默认容量契约：Docker `local` 每容器 `20m x 3`，Vector 单�
 
 阶段 2 release bundle 额外包含 `vector/vector.yaml`、`vector/vector.service` 和三个 Vector 运维脚本；版本固定为 Vector `0.47.0`，目标路径为 `/usr/bin/vector`、`/etc/vector`、`/var/lib/vector`。发布服务器先运行 `scripts/verify-vector.sh --source <release>/vector --offline`，再由受控 root 窗口执行 `scripts/install-vector.sh --source <release>/vector` 与 `vector validate`；该步骤不自动启动服务，正式启用顺序由阶段 4 准入定义。
 
+阶段 3 追加 `scripts/rotate-vector-files.sh`。file sink 只写 `.jsonl.open`；轮转器在 `256 MiB` 阈值按服务/实例/容器计算递增 shard，获批 `--apply` 后短暂停止 Vector、flush/fsync 并原子 rename 为关闭 `.jsonl`，再从 checkpoint 恢复。首次上线和回滚不得删除 `.jsonl`、`.jsonl.open` 或 `/var/lib/vector` 状态。
+
+同一阶段携带 `vector/prune-vector-files.mjs`。本机保留策略默认只读，过期分片只有在远端 `archive-manifest.jsonl` 的大小/SHA-256 校验通过且获得 `--apply --confirm vector-retention-v2` 后才删除；删除前写入 retention action 记录，活动 `.open` 和未归档文件永不清理。
+
 ## 1. 适用范围
 
 本文是 MyServer 单机 Docker 正式上线的执行手册，适用于 schema v2 `images.lock.json` 的 release。它覆盖 `Rust`、`Node`、PostgreSQL、Redis、NATS、Caddy 和独立的 `migration-runner`，不适用于名称含 `-docker-test-` 的验证镜像。
