@@ -1,6 +1,8 @@
 # Registry 与监控读模型设计
 
-> 状态：实现契约。本文定义 Registry 监控超时治理后的目标 Redis schema、读写语义、性能边界和迁移顺序。后续实现必须遵守本文；当前实现以代码为准，尚未自动切换到本文的 v2 metrics / registry index schema。
+> 状态：当前实现契约。Registry 与监控主链路已经切换到 v2 metrics / registry index schema，生产环境已完成 legacy 停写、清理和 24 小时稳定性验收；实现细节仍以当前代码与配置为准。容量压测、故障注入和完整告警闭环属于独立后续范围，不因本次治理完成而视为已落地。
+>
+> 完成记录：[Registry 监控超时根治 Checklist](./checklists/Registry监控超时根治_checklist.md)
 
 ## 1. 目标与边界
 
@@ -240,7 +242,9 @@ Registry 实例应分别暴露 `registry_state` 与 `metrics_state`，不得把�
 
 旧 metrics key 为 `metrics:<service>:<instance>:<bucket>`（以及更早的无实例形式），旧 Registry 没有 `instance-index`。两者只在以下受控阶段兼容，线上 API 不允许以 legacy `SCAN` 作为 fallback。
 
-### 8.1 发布顺序
+### 8.1 历史发布顺序（已关闭）
+
+以下步骤记录从 legacy 读写迁移到 v2/index 的一次性顺序。当前生产环境已经完成切读、停写、清理和观察，不应为重复发布重新开启 legacy 双写；全新环境直接使用当前 v2/index 配置。只有确需升级仍运行旧 schema 的独立环境时，才可在单独审批的迁移方案中参考这些步骤。
 
 1. **准备**：上线支持 v2 写入和 registry index 双写的 producer 版本；保持现有读路径不变。所有 Node 与 Rust registry producer 都必须覆盖。
 2. **bootstrap**：执行一次离线 `registry-index-bootstrap`，只扫描 `<RP>service:<service>:instances:*`，只把 heartbeat 仍存在且 payload 合法的实例写入 index。执行一次离线 `metrics-v2-backfill`，只处理 `<MP>metrics:<service>:*` 中最近 1 小时数据并按 v2 bucket 写入。两工具都先 dry-run，再限速实际执行并保存 checkpoint。
@@ -279,20 +283,26 @@ docker compose --env-file ./compose.production.env -f ./compose.production.yml r
 
 dry-run 的 `eligibleHashes` 必须与预期 legacy 数量相符，且 `excluded.v2`、`excluded.heartbeat`、`excluded.wrong_type` 和异常结构统计经过人工复核。中断后仅可使用同一 Redis 目标、前缀、模式和 checkpoint 加 `--resume` 继续；已完成 checkpoint 不可重复执行。
 
-### 8.3 回滚顺序
+### 8.3 历史回滚顺序
 
 - **切读前失败**：停止 bootstrap / backfill，保留 legacy 读写；v2 key 可自然过期，不影响线上路径。
 - **切读后、legacy 双写期内失败**：先把 consumers 切回已验证的 legacy 版本，再停止 v2 读取；collector 继续 legacy 双写，禁止执行 legacy 删除。
 - **legacy 删除开始后**：不再允许回滚到需要 legacy scan 的版本；只能修复 v2 reader 或从 PostgreSQL archive 恢复聚合历史。故 legacy 删除必须在至少 24 小时稳定观察、SLO 达标和明确变更批准后执行。
 
+当前生产已经进入 legacy 删除后的边界，应用回滚目标必须继续支持 v2/index，不能回滚到依赖 legacy `SCAN` 的版本。
+
 迁移和清理工具必须把执行者、环境前缀、开始/结束 bucket、checkpoint、读写/删除数量、错误样本和版本写入审计日志；不允许连接错误环境或跨前缀操作。
 
-## 9. 实现验收条件
+## 9. 持续回归与专项验证
 
-后续阶段的代码审查和测试至少证明：
+v2/index 无界扫描治理、分钟级 PostgreSQL 归档、`auth-http` session 有界指标索引及生产稳定性已经按完成清单验收。后续代码变更的常规回归至少应继续证明：
 
 - 所有 Node 与 Rust registry producer / consumer 对相同输入生成相同 index key，并在注册、heartbeat、注销和过期时得到相同可见实例集合。
-- 在构造 20 万 unrelated / legacy key 的 Redis fixture 后，Registry、services 和 metrics API 不调用 `SCAN` / `KEYS`，且满足本节 SLO。
 - v2 latest 不会被乱序或延迟消息回退；history 可精确返回 1 分钟、5 分钟、15 分钟、1 小时 bucket。
-- Redis 单 key 失败、单实例坏 payload、NATS 延迟、heartbeat 过期、完整 Redis 不可用且有/无缓存，均符合第 6 节 HTTP 与页面状态语义。
-- archive 失败不删除 Redis history；成功重试不会重复产生长期数据；legacy 迁移可 dry-run、断点续跑、限速、审计且不使用 `FLUSHDB`。
+- archive 失败不删除 Redis history；成功重试不会重复产生长期数据；legacy 清理工具可 dry-run、断点续跑、限速、审计且不使用 `FLUSHDB`。
+
+以下内容保留为独立后续范围，不阻塞已经归档的根治清单：
+
+- 20 万 unrelated / legacy key fixture 下的 Registry、services、metrics API SLO 与 Redis 命令分布验证，转交专门压测模块。
+- Redis 单 key 失败、坏 payload、NATS 延迟、heartbeat 过期及 Redis 完全不可用场景下的局部降级和恢复演练。
+- 容量指标、阈值告警、资源契约和多实例生命周期的完整观测闭环。

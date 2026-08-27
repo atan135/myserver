@@ -212,6 +212,32 @@ Redis 保持 `maxmemory-policy noeviction`，因此达到 `maxmemory` 后会拒�
 
 当前生产校准值为 Redis `mem_limit=768m`、`memswap_limit=768m`，内部 `maxmemory=512mb` 与 `noeviction` 保持不变；多出的 256 MiB 只承载 allocator、AOF 和运行时开销，不能视为可写业务数据容量。`announce-service` 使用 `mem_limit=256m`、`memswap_limit=256m`。这两个服务不允许使用额外 swap；调整依据是 2026-08-03 故障恢复期间 Redis 640 MiB cgroup 上限事件和 announce-service 128 MiB cgroup 上限、约 56 MiB swap 的实测证据。回退前必须先确认 cgroup 峰值、`memory.events`、Redis `used_memory/maxmemory` 和宿主机可用内存均满足旧上限。
 
+### 3.7 `auth-http` session 指标索引迁移与恢复
+
+`auth-http` 的在线 session 指标只读取三个有界 ZSET，不在 5 秒采集路径扫描 `session:*`。从不含该索引的旧版本升级，或恢复结果包含存量 session 但缺少 `auth-index:*` 时，必须在受控维护窗口使用目标 `auth-http` 镜像执行一次性 backfill；已经完成迁移的常规发布不重复执行。
+
+先保持默认 dry-run，核对 `scanned`、`eligible`、`invalid` 和 `expired`：
+
+~~~bash
+cd /data/myserver/release/<release-id>
+docker compose --env-file ./compose.production.env \
+  -f ./compose.production.yml run --rm --no-deps auth-http \
+  node /app/apps/auth-http/scripts/backfill-session-metrics-index.js \
+  --batch-size 100 --delay-ms 25
+~~~
+
+确认 Redis 目标、前缀和统计结果后，取得线上写入授权再执行：
+
+~~~bash
+docker compose --env-file ./compose.production.env \
+  -f ./compose.production.yml run --rm --no-deps auth-http \
+  node /app/apps/auth-http/scripts/backfill-session-metrics-index.js \
+  --apply --confirm backfill-session-metrics-index \
+  --batch-size 100 --delay-ms 25
+~~~
+
+滚动升级时，在所有旧 `auth-http` 实例退出后按相同参数补跑一次 apply，覆盖发布窗口内由旧实例创建或续期的 session。完成后分别核对 `<REDIS_KEY_PREFIX>auth-index:sessions:expires` 的有效 token、`<REDIS_KEY_PREFIX>auth-index:players:expires` 的唯一玩家，以及 `<REDIS_KEY_PREFIX>auth-index:activity:last-seen` 的最近 5 分钟活动 session，并确认自然运行窗口内 `cmdstat_scan` 不再按 5 秒增长。该脚本是唯一允许扫描精确 session 前缀的一次性工具，不得接入服务启动、定时任务或请求路径。
+
 ## 4. 日常镜像更新
 
 ### 4.1 更新前
