@@ -1,0 +1,100 @@
+data_dir: /var/lib/vector
+
+api:
+  enabled: true
+  address: 127.0.0.1:8686
+
+sources:
+  docker_logs:
+    type: docker_logs
+    docker_host: unix:///var/run/docker.sock
+    auto_partial_merge: true
+    retry_backoff_secs: 2
+
+  internal_metrics:
+    type: internal_metrics
+
+transforms:
+  normalize:
+    type: remap
+    inputs:
+      - docker_logs
+    source: |
+      # docker_logs exposes Compose labels without exposing the container env.
+      # Deployment labels are the only metadata accepted for instance/release.
+      service = string(.label."com.docker.compose.service") ?? "unknown"
+      .service = service
+      .container_id = string(.container_id) ?? "unknown"
+      .container_id_prefix = slice!(.container_id, 0, 12)
+      .instance_id = string(.label."com.myserver.service-instance-id") ?? "unknown-" + .container_id_prefix
+      .release_id = string(.label."com.myserver.release-id") ?? "unknown"
+      .captured_at = now()
+      .stream = string(.stream) ?? "unknown"
+      .message = string(.message) ?? ""
+      was_truncated = false
+      if strlen(.message) > 1048576 {
+        was_truncated = true
+        .message_sha256 = sha2(.message)
+        .message = slice!(.message, 0, 1048576)
+        .parse_status = ["truncated"]
+      } else {
+        .parse_status = ["plain_text"]
+      }
+      .event_time = .timestamp ?? null
+
+      # A JSON application line is merged only for level/time extraction. The
+      # original line remains in message so malformed input is traceable.
+      parsed, parse_err = parse_json(.message)
+      if parse_err == null && is_object(parsed) {
+        .parse_status = ["ok"]
+        if exists(parsed.level) { .level = downcase(string!(parsed.level)) }
+        if exists(parsed.timestamp) { .event_time = parse_timestamp(string!(parsed.timestamp), "%+") ?? .event_time }
+      }
+      if was_truncated { .parse_status = push(.parse_status, "truncated") }
+      if .event_time == null { .parse_status = push(.parse_status, "missing_event_time") }
+      level = downcase(string(.level) ?? "")
+      if level == "" {
+        level_match, level_err = parse_regex(.message, r'(?i)\b(?P<level>trace|debug|info|warn(?:ing)?|error|fatal)\b')
+        if level_err == null { level = downcase(string(level_match.level) ?? "") }
+      }
+      if level == "warning" { level = "warn" }
+      if !includes(["trace", "debug", "info", "warn", "error", "fatal"], level) {
+        level = "unknown"
+        .parse_status = push(.parse_status, "unknown_level")
+      }
+      .level = level
+      .event_time = .event_time
+
+  allowlist:
+    type: filter
+    inputs:
+      - normalize
+    condition: >-
+      includes(["game-server", "game-proxy", "auth-http", "admin-api",
+      "chat-server", "match-service", "mail-service", "announce-service",
+      "metrics-collector"], .service)
+
+sinks:
+  jsonl:
+    type: file
+    inputs:
+      - allowlist
+    path: '/data/myserver/log/{{ service }}/{{ captured_at | format_timestamp(format: "%Y-%m-%d") }}/{{ instance_id }}.{{ container_id_prefix }}.jsonl'
+    encoding:
+      codec: json
+    framing:
+      method: newline_delimited
+    buffer:
+      type: disk
+      max_size: 1073741824
+      when_full: drop_newest
+      data_dir: /var/lib/vector/buffer
+    healthcheck:
+      enabled: true
+
+  internal_metrics_console:
+    type: console
+    inputs:
+      - internal_metrics
+    encoding:
+      codec: json

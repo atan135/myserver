@@ -124,12 +124,14 @@ if [ -e "$output" ] && [ -n "$(find "$output" -mindepth 1 -maxdepth 1 -print -qu
 fi
 
 install -d -m 0755 "$output"
-install -d -m 0755 "$output/config" "$output/postgres-bootstrap" "$output/db" "$output/apps/game-server" "$output/scripts" "$output/scripts/ops"
+install -d -m 0755 "$output/config" "$output/postgres-bootstrap" "$output/db" "$output/apps/game-server" "$output/vector" "$output/scripts" "$output/scripts/ops"
 install -m 0644 deploy/docker/compose.production.yml "$output/compose.production.yml"
 install -m 0644 deploy/docker/compose.production.env.example "$output/compose.production.env.example"
 install -m 0644 deploy/docker/images.lock.json "$output/images.lock.json"
 install -m 0644 deploy/docker/infrastructure-images.json "$output/infrastructure-images.json"
 cp -a deploy/docker/config/. "$output/config/"
+install -m 0644 deploy/docker/vector/vector.yaml "$output/vector/vector.yaml"
+install -m 0644 deploy/docker/vector/vector.service "$output/vector/vector.service"
 cp -a deploy/docker/postgres-bootstrap/. "$output/postgres-bootstrap/"
 cp -a db/. "$output/db/"
 cp -a apps/game-server/csv "$output/apps/game-server/csv"
@@ -138,6 +140,9 @@ install -m 0755 scripts/docker/initialize-production-secrets.sh "$output/scripts
 install -m 0755 scripts/docker/readiness-convergence.sh "$output/scripts/readiness-convergence.sh"
 install -m 0644 scripts/docker/release-readiness-probe.mjs "$output/scripts/release-readiness-probe.mjs"
 install -m 0755 scripts/docker/install-ops-scripts.sh "$output/scripts/install-ops-scripts.sh"
+install -m 0755 scripts/docker/install-vector.sh "$output/scripts/install-vector.sh"
+install -m 0755 scripts/docker/verify-vector.sh "$output/scripts/verify-vector.sh"
+install -m 0755 scripts/docker/vector-status.sh "$output/scripts/vector-status.sh"
 install -m 0755 scripts/docker/server-apply-release.sh "$output/scripts/server-apply-release.sh"
 for script in \
   ops-common.sh ops-deploy.sh ops-disk-report.sh ops-health.sh ops-logs.sh \

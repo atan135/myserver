@@ -1,0 +1,30 @@
+[Unit]
+Description=MyServer Vector Docker log collector
+Documentation=https://vector.dev/docs/
+Requires=docker.service
+After=docker.service
+ConditionPathExists=/etc/vector/vector.yaml
+ConditionPathExists=/var/run/docker.sock
+
+[Service]
+Type=simple
+User=vector
+Group=vector
+SupplementaryGroups=docker
+ExecStart=/usr/bin/vector --config /etc/vector/vector.yaml
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=30s
+KillSignal=SIGTERM
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/vector /data/myserver/log
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+LockPersonality=true
+MemoryDenyWriteExecute=true
+
+[Install]
+WantedBy=multi-user.target

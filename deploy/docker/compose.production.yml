@@ -85,6 +85,9 @@ services:
   game-server:
     <<: *runtime
     image: ${IMAGE_GAME_SERVER:?set IMAGE_GAME_SERVER from images.lock.json}
+    labels:
+      com.myserver.service-instance-id: ${GAME_SERVER_INSTANCE_ID:-game-server-1}
+      com.myserver.release-id: ${RELEASE_ID:?set RELEASE_ID}
     env_file: ${GAME_SERVER_ENV_FILE:?set GAME_SERVER_ENV_FILE}
     environment:
       APP_ENV: ${MYSERVER_RUNTIME_ENV:?set MYSERVER_RUNTIME_ENV to production or test}
@@ -134,6 +137,9 @@ services:
   match-service:
     <<: *runtime
     image: ${IMAGE_MATCH_SERVICE:?set IMAGE_MATCH_SERVICE from images.lock.json}
+    labels:
+      com.myserver.service-instance-id: match-service-1
+      com.myserver.release-id: ${RELEASE_ID:?set RELEASE_ID}
     env_file: ${MATCH_SERVICE_ENV_FILE:?set MATCH_SERVICE_ENV_FILE}
     environment:
       APP_ENV: ${MYSERVER_RUNTIME_ENV:?set MYSERVER_RUNTIME_ENV to production or test}
@@ -167,6 +173,9 @@ services:
   chat-server:
     <<: *runtime
     image: ${IMAGE_CHAT_SERVER:?set IMAGE_CHAT_SERVER from images.lock.json}
+    labels:
+      com.myserver.service-instance-id: chat-server-1
+      com.myserver.release-id: ${RELEASE_ID:?set RELEASE_ID}
     env_file: ${CHAT_SERVER_ENV_FILE:?set CHAT_SERVER_ENV_FILE}
     environment:
       APP_ENV: ${MYSERVER_RUNTIME_ENV:?set MYSERVER_RUNTIME_ENV to production or test}
@@ -217,6 +226,9 @@ services:
   mail-service:
     <<: *runtime
     image: ${IMAGE_MAIL_SERVICE:?set IMAGE_MAIL_SERVICE from images.lock.json}
+    labels:
+      com.myserver.service-instance-id: mail-service-1
+      com.myserver.release-id: ${RELEASE_ID:?set RELEASE_ID}
     env_file: ${MAIL_SERVICE_ENV_FILE:?set MAIL_SERVICE_ENV_FILE}
     environment:
       NODE_ENV: ${MYSERVER_RUNTIME_ENV:?set MYSERVER_RUNTIME_ENV to production or test}
@@ -247,6 +259,9 @@ services:
   announce-service:
     <<: *runtime
     image: ${IMAGE_ANNOUNCE_SERVICE:?set IMAGE_ANNOUNCE_SERVICE from images.lock.json}
+    labels:
+      com.myserver.service-instance-id: announce-service-1
+      com.myserver.release-id: ${RELEASE_ID:?set RELEASE_ID}
     env_file: ${ANNOUNCE_SERVICE_ENV_FILE:?set ANNOUNCE_SERVICE_ENV_FILE}
     environment:
       NODE_ENV: ${MYSERVER_RUNTIME_ENV:?set MYSERVER_RUNTIME_ENV to production or test}
@@ -273,9 +288,14 @@ services:
   metrics-collector:
     <<: *runtime
     image: ${IMAGE_METRICS_COLLECTOR:?set IMAGE_METRICS_COLLECTOR from images.lock.json}
+    labels:
+      com.myserver.service-instance-id: metrics-collector-1
+      com.myserver.release-id: ${RELEASE_ID:?set RELEASE_ID}
     env_file: ${METRICS_COLLECTOR_ENV_FILE:?set METRICS_COLLECTOR_ENV_FILE}
     environment:
       NODE_ENV: ${MYSERVER_RUNTIME_ENV:?set MYSERVER_RUNTIME_ENV to production or test}
+      LOG_ENABLE_FILE: "false"
+      SERVICE_INSTANCE_ID: metrics-collector-1
       SERVICE_BUILD_VERSION: ${RELEASE_ID:?set RELEASE_ID}
     depends_on:
       redis:
@@ -288,6 +308,9 @@ services:
   game-proxy:
     <<: *runtime
     image: ${IMAGE_GAME_PROXY:?set IMAGE_GAME_PROXY from images.lock.json}
+    labels:
+      com.myserver.service-instance-id: game-proxy-1
+      com.myserver.release-id: ${RELEASE_ID:?set RELEASE_ID}
     # A published UDP port needs a non-internal network; retain internal for
     # service discovery and Unix-socket access.
     networks:
@@ -330,6 +353,9 @@ services:
   auth-http:
     <<: *runtime
     image: ${IMAGE_AUTH_HTTP:?set IMAGE_AUTH_HTTP from images.lock.json}
+    labels:
+      com.myserver.service-instance-id: auth-http-1
+      com.myserver.release-id: ${RELEASE_ID:?set RELEASE_ID}
     env_file: ${AUTH_HTTP_ENV_FILE:?set AUTH_HTTP_ENV_FILE}
     environment:
       NODE_ENV: ${MYSERVER_RUNTIME_ENV:?set MYSERVER_RUNTIME_ENV to production or test}
@@ -372,6 +398,9 @@ services:
   admin-api:
     <<: *runtime
     image: ${IMAGE_ADMIN_API:?set IMAGE_ADMIN_API from images.lock.json}
+    labels:
+      com.myserver.service-instance-id: admin-api-1
+      com.myserver.release-id: ${RELEASE_ID:?set RELEASE_ID}
     env_file: ${ADMIN_API_ENV_FILE:?set ADMIN_API_ENV_FILE}
     environment:
       NODE_ENV: ${MYSERVER_RUNTIME_ENV:?set MYSERVER_RUNTIME_ENV to production or test}

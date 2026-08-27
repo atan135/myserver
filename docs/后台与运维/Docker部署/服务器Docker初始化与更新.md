@@ -47,6 +47,8 @@ docker info
 
 部署后的查询入口按数据职责划分：普通日志优先读 `/data/myserver/log/<service>/<UTC 日期>/` 已关闭 `.jsonl` 分片，Vector 不可用时退回 `docker logs`；admin/security audit 读 PostgreSQL 审计表或 admin-api 审计查询，数据库迁移/部署审计读各库 `_myserver_migration_audit` 与 SQLx history；metrics 读 metrics v2 存储。普通日志、审计和 metrics 不能相互充当事实源。
 
+release bundle 的 `vector/` 目录固定提供 Vector `0.47.0` YAML 配置和 systemd unit，配套 `scripts/verify-vector.sh`、`scripts/install-vector.sh`、`scripts/vector-status.sh`。安装前必须离线校验 bundle 文件；安装器只写 `/etc/vector`、`/var/lib/vector`、`/data/myserver/log` 和 unit 文件，不自动启动 Vector。升级/回滚需保留已校验的上一版本二进制和同一 checkpoint，详细契约见[服务端日志采集与留存设计](../../安全与监控/服务端日志采集与留存设计.md)。
+
 可设置 `vm.overcommit_memory=1` 以满足 Redis 建议。小型 swap 只能作为防止宿主机立刻失联的最后缓冲，不能用来掩盖内存预算错误；一旦出现持续 swap in/out，应降载或调整配额而非继续运行。
 
 ### 2.2 网络边界
