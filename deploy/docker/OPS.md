@@ -6,6 +6,8 @@
 /home/gameops/script/ops-status.sh
 /home/gameops/script/ops-logs.sh auth-http --tail 200
 /data/myserver/release/current/scripts/vector-preflight.sh
+/data/myserver/release/current/scripts/vector-alerts.sh
+/data/myserver/release/current/scripts/vector-recovery-check.sh --json
 /home/gameops/script/ops-health.sh
 /home/gameops/script/ops-restart.sh auth-http --confirm auth-http
 /home/gameops/script/ops-replace.sh auth-http --confirm auth-http
@@ -20,6 +22,8 @@
 Vector 生产 allowlist 固定为：`game-server`、`game-proxy`、`auth-http`、`admin-api`、`chat-server`、`match-service`、`mail-service`、`announce-service`、`metrics-collector`。未知服务和 Vector 自身不得写入业务日志根目录。普通日志查询读取 `/data/myserver/log/<service>/<UTC 日期>/` 的已关闭 `.jsonl` 分片；admin/security audit 查询 PostgreSQL `admin_audit_logs`、`security_audit_logs` 或 admin-api 审计入口；数据库迁移/部署审计查询各库 `_myserver_migration_audit` 与 SQLx history；metrics 查询 `metrics-collector` 的 Redis/PostgreSQL metrics v2。`metrics-collector` 的 console 运行日志会进入 Vector，但不等同于 metrics 数据。
 
 Vector v2 默认参数为单分片 `256 MiB`、本地保留 `14` 个 UTC 日期目录、磁盘队列 `1 GiB`、内存队列 `64 MiB`；Docker `local` 兜底为 `20m x 3`。`/data` 可用空间低于 `20%` 告警、低于 `10%` 保护、低于 `5%` 立即扩容或转移。停止、API 不可用、磁盘满或 checkpoint 损坏时，先查看 Vector 状态/诊断和 checkpoint，再用 `docker logs` 回溯；不得删除输出或静默宣称无缺口。
+
+`vector-alerts.sh` 是只读容量和采集指标探针，输出稳定的 `vector.alert.v1` 结构化记录，包含磁盘可用率、接收/发送累计计数、队列字节数、重试、落盘错误和丢弃计数。保护动作只暂停低优先级归档并保留未归档日志，依赖队列 `drop_newest`，不会静默删除或截断日志。Vector 自身通过 systemd JSON 日志和 `internal_metrics` 输出诊断，`vector-status.sh` 额外打印 `vector.diagnostic.v1` 指标摘要。`vector-recovery-check.sh` 提供不触碰 Docker/systemd 的离线恢复契约检查，生产路径缺失时输出 `pending` 并返回非零，临时目录可用于 CI；真实故障注入必须在获批的 Linux/WSL 环境执行。
 
 Vector 版本固定为 `0.47.0`，配置、unit 和 `vector-version.txt` 位于 release bundle 的 `vector/`，安装目标为 `/etc/vector/vector.yaml`、`/etc/systemd/system/vector.service`、`/var/lib/vector` 和 `/data/myserver/log`。安装/升级前执行 `verify-vector.sh --offline` 与 `vector validate`，再执行 `install-vector.sh`；安装器验证 `/usr/bin/vector` 版本、初始化 `buffer`/`checkpoints`/`queue` 目录但不启动服务。启动 Vector 后，在业务发布前执行 `vector-preflight.sh --release-dir /data/myserver/release/current`；它会检查 systemd/API、目录挂载与权限、实际容器 `local` driver `20m x 3`、Docker socket/日志根目录隔离和采集延迟。`vector-status.sh` 是状态、checkpoint、活动分片和磁盘检查入口；回滚保留上一已校验二进制并复用 checkpoint。
 

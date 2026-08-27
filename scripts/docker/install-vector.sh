@@ -36,7 +36,7 @@ done
 [[ "$target_dir" == /etc/vector && "$state_dir" == /var/lib/vector && "$log_root" == /data/myserver/log ]] || {
   echo 'Vector install paths must remain /etc/vector, /var/lib/vector and /data/myserver/log.' >&2; exit 65;
 }
-for file in vector.yaml vector.service vector-version.txt rotate-vector-files.sh prune-vector-files.mjs; do
+for file in vector.yaml vector.service vector-version.txt rotate-vector-files.sh prune-vector-files.mjs vector-alerts.sh vector-recovery-check.sh; do
   [[ -f "$source_dir/$file" && ! -L "$source_dir/$file" ]] || {
     echo "Missing or unsafe Vector bundle file: $file" >&2; exit 65;
   }
@@ -65,6 +65,8 @@ install -m 0644 "$source_dir/vector-version.txt" "$target_dir/vector-version.txt
 install -m 0644 "$source_dir/vector.service" /etc/systemd/system/vector.service
 install -m 0755 "$source_dir/rotate-vector-files.sh" /usr/local/sbin/myserver-rotate-vector-files
 install -m 0755 "$source_dir/prune-vector-files.mjs" /usr/local/sbin/myserver-prune-vector-files.mjs
+install -m 0755 "$source_dir/vector-alerts.sh" /usr/local/sbin/myserver-vector-alerts
+install -m 0755 "$source_dir/vector-recovery-check.sh" /usr/local/sbin/myserver-vector-recovery-check
 systemctl daemon-reload
 if [[ "$enable_unit" == true ]]; then systemctl enable vector.service; fi
 printf 'vector_installed=config:%s unit:/etc/systemd/system/vector.service enabled:%s\n' "$target_dir/vector.yaml" "$enable_unit"

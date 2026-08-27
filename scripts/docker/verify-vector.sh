@@ -20,7 +20,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 [[ "$source_dir" == /* && -d "$source_dir" && ! -L "$source_dir" ]] || usage
-for file in vector.yaml vector.service vector-version.txt; do
+for file in vector.yaml vector.service vector-version.txt vector-alerts.sh vector-recovery-check.sh; do
   [[ -f "$source_dir/$file" && ! -L "$source_dir/$file" ]] || { echo "Missing Vector file: $file" >&2; exit 65; }
 done
 
@@ -39,6 +39,10 @@ for token in \
   'metrics-collector' 'parse_status' 'unknown'; do
   grep -F -- "$token" "$config" >/dev/null || { echo "Vector config contract missing: $token" >&2; exit 65; }
 done
+grep -F -- '--log-format json' "$source_dir/vector.service" >/dev/null || {
+  echo 'Vector unit must emit structured JSON diagnostics.' >&2
+  exit 65
+}
 if grep -E '/var/lib/docker/containers|docker-json\.log|/run/secrets|PASSWORD|TOKEN|DSN|DATABASE_URL' "$config" >/dev/null; then
   echo 'Vector config contains a private Docker path or secret-like environment reference.' >&2
   exit 65

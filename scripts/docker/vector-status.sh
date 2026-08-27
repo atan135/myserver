@@ -39,6 +39,17 @@ if command -v curl >/dev/null 2>&1; then
   if [[ -n "$metrics_payload" ]]; then
     printf 'vector_metrics_endpoint=reachable\n'
     printf '%s\n' "$metrics_payload" | awk '/component_received_events_total|component_sent_events_total|buffer_byte_size|component_errors_total/ {print "vector_metric=" $0}' | head -n 32
+    metric_value() {
+      local pattern="$1"
+      awk -v pattern="$pattern" '$0 ~ pattern && $0 !~ /^#/ { value=$NF } END { if (value == "") print "unknown"; else print value }' <<<"$metrics_payload"
+    }
+    printf 'vector_diagnostic schema=vector.diagnostic.v1 event=metrics received_events=%s sent_events=%s queue_bytes=%s component_errors=%s retries=%s dropped_events=%s\n' \
+      "$(metric_value 'component_received_events_total')" \
+      "$(metric_value 'component_sent_events_total')" \
+      "$(metric_value 'buffer_byte_size')" \
+      "$(metric_value 'component_errors_total')" \
+      "$(metric_value 'component_retries_total|component_retry_total')" \
+      "$(metric_value 'component_discarded_events_total|component_dropped_events_total')"
   else
     printf 'vector_metrics_endpoint=unreachable\n'
   fi

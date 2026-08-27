@@ -135,6 +135,8 @@ install -m 0644 deploy/docker/vector/vector.service "$output/vector/vector.servi
 install -m 0644 deploy/docker/vector/vector-version.txt "$output/vector/vector-version.txt"
 install -m 0755 scripts/docker/rotate-vector-files.sh "$output/vector/rotate-vector-files.sh"
 install -m 0755 scripts/docker/prune-vector-files.mjs "$output/vector/prune-vector-files.mjs"
+install -m 0755 scripts/docker/vector-alerts.sh "$output/vector/vector-alerts.sh"
+install -m 0755 scripts/docker/vector-recovery-check.sh "$output/vector/vector-recovery-check.sh"
 cp -a deploy/docker/postgres-bootstrap/. "$output/postgres-bootstrap/"
 cp -a db/. "$output/db/"
 cp -a apps/game-server/csv "$output/apps/game-server/csv"
@@ -149,6 +151,8 @@ install -m 0755 scripts/docker/vector-preflight.sh "$output/scripts/vector-prefl
 install -m 0755 scripts/docker/vector-status.sh "$output/scripts/vector-status.sh"
 install -m 0755 scripts/docker/rotate-vector-files.sh "$output/scripts/rotate-vector-files.sh"
 install -m 0755 scripts/docker/prune-vector-files.mjs "$output/scripts/prune-vector-files.mjs"
+install -m 0755 scripts/docker/vector-alerts.sh "$output/scripts/vector-alerts.sh"
+install -m 0755 scripts/docker/vector-recovery-check.sh "$output/scripts/vector-recovery-check.sh"
 install -m 0755 scripts/docker/server-apply-release.sh "$output/scripts/server-apply-release.sh"
 for script in \
   ops-common.sh ops-deploy.sh ops-disk-report.sh ops-health.sh ops-logs.sh \

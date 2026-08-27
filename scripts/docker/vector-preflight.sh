@@ -17,6 +17,9 @@ readonly log_root=/data/myserver/log
 readonly state_root=/var/lib/vector
 readonly config=/etc/vector/vector.yaml
 readonly vector_unit=vector.service
+readonly disk_warn_free_percent=20
+readonly disk_protect_free_percent=10
+readonly disk_critical_free_percent=5
 readonly services=(
   game-server game-proxy auth-http admin-api chat-server match-service
   mail-service announce-service metrics-collector
@@ -125,6 +128,23 @@ if command -v curl >/dev/null 2>&1; then
 else
   warn curl_missing_api_not_checked
 fi
-df -P "$log_root" | tail -n 1 | awk '{print "vector_preflight=disk used_percent=" $5 " available_kib=" $4}'
+disk_line="$(df -P "$log_root" | tail -n 1)"
+disk_used_percent="${disk_line%%\%*}"
+disk_used_percent="${disk_used_percent##* }"
+disk_available_kib="$(awk '{print $4}' <<<"$disk_line")"
+if [[ "$disk_used_percent" =~ ^[0-9]+$ ]]; then
+  disk_free_percent=$((100 - disk_used_percent))
+  if (( disk_free_percent < disk_critical_free_percent )); then
+    die "disk_critical_free_percent_${disk_free_percent}_stop_retention_expand_or_transfer"
+  elif (( disk_free_percent < disk_protect_free_percent )); then
+    die "disk_protection_free_percent_${disk_free_percent}_retain_unarchived_no_delete"
+  elif (( disk_free_percent < disk_warn_free_percent )); then
+    warn "disk_warning_free_percent_${disk_free_percent}_suspend_low_priority_archiving"
+  fi
+  printf 'vector_preflight=disk used_percent=%s free_percent=%s available_kib=%s protection=retain_unarchived_no_delete\n' \
+    "$disk_used_percent" "$disk_free_percent" "$disk_available_kib"
+else
+  die disk_usage_unparseable
+fi
 printf 'vector_preflight=passed version=%s log_root=%s state_root=%s\n' \
   "$required_vector_version" "$log_root" "$state_root"

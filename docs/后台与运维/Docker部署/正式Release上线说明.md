@@ -1,8 +1,8 @@
 # 正式 Release 上线说明
 
-日志边界：当前发布流程以 Docker `local` driver 提供的有限日志窗口为准，排障入口是 `docker logs`。Vector 普通运行日志采集属于 v2 目标态，完成后应按[服务端日志采集与留存设计](../../安全与监控/服务端日志采集与留存设计.md)作为独立宿主机运维组件纳入发布准入、版本校验和回滚保留范围；在 Vector 落地前，不把 `/data/myserver/log` 当作已可用的发布产物或日志事实源。`game-server` 与 `game-proxy` 的 admin audit volume 拆分也属于该目标态的独立部署变更。
+日志边界：发布流程以 Docker `local` driver 提供有限日志窗口作为兜底，Vector 普通运行日志采集作为独立宿主机运维组件纳入发布准入、版本校验和回滚保留范围；Vector 未启动或输出不可用时，不把 `/data/myserver/log` 当作完整事实源，排障入口回退为 `docker logs`。`game-server` 与 `game-proxy` 的 admin audit 已使用独立 volume，不进入 Vector 普通运行日志。
 
-阶段 1 冻结的 Vector 生产 allowlist 为九个服务：`game-server`、`game-proxy`、`auth-http`、`admin-api`、`chat-server`、`match-service`、`mail-service`、`announce-service`、`metrics-collector`。`metrics-collector` 是指标消费者；其自身 console 运行日志可由 Vector 采集，但 metrics 数据仍以 Redis/PostgreSQL metrics v2 为事实源。普通日志查询按 `/data/myserver/log/<service>/<UTC 日期>/` 已关闭 JSONL 分片执行，Vector 故障时仅使用 `docker logs` 窗口；admin/security audit 通过 PostgreSQL 审计表或 admin-api 查询入口，数据库迁移/部署审计通过各库 `_myserver_migration_audit` 与 SQLx history，不以普通日志替代。
+阶段 1 冻结的 Vector 生产 allowlist 为九个服务：`game-server`、`game-proxy`、`auth-http`、`admin-api`、`chat-server`、`match-service`、`mail-service`、`announce-service`、`metrics-collector`。`metrics-collector` 是指标消费者；其自身 console 运行日志可由 Vector 采集，但 metrics 数据仍以 Redis/PostgreSQL metrics v2 为事实源。普通日志查询按 `/data/myserver/log/<service>/<UTC 日期>/` 已关闭 JSONL 分片执行，Vector 故障时仅使用 `docker logs` 窗口；admin/security audit 通过 PostgreSQL 审计表或 admin-api 查询入口及对应服务隔离 JSONL，数据库迁移/部署审计通过各库 `_myserver_migration_audit` 与 SQLx history，不以普通日志替代。
 
 Vector v2 默认容量契约：Docker `local` 每容器 `20m x 3`，Vector 单分片 `256 MiB`、本地保留 `14` 个 UTC 日期目录、磁盘/内存队列上限分别为 `1 GiB`/`64 MiB`；`/data` 低于 `20%` 告警、低于 `10%` 保护、低于 `5%` 需要运维扩容或转移。Vector 停止、Docker API 不可用或 checkpoint 损坏时，发布不得删除输出和 checkpoint；恢复只补采 Docker 窗口内可获得记录，窗口外缺口必须显式报告。
 

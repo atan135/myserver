@@ -70,7 +70,10 @@ test("Vector bundle has the frozen source, sink, and metadata contract", async (
 
   assert.match(unit, /^User=vector$/m);
   assert.match(unit, /^SupplementaryGroups=docker$/m);
-  assert.match(unit, /^ExecStart=\/usr\/bin\/vector --config \/etc\/vector\/vector\.yaml$/m);
+  assert.match(unit, /^ExecStart=\/usr\/bin\/vector --config \/etc\/vector\/vector\.yaml --log-format json --log-level info$/m);
+  assert.match(unit, /^SyslogIdentifier=myserver-vector$/m);
+  assert.match(unit, /^StandardOutput=journal$/m);
+  assert.match(unit, /^StandardError=journal$/m);
   assert.match(unit, /^ProtectSystem=strict$/m);
   assert.match(unit, /^ReadWritePaths=\/var\/lib\/vector \/data\/myserver\/log$/m);
   assert.doesNotMatch(unit, /\/var\/log\/myserver/);
@@ -79,7 +82,7 @@ test("Vector bundle has the frozen source, sink, and metadata contract", async (
 });
 
 test("Vector installation and diagnostics scripts are present and shell-parseable when bash is available", async (t) => {
-  const scripts = ["install-vector.sh", "verify-vector.sh", "vector-status.sh", "vector-preflight.sh", "rotate-vector-files.sh"];
+  const scripts = ["install-vector.sh", "verify-vector.sh", "vector-status.sh", "vector-preflight.sh", "rotate-vector-files.sh", "vector-alerts.sh", "vector-recovery-check.sh"];
   for (const name of scripts) await access(path.join(scriptDir, name));
   if (process.platform === "win32") {
     t.skip("Windows Node cannot pass native drive paths to the available bash shim");
@@ -102,9 +105,10 @@ test("release bundle copies the Vector assets", async () => {
   const bundler = await readFile(path.join(scriptDir, "create-release-bundle.sh"), "utf8");
   const rotation = await readFile(path.join(scriptDir, "rotate-vector-files.sh"), "utf8");
   const retention = await readFile(path.join(scriptDir, "prune-vector-files.mjs"), "utf8");
+  const verifier = await readFile(path.join(scriptDir, "verify-vector.sh"), "utf8");
   assert.match(bundler, /deploy\/docker\/vector\/vector\.yaml/);
   assert.match(bundler, /deploy\/docker\/vector\/vector\.service/);
-  for (const name of ["install-vector.sh", "verify-vector.sh", "vector-status.sh", "vector-preflight.sh", "rotate-vector-files.sh", "prune-vector-files.mjs"]) {
+  for (const name of ["install-vector.sh", "verify-vector.sh", "vector-status.sh", "vector-preflight.sh", "rotate-vector-files.sh", "prune-vector-files.mjs", "vector-alerts.sh", "vector-recovery-check.sh"]) {
     assert.match(bundler, new RegExp(`scripts/docker/${name.replace(".", "\\.")}`));
   }
   assert.match(bundler, /deploy\/docker\/vector\/vector-version\.txt/);
@@ -118,6 +122,9 @@ test("release bundle copies the Vector assets", async () => {
   assert.match(retention, /vector-retention-v2/);
   assert.match(retention, /retention-actions\.jsonl/);
   assert.match(retention, /not_archived/);
+  assert.match(verifier, /vector-alerts\.sh/);
+  assert.match(verifier, /vector-recovery-check\.sh/);
+  assert.match(verifier, /--log-format json/);
 });
 
 test("production preflight and log operations preserve the Vector-first contract", async () => {
@@ -125,6 +132,8 @@ test("production preflight and log operations preserve the Vector-first contract
   const scanner = await readFile(path.join(scriptDir, "scan-log-sensitive-patterns.mjs"), "utf8");
   const logs = await readFile(path.join(root, "deploy/docker/scripts/ops-logs.sh"), "utf8");
   const releaseRunner = await readFile(path.join(scriptDir, "server-apply-release.sh"), "utf8");
+  const alerts = await readFile(path.join(scriptDir, "vector-alerts.sh"), "utf8");
+  const recovery = await readFile(path.join(scriptDir, "vector-recovery-check.sh"), "utf8");
   assert.match(preflight, /docker inspect --format '\{\{\.HostConfig\.LogConfig\.Type\}\}'/);
   assert.match(preflight, /max-size/);
   assert.match(preflight, /max-file/);
@@ -142,6 +151,14 @@ test("production preflight and log operations preserve the Vector-first contract
   assert.match(logs, /--date/);
   assert.match(releaseRunner, /vector_preflight.*--allow-missing/);
   assert.match(releaseRunner, /assert_chat_server_replica_count 1[\s\S]+vector_preflight.*--release-dir/);
+  assert.match(alerts, /vector\.alert\.v1/);
+  assert.match(alerts, /disk_free_percent/);
+  assert.match(alerts, /retain_unarchived_no_delete/);
+  assert.match(alerts, /component_received_events_total/);
+  assert.match(recovery, /vector\.recovery\.v1/);
+  for (const scenario of ["service_restart", "vector_restart", "docker_restart", "network_short_disconnect", "docker_api_unavailable", "disk_readonly", "queue_overflow", "rotation_and_cleanup", "shutdown"]) {
+    assert.match(recovery, new RegExp(scenario));
+  }
 });
 
 test("production admin audit paths and volumes are isolated per service", async () => {
