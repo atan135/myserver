@@ -39,7 +39,7 @@ test("registry outage drill keeps warm cache briefly and fails fast without cach
   assert.equal(report.cache.warmup.endpoint.port, 17510);
   assert.deepEqual(
     report.cache.warmup.redisOperations.map((operation) => operation.command),
-    ["scan", "exists", "hget"]
+    ["zrangebyscore", "hget", "exists"]
   );
 
   assert.equal(report.cache.duringOutage.source, "discovery-cache");
@@ -65,7 +65,7 @@ test("registry outage drill keeps warm cache briefly and fails fast without cach
     })),
     [
       {
-        command: "scan",
+        command: "zrangebyscore",
         available: false
       }
     ]
@@ -82,7 +82,7 @@ test("registry outage drill keeps warm cache briefly and fails fast without cach
   assert.equal(report.newStart.error.code, "REGISTRY_UNAVAILABLE");
   assert.deepEqual(
     report.newStart.registryOperations.map((operation) => operation.command),
-    ["scan"]
+    ["zrangebyscore"]
   );
 
   assert.equal(report.strictConsumer.ok, true);
@@ -98,7 +98,7 @@ test("registry outage drill keeps warm cache briefly and fails fast without cach
   assert.equal(report.strictConsumer.error.code, "REGISTRY_UNAVAILABLE");
   assert.deepEqual(
     report.strictConsumer.registryOperations.map((operation) => operation.command),
-    ["scan"]
+    ["zrangebyscore"]
   );
 
   assert.equal(

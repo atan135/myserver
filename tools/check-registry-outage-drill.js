@@ -118,6 +118,11 @@ export class OutageRedis extends MemoryRedis {
     return super.exists(key);
   }
 
+  async zrangebyscore(key, minimum, maximum, ...args) {
+    this.record("zrangebyscore", key);
+    return super.zrangebyscore(key, minimum, maximum, ...args);
+  }
+
   async del(...keys) {
     for (const key of keys.flat()) {
       this.record("del", key);
@@ -341,8 +346,8 @@ async function runNewStartFailFastCheck(redis, config) {
   if (!isRegistryUnavailable(failure)) {
     errors.push(`new discovery client did not fail with REGISTRY_UNAVAILABLE: ${failure?.message || "<none>"}`);
   }
-  if (operations.length !== 1 || operations[0].command !== "scan") {
-    errors.push(`new discovery client should fail on the first registry scan, got ${operations.map((op) => op.command).join(", ") || "<none>"}`);
+  if (operations.length !== 1 || operations[0].command !== "zrangebyscore") {
+    errors.push(`new discovery client should fail on the first registry operation, got ${operations.map((op) => op.command).join(", ") || "<none>"}`);
   }
   if (elapsedMs > config.failFastMaxElapsedMs) {
     errors.push(`new discovery client did not fail fast: elapsed ${elapsedMs}ms > ${config.failFastMaxElapsedMs}ms`);

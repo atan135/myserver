@@ -181,7 +181,7 @@ node tools/mock-client/src/index.js --scenario character-limit --http-base-url h
 # 默认 pacing 150ms，避免 detail/progress 共享的 100ms read:detail 限流；同 request id 重放保持紧邻，不插入 pacing。
 # 固定流程：list -> detail -> progress -> action -> 同 request id 重放 -> detail -> progress。
 # 登录奖励阶段领取；首次 request id 必须是新值。
-node tools/mock-client/src/index.js --scenario activity --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --port 14000 --login-name <LOGIN_NAME> --password <PASSWORD> --character-id <CHARACTER_ID> --activity-id <LOGIN_REWARD_ACTIVITY_ID> --activity-version <VERSION> --activity-stage-id <SERVER_STAGE_ID> --activity-action claim --activity-request-id <NEW_CLAIM_REQUEST_ID>
+node tools/mock-client/src/index.js --scenario activity --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --port 14000 --login-name <LOGIN_NAME> --password <PASSWORD> --character-id <CHARACTER_ID> --activity-id <LOGIN_REWARD_ACTIVITY_ID> --activity-version <VERSION> --activity-stage-id <SERVER_STAGE_ID> --activity-action claim --activity-request-id <NEW_CLAIM_REQUEST_ID> # Local debug fallback only, strict/test/production use registry discovery
 
 # 免费或道具券抽奖。客户端不选择免费/券模式，不传券 UID/数量；服务端按活动配置和玩家资产判定。
 node tools/mock-client/src/index.js --scenario activity --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --port 14000 --login-name <LOGIN_NAME> --password <PASSWORD> --character-id <CHARACTER_ID> --activity-id <LOTTERY_ACTIVITY_ID> --activity-version <VERSION> --activity-action draw --activity-request-id <NEW_DRAW_REQUEST_ID>

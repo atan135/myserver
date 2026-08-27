@@ -828,11 +828,11 @@ export class GmController {
           "player",
           [normalizedPlayerId]
         );
-        const targetEndpoint = await preflightSingleTarget(this.gameAdminClient, gameAdminOptions);
         const player = await this.adminStore.findPlayerById(normalizedPlayerId);
         if (!player) {
           throw notFound("PLAYER_NOT_FOUND", "Player not found");
         }
+        const targetEndpoint = await preflightSingleTarget(this.gameAdminClient, gameAdminOptions);
 
         const banExpiresAt = computeBanExpiresAt(durationSeconds);
         const updated = await this.adminStore.updatePlayerStatus(normalizedPlayerId, "banned", { banExpiresAt });

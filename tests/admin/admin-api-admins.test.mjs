@@ -80,10 +80,16 @@ function createSessionStore() {
 }
 
 function createController(adminStore = createAdminStore(), sessionStore = createSessionStore()) {
+  const highRiskOperations = {
+    async run(input) {
+      return { state: "executed", result: await input.execute() };
+    }
+  };
   return new AdminsController(
     { trustProxy: false, trustedProxies: [] },
     adminStore,
-    sessionStore
+    sessionStore,
+    highRiskOperations
   );
 }
 

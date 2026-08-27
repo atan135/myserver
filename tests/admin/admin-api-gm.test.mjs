@@ -57,6 +57,14 @@ function createAdminStore(player = { player_id: "player-001", status: "active" }
   };
 }
 
+function createHighRiskOperations() {
+  return {
+    async run(input) {
+      return { state: "executed", result: await input.execute() };
+    }
+  };
+}
+
 test("GM kick publishes global NATS kick and ignores legacy PLAYER_OFFLINE", async () => {
   const adminStore = createAdminStore();
   const nats = createNats();
@@ -73,7 +81,8 @@ test("GM kick publishes global NATS kick and ignores legacy PLAYER_OFFLINE", asy
     { trustProxy: false, trustedProxies: [] },
     adminStore,
     nats,
-    gameAdminClient
+    gameAdminClient,
+    createHighRiskOperations()
   );
 
   const result = await controller.kickPlayer(
@@ -110,11 +119,12 @@ test("GM broadcast publishes global NATS broadcast and skips legacy admin TCP", 
     { trustProxy: false, trustedProxies: [] },
     adminStore,
     nats,
-    gameAdminClient
+    gameAdminClient,
+    createHighRiskOperations()
   );
 
   const result = await controller.broadcast(
-    { title: " Notice ", content: " Hello all ", sender: " GM " },
+    { title: " Notice ", content: " Hello all ", sender: " GM ", reason: "manual notice" },
     createReq()
   );
 
@@ -135,9 +145,10 @@ test("GM broadcast publishes global NATS broadcast and skips legacy admin TCP", 
   assert.deepEqual(gameAdminClient.calls, []);
   assert.equal(result.legacyBroadcast.skipped, true);
   assert.equal(adminStore.auditLogs.length, 1);
-  assert.equal(adminStore.auditLogs[0].details.title, "Notice");
-  assert.equal(adminStore.auditLogs[0].details.globalBroadcast.ok, true);
-  assert.equal(adminStore.auditLogs[0].details.legacyBroadcast.skipped, true);
+  assert.equal(adminStore.auditLogs[0].details.broadcast.titleBytes, 6);
+  assert.equal(adminStore.auditLogs[0].details.broadcast.contentBytes, 9);
+  assert.equal(adminStore.auditLogs[0].details.delivery.global.ok, true);
+  assert.equal(adminStore.auditLogs[0].details.delivery.legacy.skipped, true);
 });
 
 test("GM broadcast falls back to legacy and returns structured error when NATS fails", async () => {
@@ -153,11 +164,12 @@ test("GM broadcast falls back to legacy and returns structured error when NATS f
     { trustProxy: false, trustedProxies: [] },
     adminStore,
     nats,
-    gameAdminClient
+    gameAdminClient,
+    createHighRiskOperations()
   );
 
   await assert.rejects(
-    () => controller.broadcast({ title: " Notice ", content: " Hello " }, createReq()),
+    () => controller.broadcast({ title: " Notice ", content: " Hello ", reason: "manual notice" }, createReq()),
     (error) => {
       const response = error.getResponse?.();
       assert.equal(error.getStatus?.(), 502);
@@ -175,8 +187,8 @@ test("GM broadcast falls back to legacy and returns structured error when NATS f
   assert.deepEqual(gameAdminClient.calls[0].slice(0, 3), ["Notice", "Hello", "System"]);
   assert.equal(gameAdminClient.calls[0][3].actor, "admin");
   assert.equal(adminStore.auditLogs.length, 1);
-  assert.equal(adminStore.auditLogs[0].details.globalBroadcast.ok, false);
-  assert.equal(adminStore.auditLogs[0].details.legacyBroadcast.ok, true);
+  assert.equal(adminStore.auditLogs[0].details.delivery.global.ok, false);
+  assert.equal(adminStore.auditLogs[0].details.delivery.legacy.ok, true);
 });
 
 test("GM kick returns structured error when global NATS kick fails", async () => {
@@ -192,7 +204,8 @@ test("GM kick returns structured error when global NATS kick fails", async () =>
     { trustProxy: false, trustedProxies: [] },
     adminStore,
     nats,
-    gameAdminClient
+    gameAdminClient,
+    createHighRiskOperations()
   );
 
   await assert.rejects(
@@ -229,7 +242,8 @@ test("GM ban persists player status and tolerates offline game-server kick", asy
     { trustProxy: false, trustedProxies: [] },
     adminStore,
     nats,
-    gameAdminClient
+    gameAdminClient,
+    createHighRiskOperations()
   );
 
   const result = await controller.banPlayer(
@@ -268,7 +282,8 @@ test("GM ban keeps banned status and reports audit when global NATS kick fails",
     { trustProxy: false, trustedProxies: [] },
     adminStore,
     nats,
-    gameAdminClient
+    gameAdminClient,
+    createHighRiskOperations()
   );
 
   const result = await controller.banPlayer(
@@ -302,11 +317,12 @@ test("GM ban rejects missing player before status update and game-server call", 
     { trustProxy: false, trustedProxies: [] },
     adminStore,
     nats,
-    gameAdminClient
+    gameAdminClient,
+    createHighRiskOperations()
   );
 
   await assert.rejects(
-    () => controller.banPlayer({ playerId: "player-missing", durationSeconds: 3600 }, createReq()),
+    () => controller.banPlayer({ playerId: "player-missing", durationSeconds: 3600, reason: "manual review" }, createReq()),
     (error) => error.getResponse?.().error === "PLAYER_NOT_FOUND"
   );
 

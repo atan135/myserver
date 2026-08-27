@@ -67,7 +67,9 @@ export class MemoryRedis {
   constructor({ now = () => Date.now() } = {}) {
     this.now = now;
     this.hashes = new Map();
+    this.hashTtls = new Map();
     this.values = new Map();
+    this.indexes = new Map();
   }
 
   async connect() {}
@@ -86,10 +88,19 @@ export class MemoryRedis {
     const hash = this.hashes.get(key) ?? new Map();
     hash.set(field, value);
     this.hashes.set(key, hash);
+    if (field === "data") {
+      const identity = parseInstanceKey(key);
+      if (identity) {
+        const index = this.indexes.get(identity.indexKey) ?? new Map();
+        index.set(identity.instanceId, Math.floor(Date.now() / 1000));
+        this.indexes.set(identity.indexKey, index);
+      }
+    }
     return 1;
   }
 
   async hget(key, field) {
+    this.pruneKey(key);
     return this.hashes.get(key)?.get(field) ?? null;
   }
 
@@ -113,11 +124,97 @@ export class MemoryRedis {
       if (this.hashes.delete(key)) {
         deleted += 1;
       }
+      this.hashTtls.delete(key);
       if (this.values.delete(key)) {
         deleted += 1;
       }
+      const identity = parseInstanceKey(key);
+      if (identity) {
+        this.indexes.get(identity.indexKey)?.delete(identity.instanceId);
+      }
     }
     return deleted;
+  }
+
+  async zrangebyscore(key, minimum, maximum, ...args) {
+    this.pruneExpired();
+    const lower = Number(minimum);
+    const upper = maximum === "+inf" ? Number.POSITIVE_INFINITY : Number(maximum);
+    const limitIndex = args.findIndex((arg) => String(arg).toUpperCase() === "LIMIT");
+    const offset = limitIndex >= 0 ? Number(args[limitIndex + 1] ?? 0) : 0;
+    const limit = limitIndex >= 0 ? Number(args[limitIndex + 2] ?? Number.MAX_SAFE_INTEGER) : Number.MAX_SAFE_INTEGER;
+    return [...(this.indexes.get(key) ?? new Map()).entries()]
+      .filter(([, score]) => score >= lower && score <= upper)
+      .sort(([leftId, leftScore], [rightId, rightScore]) => leftScore - rightScore || leftId.localeCompare(rightId))
+      .slice(offset, offset + limit)
+      .map(([instanceId]) => instanceId);
+  }
+
+  pipeline() {
+    const commands = [];
+    const pipeline = {
+      hget: (key, field) => {
+        commands.push(() => this.hget(key, field));
+        return pipeline;
+      },
+      exists: (key) => {
+        commands.push(() => this.exists(key));
+        return pipeline;
+      },
+      exec: async () => Promise.all(commands.map(async (command) => [null, await command()]))
+    };
+    return pipeline;
+  }
+
+  async eval(script, keyCount, ...values) {
+    const keys = values.slice(0, keyCount);
+    const args = values.slice(keyCount);
+    const [indexKey, instanceKey, heartbeatKey] = keys;
+    const index = this.indexes.get(indexKey) ?? new Map();
+
+    if (script.includes("HSET")) {
+      const [instanceId, payload, now, instanceTtl, heartbeatTtl, indexTtl, maximum] = args;
+      this.pruneStale(indexKey, Number(now) - Number(instanceTtl));
+      if (!index.has(instanceId) && index.size >= Number(maximum)) {
+        return ["REGISTRY_CAPACITY_EXCEEDED"];
+      }
+      const hash = this.hashes.get(instanceKey) ?? new Map();
+      hash.set("data", payload);
+      this.hashes.set(instanceKey, hash);
+      this.hashTtls.set(instanceKey, Number(now) * 1000 + Number(instanceTtl) * 1000);
+      await this.setex(heartbeatKey, heartbeatTtl, "1");
+      index.set(instanceId, Number(now));
+      this.indexes.set(indexKey, index);
+      void indexTtl;
+      return ["OK", "0"];
+    }
+
+    if (script.includes("REGISTRY_INSTANCE_MISSING")) {
+      const [instanceId, now, instanceTtl, heartbeatTtl, indexTtl, maximum] = args;
+      this.pruneStale(indexKey, Number(now) - Number(instanceTtl));
+      this.pruneKey(instanceKey);
+      if (!this.hashes.has(instanceKey)) {
+        return ["REGISTRY_INSTANCE_MISSING"];
+      }
+      if (!index.has(instanceId) && index.size >= Number(maximum)) {
+        return ["REGISTRY_CAPACITY_EXCEEDED"];
+      }
+      this.hashTtls.set(instanceKey, Number(now) * 1000 + Number(instanceTtl) * 1000);
+      await this.setex(heartbeatKey, heartbeatTtl, "1");
+      index.set(instanceId, Number(now));
+      this.indexes.set(indexKey, index);
+      void indexTtl;
+      return ["OK", "0"];
+    }
+
+    this.hashes.delete(instanceKey);
+    this.hashTtls.delete(instanceKey);
+    this.values.delete(heartbeatKey);
+    index.delete(args[0]);
+    if (index.size === 0) {
+      this.indexes.delete(indexKey);
+    }
+    return ["OK"];
   }
 
   async scan(cursor, ...args) {
@@ -135,17 +232,63 @@ export class MemoryRedis {
   }
 
   pruneExpired() {
+    for (const key of this.hashTtls.keys()) {
+      this.pruneKey(key);
+    }
     for (const key of this.values.keys()) {
       this.pruneKey(key);
     }
   }
 
   pruneKey(key) {
+    const hashExpiresAt = this.hashTtls.get(key);
+    if (hashExpiresAt && hashExpiresAt <= this.now()) {
+      this.hashTtls.delete(key);
+      this.hashes.delete(key);
+      const identity = parseInstanceKey(key);
+      if (identity) {
+        this.indexes.get(identity.indexKey)?.delete(identity.instanceId);
+      }
+    }
     const entry = this.values.get(key);
     if (entry && entry.expiresAt <= this.now()) {
       this.values.delete(key);
     }
   }
+
+  pruneStale(indexKey, cutoff) {
+    const index = this.indexes.get(indexKey) ?? new Map();
+    const identity = parseIndexKey(indexKey);
+    for (const [instanceId, score] of index) {
+      if (score < cutoff) {
+        index.delete(instanceId);
+        if (identity) {
+          this.hashes.delete(registryInstanceKey(identity.prefix, identity.serviceName, instanceId));
+          this.hashTtls.delete(registryInstanceKey(identity.prefix, identity.serviceName, instanceId));
+          this.values.delete(registryHeartbeatKey(identity.prefix, identity.serviceName, instanceId));
+        }
+      }
+    }
+    if (index.size === 0) {
+      this.indexes.delete(indexKey);
+    }
+  }
+}
+
+function parseInstanceKey(key) {
+  const match = /^(.*)service:([^:]+):instances:([^:]+)$/.exec(String(key));
+  if (!match) return null;
+  return {
+    indexKey: `${match[1]}service:${match[2]}:instance-index`,
+    prefix: match[1],
+    serviceName: match[2],
+    instanceId: match[3]
+  };
+}
+
+function parseIndexKey(key) {
+  const match = /^(.*)service:([^:]+):instance-index$/.exec(String(key));
+  return match ? { prefix: match[1], serviceName: match[2] } : null;
 }
 
 function normalizeOptions(options) {

@@ -223,6 +223,7 @@ test("admin-api production config rejects default secrets", () => {
     process.env.JWT_SECRET = "prod-admin-jwt-secret";
     process.env.GAME_ADMIN_TOKEN = "prod-game-admin-token";
     process.env.GAME_PROXY_ADMIN_READ_TOKEN = "prod-game-proxy-admin-read-token";
+    process.env.INTERNAL_API_TOKEN = "prod-internal-api-token";
     process.env.ADMIN_PASSWORD = "ProdAdminPass123!";
     process.env.REGISTRY_ENABLED = "true";
     assert.equal(getConfig().env, "production");

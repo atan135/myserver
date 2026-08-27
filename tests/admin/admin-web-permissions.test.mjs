@@ -6,45 +6,37 @@ import {
   ALL_ADMIN_PERMISSIONS,
   hasAnyPermission,
   hasPermission,
-  permissionsForRole,
-  ROLE_PERMISSIONS
+  effectivePermissions
 } from "../../apps/admin-web/src/auth/permissions.js";
 
-test("admin-web permission matrix matches first-stage admin-api roles", () => {
-  assert.deepEqual(permissionsForRole("viewer"), [
-    "audit.read",
-    "security.read",
-    "players.read",
-    "maintenance.read",
-    "monitoring.read",
-    "id.read"
+test("admin-web uses server effective permissions and never expands a role", () => {
+  assert.deepEqual(effectivePermissions({ role: "viewer" }), []);
+  assert.deepEqual(effectivePermissions({
+    role: "operator",
+    permissions: [
+      ADMIN_PERMISSIONS.PLAYERS_STATUS_UPDATE,
+      ADMIN_PERMISSIONS.GM_BAN_PLAYER,
+      "unknown.permission",
+      ADMIN_PERMISSIONS.GM_BAN_PLAYER
+    ]
+  }), [
+    ADMIN_PERMISSIONS.PLAYERS_STATUS_UPDATE,
+    ADMIN_PERMISSIONS.GM_BAN_PLAYER
   ]);
 
-  assert.equal(hasPermission("operator", ADMIN_PERMISSIONS.PLAYERS_STATUS_UPDATE), true);
-  assert.equal(hasPermission("operator", ADMIN_PERMISSIONS.PLAYERS_BAN), false);
-  assert.equal(hasPermission("operator", ADMIN_PERMISSIONS.GM_BAN_PLAYER), false);
-  assert.equal(hasPermission("operator", ADMIN_PERMISSIONS.MAINTENANCE_WRITE), false);
-  assert.equal(hasPermission("operator", ADMIN_PERMISSIONS.MONITORING_ARCHIVE), false);
-  assert.equal(hasPermission("operator", ADMIN_PERMISSIONS.ADMINS_REVOKE_TOKENS), false);
-
-  assert.equal(hasPermission("admin", ADMIN_PERMISSIONS.GM_BAN_PLAYER), true);
-  assert.equal(hasPermission("admin", ADMIN_PERMISSIONS.ADMINS_RESET_PASSWORD), true);
-  assert.equal(hasPermission("super_admin", ADMIN_PERMISSIONS.MONITORING_ARCHIVE), true);
+  assert.equal(hasPermission({ role: "operator" }, ADMIN_PERMISSIONS.PLAYERS_STATUS_UPDATE), false);
+  assert.equal(hasPermission({ permissions: [ADMIN_PERMISSIONS.GM_BAN_PLAYER] }, ADMIN_PERMISSIONS.GM_BAN_PLAYER), true);
 });
 
-test("admin-web admin and super_admin keep full permissions", () => {
-  assert.deepEqual(ROLE_PERMISSIONS.admin, ALL_ADMIN_PERMISSIONS);
-  assert.deepEqual(ROLE_PERMISSIONS.super_admin, ALL_ADMIN_PERMISSIONS);
-
+test("admin-web recognizes only returned catalog permissions", () => {
   for (const permission of ALL_ADMIN_PERMISSIONS) {
-    assert.equal(hasPermission("admin", permission), true);
-    assert.equal(hasPermission("super_admin", permission), true);
+    assert.equal(hasPermission({ permissions: ALL_ADMIN_PERMISSIONS }, permission), true);
   }
 });
 
-test("admin-web permission helpers support role-only user data", () => {
-  const operator = { role: "operator" };
-  const viewer = { role: "viewer" };
+test("admin-web permission helpers support server permission data", () => {
+  const operator = { permissions: [ADMIN_PERMISSIONS.GM_KICK_PLAYER] };
+  const viewer = { permissions: [ADMIN_PERMISSIONS.MONITORING_READ] };
 
   assert.equal(hasPermission(operator, ADMIN_PERMISSIONS.GM_KICK_PLAYER), true);
   assert.equal(hasPermission(viewer, ADMIN_PERMISSIONS.GM_KICK_PLAYER), false);
