@@ -58,6 +58,14 @@ function makeController(gameAdminClient, options = {}) {
     },
     ...(options.adminStore || {})
   };
+
+  // Sub-store views (audit / character / player) alias the flat mock so the
+  // controller's defensive typeof guards continue to work without changing
+  // every options.adminStore override site. Methods on the flat mock remain
+  // authoritative, including any injected via the options spread above.
+  adminStore.audit = adminStore;
+  adminStore.character = adminStore;
+  adminStore.player = adminStore;
   const nats = {
     calls: natsCalls,
     async publishJson(subject, payload) {

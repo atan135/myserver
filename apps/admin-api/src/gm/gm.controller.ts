@@ -382,7 +382,7 @@ export class GmController {
   }
 
   private async characterOperationScope(characterId: string) {
-    if (typeof this.adminStore?.findCharacterById !== "function") {
+    if (typeof this.adminStore?.character?.findCharacterById !== "function") {
       throw new ApiHttpException(503, {
         ok: false,
         error: "ADMIN_OPERATION_TARGET_RESOLUTION_UNAVAILABLE",
@@ -1212,7 +1212,7 @@ export class GmController {
     }
   ) {
     const since = new Date(Date.now() - ASSET_GRANT_HIGH_FREQUENCY_WINDOW_MS).toISOString();
-    const recentCount = typeof this.adminStore.countRecentAdminAuditActions === "function"
+    const recentCount = typeof this.adminStore?.audit?.countRecentAdminAuditActions === "function"
       ? await this.adminStore.countRecentAdminAuditActions({
         adminId: req.admin.sub,
         action,

@@ -13,12 +13,15 @@ export interface SecurityAuditEvent {
 }
 
 export async function appendSecurityAuditLog(adminStore: any, event: SecurityAuditEvent): Promise<void> {
-  if (typeof adminStore?.appendSecurityAuditLog !== "function") {
+  // Prefer the sub-store path that matches the new AdminStore shape, but fall
+  // back to the flat shape so test mocks and pre-refactor callers keep working.
+  const auditTarget = adminStore?.audit ?? adminStore;
+  if (typeof auditTarget?.appendSecurityAuditLog !== "function") {
     return;
   }
 
   try {
-    await adminStore.appendSecurityAuditLog(event);
+    await auditTarget.appendSecurityAuditLog(event);
   } catch (err: any) {
     log("warn", "admin_api.security_audit_write_failed", {
       eventType: event.eventType,

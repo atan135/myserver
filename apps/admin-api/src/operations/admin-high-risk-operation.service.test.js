@@ -353,6 +353,12 @@ test("GM send-item protocol scope and target come from the resolved character, n
     async findCharacterById() { return { characterId: "chr_server", worldId: "world-server" }; },
     async appendAuditLog() {}
   };
+  // Sub-store views (audit / character / player) alias the flat mock so the
+  // controller's defensive typeof guards continue to work without changing
+  // this test's mock shape.
+  adminStore.audit = adminStore;
+  adminStore.character = adminStore;
+  adminStore.player = adminStore;
   const controller = new GmController({}, adminStore, { async publishJson() {} }, {
     async sendItem() { gameCalls += 1; return { ok: true }; }
   }, highRiskOperations);

@@ -221,6 +221,9 @@ class FakeStore {
 class FakeAdminStore {
   constructor() {
     this.events = [];
+    this.audit = {
+      appendSecurityAuditLog: (event) => this.appendSecurityAuditLog(event)
+    };
   }
 
   async appendSecurityAuditLog(event) {
