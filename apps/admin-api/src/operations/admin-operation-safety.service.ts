@@ -146,11 +146,14 @@ export class AdminOperationSafetyService {
     requestId?: string | null;
     details?: Record<string, unknown>;
   }) {
-    if (typeof this.adminStore?.appendSecurityAuditLog !== "function") {
+    // Prefer the sub-store path that matches the new AdminStore shape, but fall
+    // back to the flat shape so test mocks and pre-refactor callers keep working.
+    const auditTarget = this.adminStore?.audit ?? this.adminStore;
+    if (typeof auditTarget?.appendSecurityAuditLog !== "function") {
       throw safetyError("ADMIN_SECURITY_AUDIT_UNAVAILABLE", "Security audit storage is unavailable");
     }
     try {
-      await this.adminStore.appendSecurityAuditLog({
+      await auditTarget.appendSecurityAuditLog({
         eventType,
         targetType: permission ? "admin_operation" : "admin",
         targetValue: permission || (actorAdminId === null ? null : String(actorAdminId)),

@@ -3,9 +3,9 @@ import { createAdminStoreError } from "../errors.js";
 import { toRequiredJsonb, operationIsTerminal } from "../formatters.js";
 import { toAdminOperation, toAdminOperationAuditEvent } from "../mappers/admin.js";
 
-// Preserve original (latent bug) behavior: callers in this file used a
-// local operationStoreError symbol that was never defined. We bind it to
-// createAdminStoreError so runtime semantics are unchanged.
+// Bind to createAdminStoreError so the cross-store throw sites produce the
+// same error shape as the legacy wrapper function in the pre-refactor
+// admin-store.js (function operationStoreError(code, message, details)).
 const operationStoreError = createAdminStoreError;
 
 export class OperationStore {

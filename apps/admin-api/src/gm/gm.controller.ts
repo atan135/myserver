@@ -389,7 +389,7 @@ export class GmController {
         message: "High-risk target resolution is unavailable"
       });
     }
-    const character = await this.adminStore.findCharacterById(characterId, { includeDeleted: true });
+    const character = await this.adminStore.character.findCharacterById(characterId, { includeDeleted: true });
     const worldId = character?.worldId ?? character?.world_id;
     if (worldId === undefined || worldId === null || String(worldId).trim() === "") {
       throw notFound("CHARACTER_NOT_FOUND", "Character not found");
@@ -1213,7 +1213,7 @@ export class GmController {
   ) {
     const since = new Date(Date.now() - ASSET_GRANT_HIGH_FREQUENCY_WINDOW_MS).toISOString();
     const recentCount = typeof this.adminStore?.audit?.countRecentAdminAuditActions === "function"
-      ? await this.adminStore.countRecentAdminAuditActions({
+      ? await this.adminStore.audit.countRecentAdminAuditActions({
         adminId: req.admin.sub,
         action,
         since
