@@ -160,14 +160,14 @@ Node.js 服务使用 `log4js`，Rust 异步服务使用 `tracing + tracing-subsc
 
 ## Windows 与 WSL 工作区边界
 
-Windows 原生工作区 `H:\project\MyServer` 是本项目唯一的日常开发工作区和未提交改动事实源。
+Windows 原生工作区（路径以 `local_help.txt` 中 `MYSERVER_WIN_PROJECT_ROOT` 为准）是本项目唯一的日常开发工作区和未提交改动事实源。
 
 - 所有代码、配置和文档修改均在 Windows 工作区完成。
 - 依赖安装、代码生成、格式化、静态检查、单元测试、集成测试、本地服务启动和客户端联调均在 Windows 下执行。
 - Git 源码提交原则上从 Windows 工作区创建。
-- 不得为了执行 Linux 命令而从 WSL 的 `/mnt/h/project/MyServer` 直接运行项目构建、测试或依赖安装。
+- 不得为了执行 Linux 命令而从 WSL 挂载 Windows 工作区的路径（由 `local_help.txt` 中 `MYSERVER_WSL_PROJECT_UNC` 反向解析得到）直接运行项目构建、测试或依赖安装。
 
-WSL 原生工作区（例如 `~/src/MyServer`）仅用于 Linux 发布和远端运维：
+WSL 原生工作区（具体路径以 `local_help.txt` 中 `MYSERVER_WSL_PROJECT_ROOT` 为准）仅用于 Linux 发布和远端运维：
 
 - 通过 Git 同步并检出已经确认的 commit，不通过目录复制或 rsync 传递未提交源码。
 - 执行发布所需的 Linux 编译、Docker 构建、镜像推送、release manifest 生成及产物验证。
@@ -183,7 +183,7 @@ WSL 原生工作区（例如 `~/src/MyServer`）仅用于 Linux 发布和远端�
 
 ## 本地 Docker 构建环境
 
-本机 Docker 构建统一使用迁移到 H 盘的 WSL Ubuntu 发行版内原生 `dockerd`，不使用也不依赖 Docker Desktop。项目应位于 WSL 原生文件系统中，例如 `~/src/MyServer`，不要从 `/mnt/c` 或 `/mnt/h` 挂载路径执行 Docker 构建，以避免文件系统性能和 Git 换行符问题。
+本机 Docker 构建统一使用 `local_help.txt` 中 `MYSERVER_WSL_INSTALL_DIR` 登记的 WSL Ubuntu 发行版内原生 `dockerd`，不使用也不依赖 Docker Desktop。项目应位于 WSL 原生文件系统中（仓库路径以 `MYSERVER_WSL_PROJECT_ROOT` 为准），不要从任何 `/mnt/<盘符>` Windows 挂载路径（盘符可由 `local_help.txt` 中 `MYSERVER_WSL_PROJECT_UNC` 反向解析得到）执行 Docker 构建，以避免文件系统性能和 Git 换行符问题。
 
 `/etc/docker/daemon.json` 必须保留以下网络配置；如文件已有其他有效配置，应合并字段，不要直接覆盖：
 
