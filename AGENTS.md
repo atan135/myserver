@@ -131,6 +131,16 @@ docs/                 # 当前正式设计文档
 - [安全设计](./docs/安全与监控/安全设计.md)
 - [限流与安全现状](./docs/安全与监控/限流与安全现状.md)
 - [游戏服务安全分层与敏感操作处理指南](./docs/安全与监控/游戏服务安全分层与敏感操作处理指南.md)
+Docker 部署：
+
+- [本地 Docker 镜像打包与发布](./docs/后台与运维/Docker部署/本地Docker镜像打包与发布.md)
+- [简化版打包提交部署流程](./docs/后台与运维/Docker部署/简化版打包提交部署流程.md)
+- [正式 Release 上线说明](./docs/后台与运维/Docker部署/正式Release上线说明.md)
+- [自动化发布脚本](./docs/后台与运维/Docker部署/自动化发布脚本.md)
+- [服务器初始化实操](./docs/后台与运维/Docker部署/服务器初始化实操.md)
+- [服务器 Docker 初始化与更新](./docs/后台与运维/Docker部署/服务器Docker初始化与更新.md)
+- [Vector 首次初始化操作指南](./docs/后台与运维/Docker部署/Vector首次初始化操作指南.md)
+- [WSL 本地构建与 BuildKit 配置](./docs/后台与运维/Docker部署/WSL本地构建与BuildKit配置.md)
 
 ## 基础设定
 
