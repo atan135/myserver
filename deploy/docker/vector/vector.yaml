@@ -41,7 +41,7 @@ transforms:
         .parse_status = ["plain_text"]
       }
       if contains(.message, "�") { .parse_status = push(.parse_status, "invalid_utf8") }
-      .event_time = .timestamp ?? null
+      .event_time = .timestamp
 
       # A JSON application line is merged only for level/time extraction. The
       # original line remains in message so malformed input is traceable.
