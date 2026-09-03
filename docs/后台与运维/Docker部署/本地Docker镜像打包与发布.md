@@ -185,7 +185,7 @@ release_tag="v$(node --input-type=module -e \"import pkg from './package.json' w
   --push
 ```
 
-该脚本的职责是构建 11 个应用镜像、生成 SBOM/provenance、推送、获取各镜像 digest、生成 schema v2 `images.lock.json`，最后运行 `verify-release.sh`。正式 `--push` 会拒绝脏工作区、未跟踪发布文件和不对应当前提交的 release tag；脚本失败时不得生成可被视为完整发布的 lock 文件。
+该脚本的职责是构建 11 个应用镜像、推送、获取各镜像 digest、生成 schema v2 `images.lock.json`。当前 `--push` 路径不再生成 SBOM / provenance attestation（ACR 个人版不接受 `application/vnd.oci.empty.v1+json` OCI empty layer descriptor），依赖锁摘要与依赖审计以 `Cargo.lock` / `package-lock.json` 等锁文件为准，最后运行 `verify-release.sh`。正式 `--push` 会拒绝脏工作区、未跟踪发布文件和不对应当前提交的 release tag；脚本失败时不得生成可被视为完整发布的 lock 文件。
 
 正式推送生成的 `deploy/docker/images.lock.json` 是唯一允许在 WSL 工作区产生并提交的仓库文件。该发布产物应使用独立 release 提交推送；完成后必须先将 Windows 工作区 fast-forward 到该提交，再继续开发，避免两个工作区分叉。
 
@@ -231,7 +231,7 @@ PostgreSQL 初始建议为 `shared_buffers=512MB`、`effective_cache_size=1536MB
 构建完成后，发布者至少交付：
 
 1. release ID、完整 Git commit 和 `images.lock.json`。
-2. 所有镜像的 repository、tag、digest、目标平台和 SBOM/provenance 位置。
+2. 所有镜像的 repository、tag、digest、目标平台。
 3. 本次数据库 migration 是否存在、是否不可逆、备份证据要求和兼容窗口。
 4. 本次配置新增项、secret 新增项、默认值变化和受影响公网端口。
 5. 已执行检查及结果，以及未执行真实联调的明确说明。
