@@ -70,4 +70,4 @@ install -m 0755 "$source_dir/vector-recovery-check.sh" /usr/local/sbin/myserver-
 systemctl daemon-reload
 if [[ "$enable_unit" == true ]]; then systemctl enable vector.service; fi
 printf 'vector_installed=config:%s unit:/etc/systemd/system/vector.service enabled:%s\n' "$target_dir/vector.yaml" "$enable_unit"
-printf 'next_steps=vector validate --config %s; systemctl start vector.service\n' "$target_dir/vector.yaml"
+printf 'next_steps=vector validate %s --no-environment; systemctl start vector.service\n' "$target_dir/vector.yaml"

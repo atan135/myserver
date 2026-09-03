@@ -80,7 +80,7 @@ sinks:
     type: file
     inputs:
       - allowlist
-    path: '/data/myserver/log/{{ service }}/{{ captured_at | format_timestamp(format: "%Y-%m-%d") }}/{{ instance_id }}.{{ container_id_prefix }}.jsonl.open'
+    path: '/data/myserver/log/%Y-%m-%d/{{ service }}/{{ instance_id }}.{{ container_id_prefix }}.jsonl.open'
     timezone: UTC
     idle_timeout_secs: 30
     encoding:

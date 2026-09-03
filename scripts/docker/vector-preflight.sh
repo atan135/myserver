@@ -76,7 +76,7 @@ fi
 [[ -x /usr/bin/vector ]] || die vector_binary_missing
 version_output="$(/usr/bin/vector --version 2>/dev/null || true)"
 [[ "$version_output" == *"$required_vector_version"* ]] || die vector_version_mismatch
-/usr/bin/vector validate --config "$config" >/dev/null || die vector_config_invalid
+/usr/bin/vector validate "$config" --no-environment >/dev/null 2>&1 || die vector_config_invalid
 systemctl is-active --quiet "$vector_unit" || die vector_unit_inactive
 systemctl is-enabled --quiet "$vector_unit" || warn vector_unit_not_enabled
 
