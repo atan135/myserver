@@ -136,7 +136,7 @@ release_compose_command() {
 # Vector must already be healthy before any business container is observed or
 # replaced. Missing containers are allowed here because this is also the first
 # release on a host; a strict driver/output check runs after application start.
-"$vector_preflight" --release-dir "$release_dir" --allow-missing
+sudo "$vector_preflight" --release-dir "$release_dir" --allow-missing
 
 previous_release_dir="$(readlink -f "$release_root/current" 2>/dev/null || true)"
 previous_release_id=""
@@ -304,7 +304,7 @@ fi
 "${compose[@]}" up -d --no-deps game-server match-service chat-server mail-service announce-service \
   metrics-collector game-proxy auth-http admin-api
 assert_chat_server_replica_count 1
-"$vector_preflight" --release-dir "$release_dir"
+sudo "$vector_preflight" --release-dir "$release_dir"
 
 if wait_for_release_readiness; then
   :
