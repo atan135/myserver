@@ -123,7 +123,7 @@ else
   warn output_missing
 fi
 if command -v curl >/dev/null 2>&1; then
-  curl --fail --silent --show-error --max-time 2 http://127.0.0.1:8686/metrics >/dev/null || die vector_api_unreachable
+  curl --fail --silent --show-error --max-time 2 http://127.0.0.1:8686/health >/dev/null || die vector_api_unreachable
   printf 'vector_preflight=api reachable=true\n'
 else
   warn curl_missing_api_not_checked
