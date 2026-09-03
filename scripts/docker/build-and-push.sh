@@ -142,7 +142,7 @@ build_image() {
   done
 
   if [ "$push" = true ]; then
-    args+=(--provenance=mode=max --sbom=true --push)
+    args+=(--output type=docker --push)
   else
     args+=(--load)
   fi
