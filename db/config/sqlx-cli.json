@@ -5,7 +5,9 @@
     "win32-x64": {
       "binary": "bin/sqlx.exe",
       "artifactUrl": "local://cargo-install/sqlx-cli-0.8.6?locked=true&features=postgres%2Crustls",
-      "sha256": "aacf95a4a7bc4d66613ff69fba09b03f8e9adc7ede387083a90d73ee7ca5fdf1",
+      "sha256": "9d17136c4dbf010272b30925b7b8c4fef0de168a50dd64014b5880ef0f8a936d",
+      "buildRustflags": "-C link-arg=/Brepro",
+      "buildNotes": "RUSTFLAGS=-C link-arg=/Brepro forces MSVC link.exe to emit a deterministic PE image so the produced sha256 is reproducible across rebuilds on the same toolchain. Use scripts/install-sqlx-cli.ps1 to install/refresh this binary; do not run bare cargo install sqlx-cli.",
       "provisioned": true
     },
     "linux-x64": {
