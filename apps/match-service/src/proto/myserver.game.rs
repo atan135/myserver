@@ -576,6 +576,9 @@ pub struct EntityTransform {
     pub moving: bool,
     #[prost(uint32, tag = "9")]
     pub last_input_frame: u32,
+    /// Authoritative actual movement speed in metres per second; zero is invalid.
+    #[prost(float, tag = "10")]
+    pub speed_metres_per_second: f32,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct RoomStatePush {

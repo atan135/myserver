@@ -38,8 +38,9 @@ impl RoomLogicFactory for GameRoomLogicFactory {
                     .room_policies
                     .resolve("movement_demo")
                     .ok_or("ROOM_POLICY_UNSUPPORTED")?;
-                Ok(Box::new(MovementDemoLogic::new(
+                Ok(Box::new(MovementDemoLogic::new_from_snapshot(
                     config_tables,
+                    current.clone(),
                     movement_demo_scene_id,
                     policy.movement_correction_interval_frames,
                     policy.movement_correction_threshold,

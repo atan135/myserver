@@ -25,6 +25,7 @@
 
 | CSV 文件 | 当前状态 | 主要原因 | 推荐验证方式 |
 |------|------|------|------|
+| `MovementConfig.csv` | `新建房间生效` | 基础速度经版本化配置校验，房间创建固定速度与版本，旧房间/重连/迁移不变 | 配置原子性及 movement_config 定向测试；新旧房间联调 |
 | `TestTable_100.csv` | `可直接生效` | `GetRoomData` 请求处理时会重新读取最新 raw table 快照 | `mock-client --scenario get-room-data` |
 | `ItemTable.csv` | `部分可直接生效` | 背包/物品相关请求会重新读取最新 raw table 快照 | `inventory-equip` / `inventory-use` / 受保护 admin grant |
 | `TestTable_110.csv` | `当前未接入业务` | 当前只看到装载与 reload, 没有实际业务消费路径 | 暂无业务验证入口 |
@@ -195,3 +196,10 @@ reload 成功后会重建 `CsvCombatCatalog`:
 - `snapshot_interval_frames`
 
 后续如果新增 `RoomType.csv` 或同类玩法配置表, 应在 `RuntimeGameConfig::build(...)` 中从 raw table 构建新的 `RoomPolicyRegistry`, 并沿用当前共享 registry 的原子替换入口。
+
+
+## 主世界移动速度
+
+`MovementConfig.csv` 的唯一 Id=1 行定义 `BaseSpeedMetresPerSecond`（米/秒），当前为 2.0；合法范围为有限的 `(0,100]`。仅数据变更支持运行时重载。非法值、缺行、重复主键或文件缺失均拒绝候选版本，保留原快照。房间创建时固定速度和配置版本，旧房间的后加入、重连与跨实例迁移均保留该速度；空房迁移保留同样元数据。固定公共主世界的退出/重进不代表重建房间。
+
+协议应用版本为 2，`EntityTransform.speed_metres_per_second` 和完整 game_state 的同名字段下发实际速度；旧客户端通过既有版本门禁拒绝。部署应同步升级客户端与服务端，movement-demo transfer v2 不向旧二进制导入。详细配置及回滚约定见 [CSV 配置表设计](./CSV配置表设计.md#主世界移动速度配置与下发契约待实现)。

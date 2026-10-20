@@ -922,6 +922,7 @@ impl MovementEntityState {
             dir_y: self.direction.y,
             moving: self.moving,
             last_input_frame: self.last_input_frame,
+            speed_metres_per_second: self.speed,
         }
     }
 }

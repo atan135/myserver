@@ -251,7 +251,9 @@ fn movement_transfer_state(
 fn assert_movement_export_payload(payload: &RoomTransferPayload) {
     let (logic_json, movement_json) = movement_transfer_state(payload);
 
-    assert_eq!(logic_json["schema"], "movement-demo.logic.v1");
+    assert_eq!(logic_json["schema"], "movement-demo.logic.v2");
+    assert_eq!(logic_json["fixed_speed"], 2.0);
+    assert!(logic_json["config_version"].as_u64().unwrap() > 0);
     assert_eq!(logic_json["tick_count"], 2);
     assert_eq!(logic_json["recipients"], serde_json::json!([PLAYER_A]));
     assert_eq!(movement_json["schema"], "room-movement-state.v1");
@@ -279,7 +281,10 @@ fn assert_movement_export_payload(payload: &RoomTransferPayload) {
     );
     assert_eq!(movement_json["entities"][0]["character_id"], PLAYER_A);
     assert_eq!(movement_json["entities"][0]["scene_id"], 1);
-    assert_eq!(movement_json["entities"][0]["speed"], 4.0);
+    assert_eq!(
+        movement_json["entities"][0]["speed"],
+        logic_json["fixed_speed"]
+    );
     assert_eq!(movement_json["entities"][0]["moving"], true);
     assert_eq!(movement_json["entities"][0]["last_input_frame"], 1);
 }

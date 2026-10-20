@@ -2067,6 +2067,7 @@ mod tests {
                 dir_y: 1.0,
                 moving: false,
                 last_input_frame: 40,
+                speed_metres_per_second: 2.0,
             }],
             correction_kind: crate::pb::MovementCorrectionKind::Recovery as i32,
             reason_code: MovementCorrectionReason::ReconnectRecovery as i32,

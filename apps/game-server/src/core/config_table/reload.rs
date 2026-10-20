@@ -61,6 +61,8 @@ pub fn spawn_hot_reload_task(runtime: ConfigTableRuntime, interval: Duration) ->
                         scene_dir = %runtime.scene_dir().display(),
                         changed_files = reloaded.changed_file_names.join(","),
                         config_version = reloaded.snapshot.version,
+                        movement_speed_metres_per_second = reloaded.snapshot.movement_speed_metres_per_second,
+                        movementconfig_rows = counts.movementconfig,
                         scenetable_rows = counts.scenetable,
                         scenespawnpoint_rows = counts.scenespawnpoint,
                         sceneportal_rows = counts.sceneportal,

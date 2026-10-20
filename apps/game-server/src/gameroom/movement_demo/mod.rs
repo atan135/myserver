@@ -8,21 +8,22 @@ use crate::core::logic::{
     RoomLogicTransferState,
 };
 use crate::core::room::PlayerInputRecord;
-use crate::core::runtime::room_policy::MOVEMENT_DEMO_DEFAULT_SPEED_METERS_PER_SECOND;
 use crate::core::system::movement::{
     RoomMovementState, decide_corrections, full_sync_broadcast, reject_broadcast,
     snapshot_broadcasts, tick_movement,
 };
 use crate::core::system::scene::{SceneCatalog, SceneQuery};
+use crate::gameconfig::movement_config::valid_movement_speed;
 use crate::pb::{MovementCorrectionReason, MovementRecoveryState};
 
-const DEFAULT_MOVE_SPEED: f32 = MOVEMENT_DEMO_DEFAULT_SPEED_METERS_PER_SECOND;
-const MOVEMENT_DEMO_TRANSFER_SCHEMA: &str = "movement-demo.logic.v1";
+const MOVEMENT_DEMO_TRANSFER_SCHEMA: &str = "movement-demo.logic.v2";
 const MOVEMENT_TRANSFER_CONFIG_EPSILON: f32 = 0.000_001;
 
 #[derive(Default)]
 pub struct MovementDemoLogic {
     pub room_id: String,
+    pub fixed_speed: f32,
+    pub config_version: u64,
     pub tick_count: u64,
     pub current_frame: u32,
     pub default_scene_id: i32,
@@ -38,6 +39,8 @@ struct MovementDemoTransferLogicState {
     #[serde(rename = "schemaVersion")]
     schema_version: u32,
     room_id: String,
+    fixed_speed: f32,
+    config_version: u64,
     tick_count: u64,
     #[serde(default)]
     current_frame: u32,
@@ -55,6 +58,31 @@ impl MovementDemoLogic {
         aoi_enabled: bool,
         movement_control_stop_frames: u32,
     ) -> Self {
+        let config = config_tables.current_snapshot();
+        Self::new_from_snapshot(
+            config_tables,
+            config,
+            default_scene_id,
+            correction_interval_frames,
+            correction_threshold,
+            aoi_radius,
+            aoi_enabled,
+            movement_control_stop_frames,
+        )
+    }
+
+    pub fn new_from_snapshot(
+        config_tables: ConfigTableRuntime,
+        config: std::sync::Arc<crate::core::config_table::RuntimeGameConfig>,
+        default_scene_id: i32,
+        correction_interval_frames: u32,
+        correction_threshold: f32,
+        aoi_radius: f32,
+        aoi_enabled: bool,
+        movement_control_stop_frames: u32,
+    ) -> Self {
+        let fixed_speed = config.movement_speed_metres_per_second;
+        let config_version = config.version;
         let mut movement_state =
             RoomMovementState::new(default_scene_id, correction_interval_frames);
         movement_state.set_correction_config(
@@ -66,6 +94,8 @@ impl MovementDemoLogic {
         movement_state.set_movement_control_stop_frames(movement_control_stop_frames);
         Self {
             room_id: String::new(),
+            fixed_speed,
+            config_version,
             tick_count: 0,
             current_frame: 0,
             default_scene_id,
@@ -108,7 +138,7 @@ impl MovementDemoLogic {
 
         // Public-world players share the configured spawn. Collision and spawn offsets are not
         // part of movement_demo, so no other character can alter this character's spawn state.
-        movement_state.spawn_character(character_id, spawn, DEFAULT_MOVE_SPEED);
+        movement_state.spawn_character(character_id, spawn, self.fixed_speed);
         info!(
             room_id = self.room_id,
             character_id,
@@ -128,6 +158,9 @@ impl MovementDemoLogic {
             .movement_state
             .as_ref()
             .ok_or("ROOM_TRANSFER_INVALID_MOVEMENT_STATE")?;
+        if !valid_movement_speed(logic_state.fixed_speed) || logic_state.config_version == 0 {
+            return Err("ROOM_TRANSFER_INCOMPATIBLE_MOVEMENT_STATE");
+        }
         if logic_state.default_scene_id != self.default_scene_id
             || imported.scene_id != logic_state.default_scene_id
             || imported.scene_id != expected.scene_id
@@ -151,7 +184,7 @@ impl MovementDemoLogic {
                 .entity_state_at(dense_index)
                 .ok_or("ROOM_TRANSFER_INCOMPATIBLE_MOVEMENT_STATE")?;
             if entity.scene_id != imported.scene_id
-                || !transfer_float_matches(entity.speed, DEFAULT_MOVE_SPEED)
+                || !transfer_float_matches(entity.speed, logic_state.fixed_speed)
                 || !scene_catalog.is_walkable(entity.scene_id, entity.position.x, entity.position.y)
             {
                 return Err("ROOM_TRANSFER_INCOMPATIBLE_MOVEMENT_STATE");
@@ -168,7 +201,12 @@ fn transfer_float_matches(left: f32, right: f32) -> bool {
 impl RoomLogic for MovementDemoLogic {
     fn on_room_created(&mut self, room_id: &str) {
         self.room_id = room_id.to_string();
-        info!(room_id, "[RoomLogic/movement_demo] room created");
+        info!(
+            room_id,
+            speed_metres_per_second = self.fixed_speed,
+            config_version = self.config_version,
+            "[RoomLogic/movement_demo] room created"
+        );
     }
 
     fn on_character_join(&mut self, character_id: &str) {
@@ -297,6 +335,7 @@ impl RoomLogic for MovementDemoLogic {
             dir_y: f32,
             moving: bool,
             last_input_frame: u32,
+            speed_metres_per_second: f32,
         }
 
         #[derive(Serialize)]
@@ -330,6 +369,7 @@ impl RoomLogic for MovementDemoLogic {
                     dir_y: entity.dir_y,
                     moving: entity.moving,
                     last_input_frame: entity.last_input_frame,
+                    speed_metres_per_second: entity.speed_metres_per_second,
                 })
                 .collect(),
         })
@@ -364,6 +404,8 @@ impl RoomLogicTransfer for MovementDemoLogic {
             schema: MOVEMENT_DEMO_TRANSFER_SCHEMA.to_string(),
             schema_version: ROOM_TRANSFER_SCHEMA_VERSION,
             room_id: self.room_id.clone(),
+            fixed_speed: self.fixed_speed,
+            config_version: self.config_version,
             tick_count: self.tick_count,
             current_frame: self.current_frame,
             default_scene_id: self.default_scene_id,
@@ -427,6 +469,8 @@ impl RoomLogicTransfer for MovementDemoLogic {
             config.scene_catalog.as_ref(),
         )?;
 
+        self.fixed_speed = logic_state.fixed_speed;
+        self.config_version = logic_state.config_version;
         self.room_id = logic_state.room_id;
         self.tick_count = logic_state.tick_count;
         self.current_frame = logic_state
@@ -528,6 +572,119 @@ mod tests {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
         ConfigTableRuntime::load_with_scene_dir(&root.join("csv"), &root.join("scene"))
             .expect("game-server config fixture should load")
+    }
+
+    #[tokio::test]
+    async fn movement_config_reload_pins_rooms_and_transfer_restores_source_speed() {
+        let fixture = TempConfigDir::new();
+        let runtime =
+            ConfigTableRuntime::load_with_scene_dir(&fixture.csv_dir, &fixture.scene_dir).unwrap();
+        let create = || {
+            MovementDemoLogic::new(
+                runtime.clone(),
+                1,
+                MOVEMENT_DEMO_CORRECTION_INTERVAL_FRAMES,
+                MOVEMENT_DEMO_CORRECTION_THRESHOLD_METERS,
+                16.0,
+                MOVEMENT_DEMO_AOI_ENABLED,
+                MOVEMENT_DEMO_CONTROL_STOP_FRAMES,
+            )
+        };
+        let mut old = create();
+        old.on_room_created("old-room");
+        old.on_character_join("a");
+        assert_eq!(old.fixed_speed, 2.0);
+        let dense = old
+            .movement_state
+            .as_ref()
+            .unwrap()
+            .dense_index_by_character("a")
+            .unwrap();
+        let state = old.movement_state.as_mut().unwrap();
+        let before = state.entity("a").unwrap().position.x;
+        state.apply_command_at(dense, 1, MovementCommand::MoveDir(Vec2 { x: 1.0, y: 0.0 }));
+        tick_movement(
+            state,
+            1,
+            20,
+            &[],
+            runtime.current_snapshot().scene_catalog.as_ref(),
+        );
+        assert!((state.entity("a").unwrap().position.x - before - 0.1).abs() < 0.001);
+
+        let csv = fixture.csv_dir.join("MovementConfig.csv");
+        fs::write(&csv, "Id,BaseSpeedMetresPerSecond\nint,float\n1,1.0\n").unwrap();
+        runtime.reload_changed(&[csv.clone()]).await.unwrap();
+        old.on_character_join("b");
+        assert_eq!(
+            old.movement_state
+                .as_ref()
+                .unwrap()
+                .entity("b")
+                .unwrap()
+                .speed,
+            2.0
+        );
+        let mut new = create();
+        new.on_room_created("new-room");
+        new.on_character_join("c");
+        assert_eq!(new.fixed_speed, 1.0);
+        assert_eq!(new.config_version, old.config_version + 1);
+        let game_state: serde_json::Value =
+            serde_json::from_str(&old.get_serialized_state()).unwrap();
+        assert_eq!(game_state["entities"][0]["speed_metres_per_second"], 2.0);
+        assert_eq!(
+            old.movement_recovery_state(Some("a"), MovementCorrectionReason::ReconnectRecovery)
+                .unwrap()
+                .entities[0]
+                .speed_metres_per_second,
+            2.0
+        );
+        let payload = old.export_transfer_state().unwrap();
+        let mut imported = create();
+        imported.import_transfer_state(&payload).unwrap();
+        assert_eq!(imported.fixed_speed, 2.0);
+        assert_eq!(imported.config_version, old.config_version);
+        imported.on_character_join("d");
+        assert_eq!(
+            imported
+                .movement_state
+                .as_ref()
+                .unwrap()
+                .entity("d")
+                .unwrap()
+                .speed,
+            2.0
+        );
+        old.on_character_leave("a");
+        old.on_character_leave("b");
+        let mut empty = create();
+        empty
+            .import_transfer_state(&old.export_transfer_state().unwrap())
+            .unwrap();
+        empty.on_character_join("e");
+        assert_eq!(empty.fixed_speed, 2.0);
+        assert_eq!(
+            empty
+                .movement_state
+                .as_ref()
+                .unwrap()
+                .entity("e")
+                .unwrap()
+                .speed,
+            2.0
+        );
+        let mut bad = payload.clone();
+        let mut value: serde_json::Value = serde_json::from_str(&bad.logic_state_json).unwrap();
+        value["fixed_speed"] = json!(1.0);
+        bad.logic_state_json = value.to_string();
+        assert!(create().import_transfer_state(&bad).is_err());
+        value["schema"] = json!("movement-demo.logic.v1");
+        bad.logic_state_json = value.to_string();
+        assert_eq!(
+            create().import_transfer_state(&bad),
+            Err("ROOM_TRANSFER_UNSUPPORTED_SCHEMA")
+        );
     }
 
     fn movement_demo_logic() -> MovementDemoLogic {

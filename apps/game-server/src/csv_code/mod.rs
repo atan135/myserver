@@ -10,6 +10,8 @@ pub mod disciplinetable;
 #[rustfmt::skip]
 pub mod itemtable;
 #[rustfmt::skip]
+pub mod movementconfig;
+#[rustfmt::skip]
 pub mod scenecontext;
 #[rustfmt::skip]
 pub mod sceneinteraction;

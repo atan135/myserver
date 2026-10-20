@@ -1,5 +1,5 @@
 {
-  "digest": "sha256:bf94e2d0657bd3b531b601f8983f775a34c433f824801e0b45bc911f8bfbf9c4",
+  "digest": "sha256:5b5f2926751790b150d726433dcfeefd493c590b49310001a2df14eedbc0a282",
   "files": [
     {
       "enums": [],
@@ -3207,6 +3207,13 @@
               "number": 9,
               "oneof": "",
               "type": "uint32"
+            },
+            {
+              "label": "singular",
+              "name": "speed_metres_per_second",
+              "number": 10,
+              "oneof": "",
+              "type": "float"
             }
           ],
           "name": "EntityTransform",

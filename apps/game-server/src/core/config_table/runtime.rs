@@ -20,6 +20,7 @@ pub struct ConfigTableRuntime {
 
 #[derive(Clone)]
 pub struct RuntimeGameConfig {
+    pub movement_speed_metres_per_second: f32,
     pub version: u64,
     pub tables: Arc<ConfigTables>,
     pub scene_catalog: Arc<SceneCatalog>,
@@ -62,6 +63,12 @@ impl RuntimeGameConfig {
         tables: Arc<ConfigTables>,
         scene_dir: &Path,
     ) -> Result<Self, RuntimeConfigLoadError> {
+        let movement_speed_metres_per_second =
+            crate::gameconfig::movement_config::validate_movement_config(&tables.movementconfig)
+                .map_err(|source| RuntimeConfigLoadError::Csv {
+                    stage: "build movement config",
+                    source,
+                })?;
         let scene_catalog = Arc::new(
             SceneCatalog::load_from_dir(scene_dir, tables.as_ref()).map_err(|source| {
                 RuntimeConfigLoadError::Scene {
@@ -86,6 +93,7 @@ impl RuntimeGameConfig {
         );
 
         Ok(Self {
+            movement_speed_metres_per_second,
             version,
             tables,
             scene_catalog,
@@ -252,6 +260,37 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.root);
         }
+    }
+
+    #[tokio::test]
+    async fn movement_config_rejects_invalid_candidates_atomically() {
+        let fixture = TempConfigDir::new();
+        let runtime =
+            ConfigTableRuntime::load_with_scene_dir(&fixture.csv_dir, &fixture.scene_dir).unwrap();
+        let initial = runtime.current_snapshot();
+        let csv = fixture.csv_dir.join("MovementConfig.csv");
+        assert!(runtime.watched_csv_files().contains(&csv));
+        for rows in [
+            "", "1,0", "1,-1", "1,NaN", "1,inf", "1,100.1", "2,2", "1,2\n1,1",
+        ] {
+            fs::write(
+                &csv,
+                format!("Id,BaseSpeedMetresPerSecond\nint,float\n{rows}\n"),
+            )
+            .unwrap();
+            assert!(
+                runtime.reload_changed(&[csv.clone()]).await.is_err(),
+                "{rows}"
+            );
+            assert!(Arc::ptr_eq(&initial, &runtime.current_snapshot()));
+            assert!(
+                ConfigTableRuntime::load_with_scene_dir(&fixture.csv_dir, &fixture.scene_dir)
+                    .is_err()
+            );
+        }
+        fs::remove_file(&csv).unwrap();
+        assert!(runtime.reload_changed(&[csv]).await.is_err());
+        assert!(Arc::ptr_eq(&initial, &runtime.current_snapshot()));
     }
 
     #[tokio::test]

@@ -1,3 +1,5 @@
+use super::movement_config::validate_movement_config;
+use crate::csv_code::movementconfig::MovementConfig;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -26,6 +28,7 @@ use crate::gameconfig::discipline_config::{
 };
 use crate::gameconfig::title_config::validate_title_table;
 
+const MOVEMENTCONFIG_FILE: &str = "MovementConfig.csv";
 const SCENETABLE_FILE: &str = "SceneTable.csv";
 const SCENESPAWNPOINT_FILE: &str = "SceneSpawnPoint.csv";
 const SCENEPORTAL_FILE: &str = "ScenePortal.csv";
@@ -45,6 +48,7 @@ const CHARACTERPROGRESSTABLE_FILE: &str = "CharacterProgressTable.csv";
 
 #[derive(Clone)]
 pub struct ConfigTables {
+    pub movementconfig: Arc<MovementConfig>,
     pub scenetable: Arc<SceneTable>,
     pub scenespawnpoint: Arc<SceneSpawnPoint>,
     pub sceneportal: Arc<ScenePortal>,
@@ -65,6 +69,7 @@ pub struct ConfigTables {
 
 #[derive(Clone, Copy, Debug)]
 pub struct ConfigTableRowCounts {
+    pub movementconfig: usize,
     pub scenetable: usize,
     pub scenespawnpoint: usize,
     pub sceneportal: usize,
@@ -85,6 +90,8 @@ pub struct ConfigTableRowCounts {
 
 impl ConfigTables {
     pub fn load_from_dir(csv_dir: &Path) -> Result<Self, CsvLoadError> {
+        let movementconfig = MovementConfig::load_from_csv(&csv_dir.join(MOVEMENTCONFIG_FILE))?;
+        validate_movement_config(&movementconfig)?;
         let scenetable = SceneTable::load_from_csv(&csv_dir.join(SCENETABLE_FILE))?;
         let scenespawnpoint = SceneSpawnPoint::load_from_csv(&csv_dir.join(SCENESPAWNPOINT_FILE))?;
         let sceneportal = ScenePortal::load_from_csv(&csv_dir.join(SCENEPORTAL_FILE))?;
@@ -116,6 +123,7 @@ impl ConfigTables {
         )?;
 
         Ok(Self {
+            movementconfig: Arc::new(movementconfig),
             scenetable: Arc::new(scenetable),
             scenespawnpoint: Arc::new(scenespawnpoint),
             sceneportal: Arc::new(sceneportal),
@@ -140,6 +148,13 @@ impl ConfigTables {
         csv_dir: &Path,
         changed_files: &HashSet<String>,
     ) -> Result<Self, CsvLoadError> {
+        let movementconfig = if changed_files.contains(MOVEMENTCONFIG_FILE) {
+            let table = MovementConfig::load_from_csv(&csv_dir.join(MOVEMENTCONFIG_FILE))?;
+            validate_movement_config(&table)?;
+            Arc::new(table)
+        } else {
+            self.movementconfig.clone()
+        };
         let scenetable = if changed_files.contains(SCENETABLE_FILE) {
             Arc::new(SceneTable::load_from_csv(&csv_dir.join(SCENETABLE_FILE))?)
         } else {
@@ -262,6 +277,7 @@ impl ConfigTables {
         )?;
 
         Ok(Self {
+            movementconfig,
             scenetable,
             scenespawnpoint,
             sceneportal,
@@ -283,6 +299,7 @@ impl ConfigTables {
 
     pub fn watched_csv_files(csv_dir: &Path) -> Vec<PathBuf> {
         vec![
+            csv_dir.join(MOVEMENTCONFIG_FILE),
             csv_dir.join(SCENETABLE_FILE),
             csv_dir.join(SCENESPAWNPOINT_FILE),
             csv_dir.join(SCENEPORTAL_FILE),
@@ -304,6 +321,7 @@ impl ConfigTables {
 
     pub fn row_counts(&self) -> ConfigTableRowCounts {
         ConfigTableRowCounts {
+            movementconfig: self.movementconfig.rows.len(),
             scenetable: self.scenetable.rows.len(),
             scenespawnpoint: self.scenespawnpoint.rows.len(),
             sceneportal: self.sceneportal.rows.len(),

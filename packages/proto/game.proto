@@ -215,6 +215,8 @@ message EntityTransform {
   float dir_y = 7;
   bool moving = 8;
   uint32 last_input_frame = 9;
+  // Authoritative actual movement speed in metres per second; zero is invalid.
+  float speed_metres_per_second = 10;
 }
 
 message RoomStatePush {

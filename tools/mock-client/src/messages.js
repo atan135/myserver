@@ -30,7 +30,7 @@ const INBOUND_ADMIN_CONTROL_REQUEST_TYPES = new Set([
 // ============ Message Encoders ============
 
 // Auth. Pass 0 to exercise the pre-version-field legacy encoding.
-export function encodeAuthReq(ticket, clientProtocolVersion = 1) {
+export function encodeAuthReq(ticket, clientProtocolVersion = 2) {
   const fields = [encodeStringField(1, ticket)];
   if (clientProtocolVersion !== 0) {
     fields.push(encodeUInt32Field(2, clientProtocolVersion));
@@ -435,7 +435,8 @@ function decodeEntityTransform(buffer) {
     dirX: readFloat(fields, 6),
     dirY: readFloat(fields, 7),
     moving: readBool(fields, 8),
-    lastInputFrame: readUInt32(fields, 9)
+    lastInputFrame: readUInt32(fields, 9),
+    speedMetresPerSecond: readFloat(fields, 10)
   };
 }
 

@@ -3,8 +3,8 @@
 
 #[allow(dead_code)]
 pub const PACKET_HEADER_VERSION: u8 = 1;
-pub const CURRENT_CLIENT_PROTOCOL_VERSION: u32 = 1;
-pub const MINIMUM_CLIENT_PROTOCOL_VERSION: u32 = 1;
+pub const CURRENT_CLIENT_PROTOCOL_VERSION: u32 = 2;
+pub const MINIMUM_CLIENT_PROTOCOL_VERSION: u32 = 2;
 pub const LEGACY_IMPLICIT_PROTOCOL_VERSION: u32 = 1;
 
 pub const CLIENT_PROTOCOL_VERSION_TOO_OLD: &str = "CLIENT_PROTOCOL_VERSION_TOO_OLD";
@@ -167,10 +167,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn absent_auth_field_is_the_accepted_legacy_v1_client() {
+    fn absent_auth_field_rejects_legacy_v1_client() {
         assert_eq!(
             negotiate_client_protocol_version(0),
-            ClientProtocolVersionDecision::Accepted {
+            ClientProtocolVersionDecision::RejectedTooOld {
                 effective_version: 1,
                 source: ClientProtocolVersionSource::LegacyImplicit,
             }

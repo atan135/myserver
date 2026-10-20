@@ -2,8 +2,8 @@
   "schemaVersion": 1,
   "packetHeaderVersion": 1,
   "applicationProtocol": {
-    "currentClientProtocolVersion": 1,
-    "minimumClientProtocolVersion": 1,
+    "currentClientProtocolVersion": 2,
+    "minimumClientProtocolVersion": 2,
     "legacyImplicitProtocolVersion": 1,
     "legacyRule": "AuthReq.client_protocol_version omitted or zero is treated as legacyImplicitProtocolVersion."
   },
