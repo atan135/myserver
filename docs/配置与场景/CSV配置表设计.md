@@ -716,3 +716,49 @@ pub trait CsvTableLoader: Sized {
 6. 二级索引按配置生成，不做全列自动索引
 
 如果这六点定下来，后续实现就比较直接了。
+
+## 主世界移动速度配置与下发契约（待实现）
+
+本节是移动速度改造的实施契约，不表示当前代码已完成。当前基线：服务端 `86ea8b846103dccc71c305518dfa55a0909a3704`，客户端 `7622303a1ca907c0cbcce7df7e8574c03df87dc8`。
+
+### 唯一配置与校验
+
+新增 `apps/game-server/csv/MovementConfig.csv`，使用现有两行表头和编译期生成器：
+
+```csv
+Id,BaseSpeedMetresPerSecond
+int,float
+1,2.0
+```
+
+`Id=1` 表示主世界 `movement_demo` 的基础速度。现有 SceneTable 管理场景几何和出生配置，不混入角色移动参数；现有 CharacterProgressTable 管理角色成长，不将演示房间速度混入成长。只允许这一个必需配置行，拒绝缺失、重复主键和未知 ID。速度单位为米/秒，合法范围为有限值 `0 < speed <= 100`；100 是协议与模拟的校验上限，不是默认速度。上限保证 20 Hz 下单步不超过 5 米，当前验收使用 2.0、1.0。无装备/Buff 计算，本轮实际速度等于基础速度。
+
+接入 `gameconfig/registry.rs` 的加载、行数统计、文件监控、增量 reload，业务校验放在 gameconfig 层；由 `RuntimeGameConfig::build` 构造版本化移动配置。不得增加独立文件监听或加载器。首次加载失败使配置 runtime 初始化失败；重载任一候选失败保留完整旧快照和版本，成功后原子发布新版本。日志包含表、字段、配置版本和失败原因，不记录每帧日志。
+
+### 房间实例与恢复
+
+`gameroom/factory.rs` 创建 movement_demo 时从同一个 `current_snapshot()` 提取速度和 `version`，传入 `MovementDemoLogic` 并固定；禁止在角色加入或 tick 时读取最新速度。场景的现有动态查询行为保持不变。角色生成和后加入角色均使用固定速度，`core/system/movement/sim.rs` 继续读取实体速度，以现有 20 Hz 推进。
+
+生效身份是当前存活房间对象及其配置快照，不是 character_id 或进房次数。固定公共主世界 `main_world` 的空房保留不会构成新房间；离开后再进入同一旧房间仍是旧值。只有真正新建房间才采用最新值，联调不能只靠反复进出固定主世界宣称新配置生效。
+
+`MovementDemoTransferLogicState` 增加必需的固定速度和配置版本，并升级 movement-demo 业务 transfer schema。实体内部 transfer 数据已有 speed；导入必须检查所有实体速度与导入的房间固定速度一致、速度合法、版本非零。不能用目标进程最新 CSV 速度判断源房间是否兼容，空房迁移也必须携带固定值。旧 schema 缺少配置时明确拒绝迁移，禁止猜测 4.0。重连使用原房间状态，角色重建仍用固定值；重复初始化不得覆盖存活角色或切换配置。
+
+### 玩家协议与会话
+
+现有 `EntityTransform` 没有速度；战斗角色的 int32 speed 不是移动协议，不能复用。给 `EntityTransform` 追加 `float speed_metres_per_second = 10`，在普通纠正、full sync、拒绝纠正和 `MovementRecoveryState.entities` 中统一携带实体实际速度。复用既有消息和发送时序，不新增 CSV 下载接口。room join 本身不必重复一份速度，客户端等待自己的完整权威实体初始化后才允许移动。配置版本主要用于服务端日志和 transfer 追踪，不作为两进程可比较的全局版本号。
+
+客户端适配将速度传到快照总线和本地移动 runtime，与 entry generation、scene_session_id、room_id、character_id 和当前 authority epoch 绑定。退出、重新绑定或断线恢复需要清除旧预测/输入历史；完整快照重建参数后才能恢复预测。重复相同快照幂等，已有房间参数不允许被迟到增量纠正改成另一速度；当前会话内速度变化视为契约错误并停止预测，等待可信完整恢复。旧连接/旧 generation 消息在进入快照总线前丢弃；不能仅凭固定 room_id 区分两次会话。缺失字段的 protobuf 零值、NaN、Inf、非正或越界值均视为无效，明确诊断并冻结移动，禁止硬编码回退。预测和纠正后未确认输入重放共享同一个已验证速度，保持方向归一化、停止语义和视觉插值。
+
+### 兼容、部署与回滚
+
+追加字段保持 protobuf wire 兼容，但旧客户端仍使用 4.0，业务上不兼容。将既有 `packages/proto/compatibility/version-policy.json` 及 Rust 同源策略的 current/minimum application protocol 一并提升到 2，客户端显式发送 2；旧客户端被新服以 `CLIENT_PROTOCOL_VERSION_TOO_OLD` 拒绝，新客户端连接旧服以 `CLIENT_PROTOCOL_VERSION_TOO_NEW` 拒绝。包头版本不变。同步 mock-client 和现有版本策略测试，禁止绕过鉴权版本门禁。
+
+先构建并验证两端，再协调本地服务端和客户端升级；混合新旧游戏服不进行 v2 房间迁移。回滚需要成对恢复服务端、客户端、CSV schema 和协议策略，排空新 schema 房间后再恢复旧版本；不能将新 transfer 快照导入旧二进制。运行中只回调 CSV 数值无需降级二进制，新房间应用回调值，旧房间保持快照。
+
+### 实施文件范围与验证入口
+
+阶段 2：服务端 `csv/MovementConfig.csv`、生成的 `src/csv_code`、`gameconfig`、`core/config_table/runtime.rs`、`gameroom/factory.rs`、`gameroom/movement_demo`、`core/system/movement/state.rs`、`room_policy.rs`、`packages/proto/game.proto`、协议版本策略及受影响的生成文件和测试。阶段 3：客户端 `project/vendor/myserver/proto/game.proto`、vendor README 的真实服务端提交/hash、协议版本适配和 codec 测试。阶段 4：`game/myserver` 快照转换和消息准入、`game/scenes/main_world_contract.rs`、`main_world_movement.rs`、快照总线及相关测试。仅同步实际受影响的 vendor 内容。
+
+服务端无根 Cargo workspace，从 `apps/game-server` 运行 `cargo check --locked`、`cargo test --locked`（可先按 config/movement/transfer 过滤）；build.rs 自动生成 CSV 和 protobuf。根目录 `npm run fmt:rust:check` 检查非生成 Rust；`npm run generate:proto`、`npm run check:proto:server`、`npm run check:client-protocol-version` 维护协议生成及兼容策略。客户端从 `project` 执行 `cargo fmt --check`、`cargo check --locked`、定向主世界移动测试，根目录使用 `scripts/build-entry.ps1 -Target desktop -Action check -Locked`；协议 crate 使用 `cargo test --locked -p myserver-protocol`。实际测试结果由后续阶段记录，本节未运行构建或测试。
+
+验收包括合法与非法 CSV、失败重载原子性、2.0 旧房间/后加入/重连/迁移保持旧值、1.0 新房间、缺失参数冻结、旧会话迟到隔离和预测重放一致性。低速视觉验收从客户端仓库根运行 `scripts/run_fast.ps1`，使用标准设备参数；真实服务启动、重启、依赖状态与可观察结果另行记录，不能以单测替代移动顺畅的人工观察。
