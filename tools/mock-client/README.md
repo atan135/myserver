@@ -868,3 +868,20 @@ case MESSAGE_TYPE.MY_MESSAGE_RES:
 - HTTP 公告服务 (`announce-service`, 公告场景需要)
 - 游戏服务器 (game-server)
 - 聊天服务器 (`chat-server`, 聊天与邮件通知场景需要)
+
+
+### 主世界移动速度配表本地探针
+
+在仓库根目录执行（会创建本地测试游客/角色并临时修改速度 CSV）：
+
+```powershell
+node tools/mock-client/src/movement-speed-config-probe.js --allow-local-csv-reload
+```
+
+仅连接 `127.0.0.1:3000` 正式 HTTP 登录/选角和 `127.0.0.1:14000` 的 game-proxy TCP fallback，绝不直连 game-server。先按 `scripts/dev-stack.ps1` 启动 Redis、NATS、PostgreSQL、auth、game、proxy **及 match-service**；registry 模式中 game-server readiness 依赖 match，`-WithoutMatch` 会导致 `NO_UPSTREAM_AVAILABLE`。探针读取 dev-stack 的 `logs/dev-stack/game-server.out.log`，剥离 ANSI 后仅提取本轮房间配置版本，不输出 ticket/access token/密码。
+
+初始 CSV 必须为提交的 2.0。A 使用固定 `main-world-public`（该房间才允许运行中后加入），已有 A 必须仍使用 2.0；B/C 使用唯一的新房间 ID，验证新建边界。流程为 A 2.0 位移/斜向/转向/停止 → CSV 1.0 重载 → A 后加入/重进/新 ticket 重连仍 2.0 → 新 B 1.0 → 非法 0 重载后新 C 保持 B 的有效版本 → B 切回 A → 版本 0/1/3 拒绝。每次位移按实际下发速度计算，浮点距离容差 0.005 米。
+
+正常完成或异常时恢复原 CSV，正常清理自身测试成员并关闭连接；SIGINT 尽力立即恢复 CSV。强制终止进程后须人工确认 CSV 已恢复 2.0，不能假定 finally 已执行。不重置数据库/Redis，不停止已有服务，不删除测试账号。测试期间不要和另一个操作者同时修改 CSV。
+
+该工具只验证真实服务端权威数值；不能代替 Bevy 的 KCP、预测/重放诊断和相机跟随/固定相机视觉验收。Bevy 仍统一从客户端根目录执行 `scripts/run_fast.ps1`。

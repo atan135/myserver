@@ -22,10 +22,9 @@ import { decodeByMessageType } from "../messages.js";
 // ---------------------------------------------------------------------------
 
 // Server constants (from MovementDemoLogic / SceneTable):
-//   speed       = 4.0 units/sec
+//   speed       = EntityTransform.speedMetresPerSecond (server CSV, metres/sec)
 //   spawn       = (2.0, 2.0) facing (1.0, 0.0)
 //   fps         = 20
-export const SERVER_SPEED = 4.0;
 export const SERVER_SPAWN_X = 2.0;
 export const SERVER_SPAWN_Y = 2.0;
 export const SERVER_FPS = 20;
